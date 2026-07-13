@@ -104,6 +104,44 @@ python serve.py --install-task      # 创建并立即启动
 python serve.py --uninstall-task    # 移除
 ```
 
+## 6. 爬虫：一键增量全网 / 历史补爬 / 定时
+
+### 6.1 页面手动触发（覆盖矩阵页 `/ui`）
+
+- **一键增量全网**：覆盖矩阵右上角按钮。对所有已启用采集的信息价源跑一次增量抓取（各地最新期次），再自动执行下载。
+- **补爬本年 / 补爬本月**：覆盖矩阵每年行「补爬本年」、每个未覆盖格子悬停出现的下载按钮「补爬本月」。按地区+期次回填历史数据（如北京 2024）。
+
+> 增量 vs 补爬：增量只抓“最新一期”；历史空缺（如某地 2024 整年）必须用补爬显式指定期次。
+
+### 6.2 定时自动化（Windows 任务计划）
+
+一次性 crawl cycle（调度 + 下载排空）脚本：`python -m app.crawl_cycle`
+
+```powershell
+# 增量：只跑到期的源
+python -m app.crawl_cycle
+# 强制：忽略到期判断，跑所有已启用源
+python -m app.crawl_cycle --force
+```
+
+> 必须在 `file_asset_service` 目录下运行（`app` 包可导入），脚本会自动加载仓库根 `.env`。
+
+注册为每天 08:00 自动跑（增量）：
+
+```powershell
+$py = "C:\Users\Administrator\AppData\Local\Programs\Python\Python314\python.exe"   # 换成你的 python
+$svc = "D:\大匠通\新指标云\data_lake_handoff\data_lake_handoff\file_asset_service"    # 换成你的路径
+schtasks /create /tn "cost-info-crawl-daily" `
+  /tr "cmd /c cd /d `"$svc`" && `"$py`" -m app.crawl_cycle" `
+  /sc daily /st 08:00 /rl HIGHEST /f
+# 立即测试一次
+schtasks /run /tn "cost-info-crawl-daily"
+# 移除
+schtasks /delete /tn "cost-info-crawl-daily" /f
+```
+
+> 注意：只有 `active + 已启用定时 + 已配采集适配器` 的源才会被抓取；其余种子源需先接入解析器。
+
 ---
 
 ## 日常同步（拉取中心台的最新迭代）

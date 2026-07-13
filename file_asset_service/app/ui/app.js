@@ -234,6 +234,7 @@ const state = {
   costInfoSources: [],
   coverageRows: [],
   storageAudit: { loading: false, error: "", data: null },
+  crawlBusy: false,
   selectedArchive: null,
   selectedFileId: null,
   mirrorExporting: false,
@@ -1860,6 +1861,91 @@ async function loadCoverageMatrix() {
   }
 }
 
+async function postJson(path, body) {
+  return requestJson(apiUrl(path), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+}
+
+async function runIncrementalCrawlAll() {
+  if (state.crawlBusy) return;
+  if (!window.confirm("将对所有已启用采集的信息价源执行一次增量抓取（抓各地最新期次）。确认执行？")) return;
+  state.crawlBusy = true;
+  showToast("增量全网：调度中…", "success");
+  renderAll();
+  try {
+    const scheduler = await postJson("/api/crawler/scheduler/run", {
+      dry_run: false,
+      force: true,
+      trigger: "coverage_ui_all",
+    });
+    const created = Number(scheduler.task_created || 0);
+    if (created > 0) {
+      await postJson("/api/crawler/worker/run", {
+        dry_run: false,
+        limit: 50,
+        trigger: "coverage_ui_all",
+      });
+    }
+    showToast(
+      `增量全网完成：新建任务 ${created} 个 · 进行中跳过 ${scheduler.task_skipped_pending || 0} · 未启用 ${scheduler.task_skipped_disabled || 0}`,
+      created ? "success" : "error"
+    );
+    await loadCoverageMatrix();
+  } catch (error) {
+    showToast(`增量全网失败：${error.message || error}`, "error");
+  } finally {
+    state.crawlBusy = false;
+    renderAll();
+  }
+}
+
+async function runCoverageBackfillUi({ regionCode, startPeriod, endPeriod, label }) {
+  if (state.crawlBusy) return;
+  if (!regionCode) {
+    showToast("补爬失败：未识别地区", "error");
+    return;
+  }
+  state.crawlBusy = true;
+  showToast(`补爬${label}：预检并下载中…`, "success");
+  renderAll();
+  try {
+    const backfill = await postJson("/api/crawler/coverage-backfill", {
+      region_code: regionCode,
+      start_period: startPeriod,
+      end_period: endPeriod,
+      dry_run: false,
+    });
+    const tasks = (backfill.tasks || []).filter((task) => task.source_id && task.batch_id);
+    for (const task of tasks) {
+      await postJson("/api/crawler/worker/run", {
+        dry_run: false,
+        source_id: task.source_id,
+        batch_id: task.batch_id,
+        limit: 1,
+        trigger: "coverage_backfill_ui",
+      });
+    }
+    const created = Number(backfill.task_created || 0);
+    const noSource = Number(backfill.task_skipped_no_source || 0);
+    const covered = Number(backfill.task_skipped_covered || 0);
+    const existing = Number(backfill.task_skipped_existing || 0);
+    const parts = [`新建 ${created} 个任务`];
+    if (covered) parts.push(`已覆盖跳过 ${covered}`);
+    if (existing) parts.push(`已有任务 ${existing}`);
+    if (noSource) parts.push(`无可用源 ${noSource}`);
+    showToast(`补爬${label}：${parts.join(" · ")}`, created ? "success" : "error");
+    await loadCoverageMatrix();
+  } catch (error) {
+    showToast(`补爬${label}失败：${error.message || error}`, "error");
+  } finally {
+    state.crawlBusy = false;
+    renderAll();
+  }
+}
+
 async function loadStorageAudit() {
   if (state.domain === "quota") return; // quota 使用专属统计，不加载全域 NAS 原件条
   state.storageAudit = { ...state.storageAudit, loading: true, error: "" };
@@ -2997,6 +3083,12 @@ function renderCoverageMatrixTable(rows) {
           <span>待核 ${escapeHtml(stats.pending)}</span>
           <span>缺失 ${escapeHtml(stats.missing)}</span>
         </div>
+        <div class="coverage-workbench-actions">
+          <button class="tool-button" type="button" data-action="crawl-scheduler-all" ${state.crawlBusy ? "disabled" : ""}>
+            <i data-lucide="radar"></i>
+            <span>${state.crawlBusy ? "采集中…" : "一键增量全网"}</span>
+          </button>
+        </div>
       </header>
       <div class="coverage-region-meta">
         <strong>${escapeHtml(activeRegion.name)}</strong>
@@ -3015,7 +3107,10 @@ function renderCoverageMatrixTable(rows) {
             .map(
               (year) => `
                 <tr>
-                  <th>${escapeHtml(year)}年</th>
+                  <th class="coverage-year-head">
+                    <span>${escapeHtml(year)}年</span>
+                    <button class="coverage-mini-btn" type="button" data-action="crawl-backfill-year" data-region="${escapeHtml(activeRegion.code)}" data-year="${escapeHtml(year)}" title="补爬 ${escapeHtml(year)} 全年" ${state.crawlBusy ? "disabled" : ""}>补爬本年</button>
+                  </th>
                   ${months.map((month) => renderCoveragePeriodCell(byPeriod.get(coveragePeriodValue(year, month)), month)).join("")}
                 </tr>
               `
@@ -3056,7 +3151,11 @@ function renderCoveragePeriodCell(row, month) {
     `business-${row.business_coverage_status}`,
     `source-${row.source_completeness_status}`,
   ].join(" ");
-  return `<td><span class="${escapeHtml(className)}" title="${escapeHtml(title)}">${escapeHtml(label)}</span></td>`;
+  const canBackfill = row.business_coverage_status !== "covered" && row.coverage_region_code;
+  const backfillBtn = canBackfill
+    ? `<button class="coverage-cell-btn" type="button" data-action="crawl-backfill-month" data-region="${escapeHtml(row.coverage_region_code)}" data-period="${escapeHtml(row.period)}" title="补爬 ${escapeHtml(row.period)}" ${state.crawlBusy ? "disabled" : ""}><i data-lucide="download-cloud"></i></button>`
+    : "";
+  return `<td><span class="${escapeHtml(className)}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>${backfillBtn}</td>`;
 }
 
 function renderCoverageMatrix() {
@@ -3751,6 +3850,23 @@ function handleClick(event) {
   if (action.dataset.action === "toggle-advanced-filters") {
     state.filterAdvancedOpen = !state.filterAdvancedOpen;
     renderFilters();
+  }
+  if (action.dataset.action === "crawl-scheduler-all") runIncrementalCrawlAll();
+  if (action.dataset.action === "crawl-backfill-year") {
+    runCoverageBackfillUi({
+      regionCode: action.dataset.region,
+      startPeriod: `${action.dataset.year}-01`,
+      endPeriod: `${action.dataset.year}-12`,
+      label: `${action.dataset.year}全年`,
+    });
+  }
+  if (action.dataset.action === "crawl-backfill-month") {
+    runCoverageBackfillUi({
+      regionCode: action.dataset.region,
+      startPeriod: action.dataset.period,
+      endPeriod: action.dataset.period,
+      label: action.dataset.period,
+    });
   }
   if (action.dataset.action === "open-upload") openManualUploadDialog();
   if (action.dataset.action === "edit-archive") openArchiveEditDialog(action.dataset.id);

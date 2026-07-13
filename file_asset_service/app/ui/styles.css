@@ -624,12 +624,79 @@ select:focus-visible {
 }
 
 .coverage-workbench-header {
-  height: 28px;
+  min-height: 28px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 10px;
+}
+
+.coverage-workbench-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.coverage-year-head {
+  white-space: nowrap;
+}
+
+.coverage-year-head span {
+  margin-right: 6px;
+}
+
+.coverage-mini-btn {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--blue);
+  border-radius: var(--radius);
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+
+.coverage-mini-btn:hover:not(:disabled) {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.coverage-mini-btn:disabled,
+.coverage-cell-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.coverage-year-month-table td {
+  position: relative;
+}
+
+.coverage-cell-btn {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--blue);
+  cursor: pointer;
+}
+
+.coverage-cell-btn i {
+  width: 12px;
+  height: 12px;
+}
+
+.coverage-year-month-table td:hover .coverage-cell-btn {
+  display: inline-flex;
 }
 
 .coverage-workbench-title {

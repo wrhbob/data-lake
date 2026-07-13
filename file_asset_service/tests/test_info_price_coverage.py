@@ -507,3 +507,44 @@ def test_coverage_matrix_normalizes_title_like_period_from_publish_date(db_sessi
     assert [row.period for row in rows] == ["2026-05"]
     assert rows[0].business_coverage_status == "covered"
     assert rows[0].source_completeness_status == "city_source_present"
+
+
+def test_municipality_source_registers_as_city_source(db_session):
+    # 直辖市源 publisher_scope=municipality，应被归一为市级源登记进覆盖目标，
+    # 否则覆盖矩阵 source_ids 为空、补爬会报 source_not_found（北京/天津/上海/重庆盲区）。
+    source = create_data_source(
+        db_session,
+        source_scope="platform_public",
+        tenant_code=None,
+        managed_by="platform",
+        source_type="info_price",
+        connector_type="source_registry",
+        name="北京市住房和城乡建设委员会-工程造价信息",
+        data_domain="cost_info",
+        region_code="110000",
+        city="北京市",
+        config={
+            "stable": {
+                "site_id": "cost_info.test.110000.municipality",
+                "domain_type": "cost_info",
+                "region_code": "110000",
+                "publisher_scope": "municipality",
+                "publisher_region_code": "110000",
+                "publisher_name": "北京市住房和城乡建设委员会",
+            },
+        },
+    )
+
+    rows = build_coverage_matrix(
+        db_session,
+        start_period="2024-01",
+        end_period="2024-01",
+        province_code="110000",
+    )
+
+    assert rows, "municipality target should be built"
+    row = rows[0]
+    assert row.coverage_region_code == "110000"
+    assert source.source_id in row.source_ids
+    assert row.city_source_count == 1
+    assert row.source_completeness_status == "city_source_present"

@@ -341,6 +341,12 @@ def _source_scope(source: DataSource | None) -> str | None:
     return None
 
 
+def _normalized_source_scope(source: DataSource | None) -> str | None:
+    # 直辖市(municipality)按市级源登记，使其能挂进覆盖目标并参与补爬。
+    scope = _source_scope(source)
+    return "city" if scope == "municipality" else scope
+
+
 def _province_code_for(region_code: str | None) -> str | None:
     if not region_code or len(region_code) < 2:
         return None
@@ -439,7 +445,7 @@ def _coverage_targets(sources: list[DataSource], *, province_code: str | None) -
                 {
                     "region_code": default_region_code,
                     "region_name": source.city or source.province or source.name,
-                    "requires_city_source": _source_scope(source) == "city",
+                    "requires_city_source": _normalized_source_scope(source) == "city",
                     "source_completeness_status": "pending_source_audit",
                     "coverage_note": source.remark,
                 }
@@ -469,7 +475,7 @@ def _coverage_targets(sources: list[DataSource], *, province_code: str | None) -
                     "registered_city_source_ids": [],
                 },
             )
-            scope = _source_scope(source)
+            scope = _normalized_source_scope(source)
             source_blocked = target.get("source_completeness_status") == "source_blocked"
             if not source_blocked and scope == "province":
                 _append_unique(entry["registered_province_source_ids"], source.source_id)
@@ -496,7 +502,7 @@ def _coverage_targets(sources: list[DataSource], *, province_code: str | None) -
                 entry["coverage_declarations"].append(
                     {
                         "source_id": source.source_id,
-                        "scope": _source_scope(source),
+                        "scope": _normalized_source_scope(source),
                         "periods": declared_periods,
                     }
                 )
