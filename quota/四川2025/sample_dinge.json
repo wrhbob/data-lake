@@ -1,0 +1,78 @@
+{
+ "_comment": "目标Schema样例 — 依据PDF第30页(书页31)人工视觉转录, 基价/消耗量以整册OCR复核为准",
+ "items": [
+  {
+   "code": "AA0001",
+   "name": "人工挖一般土方 一、二类土 深2m以内",
+   "name_parts": ["人工挖一般土方", "一、二类土", "深2m以内"],
+   "unit": "10m3",
+   "base_price": 208.98,
+   "labor_cost": 208.98,
+   "material_cost": null,
+   "machine_cost": null,
+   "work_content": "挖土、抛土、修理边底。",
+   "note": "",
+   "chapter_path": ["A.1 土石方工程", "A.1.1 土方工程"],
+   "list_code_prefix": "010101",
+   "page": 30,
+   "resources": [
+    {"category": "人工", "name": "混合工", "spec": "", "unit": "工日", "price": 115.0, "quantity": 1.817}
+   ]
+  },
+  {
+   "code": "AA0002",
+   "name": "人工挖一般土方 一、二类土 深4m以内",
+   "name_parts": ["人工挖一般土方", "一、二类土", "深4m以内"],
+   "unit": "10m3",
+   "base_price": 235.90,
+   "labor_cost": 235.90,
+   "material_cost": null,
+   "machine_cost": null,
+   "work_content": "挖土、抛土、修理边底。",
+   "note": "",
+   "chapter_path": ["A.1 土石方工程", "A.1.1 土方工程"],
+   "list_code_prefix": "010101",
+   "page": 30,
+   "resources": [
+    {"category": "人工", "name": "混合工", "spec": "", "unit": "工日", "price": 115.0, "quantity": 2.051}
+   ]
+  },
+  {
+   "code": "AA0003",
+   "name": "人工挖一般土方 三类土 深2m以内",
+   "name_parts": ["人工挖一般土方", "三类土", "深2m以内"],
+   "unit": "10m3",
+   "base_price": 322.62,
+   "labor_cost": 322.62,
+   "material_cost": null,
+   "machine_cost": null,
+   "work_content": "挖土、抛土、修理边底。",
+   "note": "",
+   "chapter_path": ["A.1 土石方工程", "A.1.1 土方工程"],
+   "list_code_prefix": "010101",
+   "page": 30,
+   "resources": [
+    {"category": "人工", "name": "混合工", "spec": "", "unit": "工日", "price": 115.0, "quantity": 2.805}
+   ]
+  },
+  {
+   "code": "AA0004",
+   "name": "人工挖一般土方 三类土 深4m以内",
+   "name_parts": ["人工挖一般土方", "三类土", "深4m以内"],
+   "unit": "10m3",
+   "base_price": 349.54,
+   "labor_cost": 349.54,
+   "material_cost": null,
+   "machine_cost": null,
+   "work_content": "挖土、抛土、修理边底。",
+   "note": "",
+   "chapter_path": ["A.1 土石方工程", "A.1.1 土方工程"],
+   "list_code_prefix": "010101",
+   "page": 30,
+   "resources": [
+    {"category": "人工", "name": "混合工", "spec": "", "unit": "工日", "price": 115.0, "quantity": 3.039}
+   ]
+  }
+ ],
+ "chapter_notes": []
+}

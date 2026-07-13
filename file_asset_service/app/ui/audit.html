@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>信息价审核台 v0.1</title>
+    <link rel="stylesheet" href="/ui-assets/styles.css" />
+    <script defer src="/ui-assets/audit.js"></script>
+  </head>
+  <body data-page="audit" data-role="audit-only">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">信息价下游 · 第二道门</p>
+        <h1>审核台</h1>
+      </div>
+      <div class="topbar-actions">
+        <a href="/ui">采集观测台</a>
+        <a href="/review">解析复核台</a>
+        <button id="refreshButton" type="button">刷新</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="notice">
+        审核是质检：判定本期数据能不能卖。审核台不提供任何直接改数据操作；
+        发现问题只能打回复核，并指定具体行和原因。
+      </section>
+
+      <section class="data-section">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">审核对象</p>
+            <h2>选择一份已提交审核的信息价</h2>
+          </div>
+          <select id="extractSelect" class="select-input" aria-label="审核对象"></select>
+        </div>
+      </section>
+
+      <section class="metrics">
+        <article class="metric metric-work">
+          <span>价格行</span>
+          <strong id="metricPriceRows">0</strong>
+        </article>
+        <article class="metric metric-error">
+          <span>画像状态</span>
+          <strong id="metricProfileStatus">阻断</strong>
+        </article>
+        <article class="metric metric-action">
+          <span>需复核</span>
+          <strong id="metricNeedsReview">0</strong>
+        </article>
+        <article class="metric metric-muted">
+          <span>与上期匹配率</span>
+          <strong id="metricPreviousRate">缺</strong>
+        </article>
+      </section>
+
+      <section class="layout">
+        <div class="primary-column">
+          <section class="bucket">
+            <div class="section-heading">
+              <h2>异常画像</h2>
+              <span class="status-pill">审核台独有</span>
+            </div>
+            <div class="notice compact-notice">缺上期基准，不能完成正式审核。</div>
+            <div id="anomalyProfile" class="row-list"></div>
+          </section>
+
+          <section class="bucket">
+            <div class="section-heading">
+              <h2>抽查样本</h2>
+              <span class="status-pill">抽查放行，不逐行重做复核</span>
+            </div>
+            <div id="sampleRows" class="row-list"></div>
+          </section>
+        </div>
+
+        <aside class="side-column">
+          <section class="bucket compact">
+            <div class="section-heading">
+              <h2>放行签名</h2>
+              <span id="releaseStatus" class="status-pill">禁止放行</span>
+            </div>
+            <p class="signature-warning">
+              放行即签名：本期价格表将进入发布池，可对外销售。v0.1 因缺上期基准禁止正式放行。
+            </p>
+            <div class="form-actions">
+              <button type="button" disabled>打回复核（指定行 + 原因）</button>
+              <button type="button" class="primary" disabled>审核签名放行</button>
+            </div>
+            <pre id="auditDetail">选择审核对象后显示质量画像。</pre>
+          </section>
+        </aside>
+      </section>
+    </main>
+  </body>
+</html>

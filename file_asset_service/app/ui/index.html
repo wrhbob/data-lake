@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>档案台 · 数据湖</title>
+    <link rel="icon" href="data:," />
+    <script>
+      window.__uiAssetBase = window.location.protocol === "file:" ? "./" : "/ui-assets/";
+      window.__uiAssetVersion = "20260711-quota-p0_5a-1";
+      document.write(`<link rel="stylesheet" href="${window.__uiAssetBase}styles.css?v=${window.__uiAssetVersion}" />`);
+    </script>
+    <script defer src="https://unpkg.com/lucide@latest"></script>
+    <script>
+      document.write(`<script defer src="${window.__uiAssetBase}app.js?v=${window.__uiAssetVersion}"><\/script>`);
+      document.write(`<script defer src="${window.__uiAssetBase}quota-api.js?v=${window.__uiAssetVersion}"><\/script>`);
+      document.write(`<script defer src="${window.__uiAssetBase}quota-compose.js?v=${window.__uiAssetVersion}"><\/script>`);
+      document.write(`<script defer src="${window.__uiAssetBase}quota-ui.js?v=${window.__uiAssetVersion}"><\/script>`);
+    </script>
+  </head>
+  <body>
+    <aside class="app-rail" aria-label="数据湖域导航">
+      <div class="rail-mark" title="数据湖">湖</div>
+      <nav class="rail-nav">
+        <button class="rail-button active" type="button" title="信息价" aria-label="信息价" data-domain="cost_info">
+          <i data-lucide="database"></i>
+        </button>
+        <button class="rail-button" type="button" title="招投标公告档案台" aria-label="招投标" data-domain="trading">
+          <i data-lucide="building-2"></i>
+        </button>
+        <button class="rail-button" type="button" title="政策法规档案台" aria-label="政策法规" data-domain="policy_regulation" data-domain-state="placeholder">
+          <i data-lucide="gavel"></i>
+          <span class="sr-only">该域待接入真实数据</span>
+        </button>
+        <button class="rail-button" type="button" title="图集规范档案台" aria-label="图集规范" data-domain="standard_atlas" data-domain-state="placeholder">
+          <i data-lucide="book-open"></i>
+          <span class="sr-only">该域待接入真实数据</span>
+        </button>
+        <button class="rail-button" type="button" title="清单定额档案台" aria-label="清单定额" data-domain="quota">
+          <i data-lucide="layers"></i>
+        </button>
+      </nav>
+      <button class="rail-button rail-bottom" type="button" title="设置" aria-label="设置">
+        <i data-lucide="settings"></i>
+      </button>
+    </aside>
+
+    <main class="app-shell">
+      <header class="page-header">
+        <div>
+          <p id="pageEyebrow" class="eyebrow">Layer 0 · Projection Archive</p>
+          <h1 id="pageTitle">信息价档案台</h1>
+          <span id="archiveTotalBadge" class="title-count"></span>
+        </div>
+        <div class="header-actions">
+          <label class="search-box">
+            <i data-lucide="search"></i>
+            <input id="globalSearch" type="search" placeholder="搜索地区、期次、来源、文件名" autocomplete="off" />
+          </label>
+          <button class="icon-button" type="button" title="刷新档案列表" data-action="refresh">
+            <i data-lucide="rotate-ccw"></i>
+          </button>
+          <button class="primary-button" type="button" title="人工上传(爬虫够不着的源)" data-action="open-upload">
+            <i data-lucide="upload-cloud"></i>
+            <span>新增档案</span>
+          </button>
+        </div>
+      </header>
+
+      <section class="workspace-tabs" aria-label="信息价工作视图">
+        <button class="workspace-tab active" type="button" data-view-mode="archives">
+          <i data-lucide="list"></i>
+          <span>档案列表</span>
+        </button>
+        <button class="workspace-tab" type="button" data-view-mode="coverage">
+          <i data-lucide="table-2"></i>
+          <span>覆盖矩阵</span>
+        </button>
+      </section>
+
+      <section id="filterPanel" class="filter-panel" aria-label="多维检索漏斗"></section>
+
+      <section class="result-bar" aria-label="列表控制">
+        <div>
+          <strong id="resultCount">0</strong>
+          <span id="resultSummary">份档案</span>
+        </div>
+        <div class="view-actions">
+          <span id="apiState" class="api-state">未加载</span>
+          <span id="domainPill" class="domain-pill">domain_type: cost_info</span>
+          <button class="icon-button active" type="button" title="列表视图">
+            <i data-lucide="list"></i>
+          </button>
+        </div>
+      </section>
+
+      <section id="storageAuditBar" class="storage-audit-bar" aria-label="NAS 原件健康"></section>
+
+      <section id="archiveTableCard" class="archive-table-card" aria-label="档案列表">
+        <table class="archive-table">
+          <thead>
+            <tr id="archiveHead"></tr>
+          </thead>
+          <tbody id="archiveRows"></tbody>
+        </table>
+        <div id="emptyState" class="empty-state" hidden>
+          <i data-lucide="folder-search"></i>
+          <strong>没有匹配的档案</strong>
+          <span id="emptyHint">调整筛选条件或等待采集落档。</span>
+          <button id="emptyUploadButton" class="secondary-button" type="button" title="人工上传(爬虫够不着的源)" data-action="open-upload" hidden>
+            <i data-lucide="upload-cloud"></i>
+            <span>上传该市文件</span>
+          </button>
+        </div>
+      </section>
+
+      <section id="coverageMatrixCard" class="coverage-matrix-card" aria-label="覆盖矩阵" hidden>
+        <div id="coverageMatrixRows" class="coverage-matrix-wrap"></div>
+        <div id="coverageEmptyState" class="empty-state" hidden>
+          <i data-lucide="table-2"></i>
+          <strong>没有匹配的覆盖单元</strong>
+          <span>调整地区、期次或状态筛选。</span>
+        </div>
+      </section>
+    </main>
+
+    <main id="quotaShell" class="quota-shell" aria-label="清单定额档案台" hidden></main>
+
+    <section id="quotaComposeModal" class="modal-backdrop quota-modal" aria-label="清单定额补录" aria-hidden="true" hidden></section>
+
+    <section id="quotaUploadModal" class="modal-backdrop quota-modal" aria-label="定额 PDF 上传" aria-hidden="true" hidden></section>
+
+    <div id="quotaToast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <div id="manualUploadToast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <section id="manualUploadModal" class="modal-backdrop" aria-label="补录原件" aria-hidden="true" hidden>
+      <form id="manualUploadForm" class="manual-upload-dialog">
+        <header class="manual-upload-header">
+          <div>
+            <p id="manualUploadEyebrow" class="eyebrow">Manual Upload</p>
+            <h2 id="manualUploadTitle">新增档案</h2>
+          </div>
+          <button class="icon-button" type="button" title="关闭" data-action="close-upload">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+
+        <div class="manual-upload-body">
+          <div id="manualUploadTarget" class="manual-upload-target" hidden></div>
+
+          <div id="manualUploadFileSection">
+            <label class="file-picker" id="manualUploadDropzone">
+              <input id="manualUploadFile" type="file" accept=".pdf,.xls,.xlsx,.zip,.rar,.7z,.jpg,.jpeg,.png" multiple />
+              <span>
+                <strong id="manualUploadFileLabel">选择文件</strong>
+                <small id="manualUploadFileName">可多选：PDF / Excel / zip / 图片，或拖拽到此处</small>
+              </span>
+            </label>
+            <div id="manualUploadFileList" class="manual-upload-filelist"></div>
+          </div>
+
+          <div class="manual-upload-grid" id="manualUploadGrid">
+            <label>
+              价格适用地区
+              <div id="manualRegionCascader" class="region-cascader"></div>
+            </label>
+            <label>
+              期次
+              <div id="manualPeriodPicker" class="period-picker"></div>
+            </label>
+            <label>
+              发布主体
+              <input id="manualPublisher" type="text" placeholder="选地区后自动带出，可改" />
+            </label>
+            <label>
+              标题
+              <input id="manualTitle" type="text" />
+            </label>
+            <label>
+              操作人
+              <input id="manualUploader" type="text" placeholder="留空则记系统操作" />
+            </label>
+          </div>
+
+          <p id="manualUploadNote" class="manual-upload-note"></p>
+          <div id="manualUploadError" class="form-error" aria-live="polite"></div>
+        </div>
+
+        <footer class="manual-upload-actions">
+          <button class="secondary-button" type="button" data-action="close-upload">取消</button>
+          <button id="manualUploadSubmit" class="primary-button" type="button" data-action="submit-upload">
+            <i data-lucide="upload-cloud"></i>
+            <span>提交入湖</span>
+          </button>
+        </footer>
+      </form>
+    </section>
+
+    <section id="viewer" class="viewer" aria-label="档案详情工作台" aria-hidden="true">
+      <header class="viewer-toolbar">
+        <div class="viewer-title">
+          <button class="icon-button dark" type="button" title="退出预览" data-action="close-viewer">
+            <i data-lucide="arrow-left"></i>
+          </button>
+          <span id="viewerIcon" class="file-avatar"></span>
+          <div>
+            <strong id="viewerFileName">-</strong>
+            <p id="viewerMeta">-</p>
+          </div>
+        </div>
+        <div id="viewerTools" class="viewer-tools"></div>
+        <div class="viewer-actions">
+          <button id="viewerInfoToggle" class="ghost-button dark" type="button" data-action="toggle-viewer-info" aria-expanded="false">
+            <i data-lucide="panel-right-open"></i>
+            <span>展开信息</span>
+          </button>
+          <a id="viewerDownload" class="icon-button dark" href="#" title="下载原件" download>
+            <i data-lucide="download"></i>
+          </a>
+          <button class="ghost-button dark" type="button" data-action="close-viewer">退出预览</button>
+        </div>
+      </header>
+
+      <div id="viewerBody" class="viewer-body single-file info-closed">
+        <aside id="viewerSidebar" class="viewer-sidebar">
+          <div class="attachment-heading">
+            <strong>附件池</strong>
+            <span id="attachmentSummary">0 个文件</span>
+          </div>
+          <div id="attachmentList" class="attachment-list"></div>
+        </aside>
+        <section id="viewerCanvas" class="viewer-canvas"></section>
+        <aside id="viewerForm" class="archive-form">
+          <div class="form-heading">
+            <div>
+              <p class="eyebrow">Archive Metadata</p>
+              <h2 id="formTitle">标准档案</h2>
+            </div>
+            <span id="formStatus" class="status-badge">-</span>
+          </div>
+
+          <form id="metadataForm">
+            <label>
+              档案标题
+              <input id="fieldTitle" type="text" />
+            </label>
+            <div class="form-grid">
+              <label>
+                region_code
+                <input id="fieldRegionCode" type="text" />
+              </label>
+              <label>
+                publish_date
+                <input id="fieldPublishDate" type="date" />
+              </label>
+            </div>
+            <div class="form-grid">
+              <label>
+                domain_type
+                <input id="fieldDomainType" readonly />
+              </label>
+              <label>
+                channel_type
+                <input id="fieldChannel" readonly />
+              </label>
+            </div>
+            <label>
+              business_key
+              <input id="fieldBusinessKey" readonly />
+            </label>
+            <div id="metadataFields" class="metadata-fields"></div>
+          </form>
+
+          <div class="form-note">
+            档案级元数据确认后，原件保持只读留存，可作为下游交接资料。
+          </div>
+
+          <div class="form-actions">
+            <button class="secondary-button" type="button" data-action="mark-failed">异常打回</button>
+            <button class="warning-button" type="button" data-action="mark-quarantine">标记隔离</button>
+            <button class="secondary-button" type="button" data-action="mark-ready">待移交</button>
+            <button class="primary-button" type="button" data-action="archive-current">确认归档</button>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </body>
+</html>

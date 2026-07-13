@@ -1,0 +1,31 @@
+[project]
+name = "file-asset-service"
+version = "0.1.0"
+description = "L0 file asset service for KPI Cloud refactor v0.1"
+requires-python = ">=3.11"
+dependencies = [
+    "boto3>=1.34",
+    "fastapi>=0.115",
+    "openpyxl>=3.1",
+    "pydantic>=2.7",
+    "psycopg[binary]>=3.2",
+    "python-multipart>=0.0.9",
+    "sqlalchemy>=2.0",
+    "uvicorn[standard]>=0.30",
+    "xlrd>=2.0.1",
+    "mammoth>=1.8",
+]
+
+[project.optional-dependencies]
+test = [
+    "httpx>=0.27",
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["app*", "quota_lake*"]
+exclude = ["data*", "deploy*", "tests*"]

@@ -1,0 +1,37 @@
+# ── 敏感配置（含真实密钥/口令，切勿提交）──────────────────────────
+.env
+*.env.local
+file_asset_service/.env
+# 本地 IDE / 助手配置（可能含明文命令与口令）
+.claude/settings.local.json
+
+# ── Python 虚拟环境 / 缓存 ──────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── 运行时数据库 / 日志 / 临时产物 ──────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+*.log
+_tmp_*.py
+cq_live.txt
+cq_out.txt
+
+# ── 大体积二进制 / 生成物（另行归档到 NAS/MinIO）───────────────
+# 定额 PDF 原书
+quota/**/*.pdf
+# 解析 manifest 生成物
+manifests/
+
+# ── OS / IDE ────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+*.swp

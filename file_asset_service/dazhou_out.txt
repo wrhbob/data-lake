@@ -1,0 +1,39 @@
+{
+  "run_id": "run_20260709080451_b13141db",
+  "trigger": "manual",
+  "run_started_at": "2026-07-09T08:04:51.223082+00:00",
+  "worker_id": "DESKTOP-1TS13S8:3696",
+  "run_finished_at": "2026-07-09T08:04:51.404102+00:00",
+  "duration_seconds": 0,
+  "run_type": "worker",
+  "data_domain": "cost_info",
+  "leased_count": 0,
+  "done_count": 0,
+  "retry_count": 0,
+  "dead_letter_count": 0,
+  "archive_created_count": 0,
+  "duplicate_count": 0,
+  "failed_count": 0,
+  "manual_recovery_count": 0,
+  "per_source": [],
+  "file_processing_rows_created": 0,
+  "file_processing_passes": true,
+  "red_line_violations": [],
+  "health_status": "healthy",
+  "health_reason": "",
+  "summary": {
+    "leased_count": 0,
+    "done_count": 0,
+    "retry_count": 0,
+    "dead_letter_count": 0,
+    "archive_created_count": 0,
+    "duplicate_count": 0,
+    "failed_count": 0,
+    "manual_recovery_count": 0
+  },
+  "red_lines": {
+    "file_processing_rows_created": 0,
+    "file_processing_passes": true,
+    "violations": []
+  }
+}

@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>爬虫调度台 · 数据湖</title>
+    <link rel="icon" href="data:," />
+    <script>
+      window.__uiAssetBase = window.location.protocol === "file:" ? "./" : "/ui-assets/";
+      window.__uiAssetVersion = "20260711-crawler-debug-2";
+      document.write(`<link rel="stylesheet" href="${window.__uiAssetBase}styles.css?v=${window.__uiAssetVersion}" />`);
+    </script>
+    <script defer src="https://unpkg.com/lucide@latest"></script>
+    <script>
+      document.write(`<script defer src="${window.__uiAssetBase}crawler.js?v=${window.__uiAssetVersion}"><\/script>`);
+    </script>
+  </head>
+  <body>
+    <div id="debugBanner" style="background:#ffeb3b;padding:8px 16px;font:14px monospace;display:none"></div>
+    <script>
+      (function(){
+        var banner = document.getElementById("debugBanner");
+        function log(msg) { banner.style.display="block"; banner.textContent += msg + " | "; }
+        window.addEventListener("error", function(e){ log("JS ERROR: "+e.message+" @ "+e.filename+":"+e.lineno); });
+        window.addEventListener("unhandledrejection", function(e){ log("PROMISE REJECT: "+e.reason); });
+        var origFetch = window.fetch;
+        window.fetch = function(url, opts) {
+          log("FETCH: "+url);
+          return origFetch.call(window, url, opts).then(function(r) {
+            log("FETCH "+url+" -> "+r.status+(r.ok?" OK":" FAIL"));
+            return r;
+          }).catch(function(e) {
+            log("FETCH "+url+" -> NETWORK ERROR: "+e.message);
+            throw e;
+          });
+        };
+        log("SCRIPT LOADED");
+      })();
+    </script>
+    <aside class="app-rail" aria-label="数据湖导航">
+      <a class="rail-button" href="/ui" title="档案台" aria-label="档案台">
+        <i data-lucide="database"></i>
+      </a>
+      <a class="rail-button active" href="/crawler" title="爬虫调度台" aria-label="爬虫调度台">
+        <i data-lucide="radar"></i>
+      </a>
+      <a class="rail-button rail-bottom" href="/docs" title="API 文档" aria-label="API 文档">
+        <i data-lucide="braces"></i>
+      </a>
+    </aside>
+
+    <main id="crawler-console" class="app-shell crawler-console">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">SPEC-026 · SOURCE REGISTRY / SCHEDULER / WORKER</p>
+          <h1>爬虫调度台</h1>
+        </div>
+        <div class="header-actions">
+          <label class="search-box crawler-search">
+            <i data-lucide="search"></i>
+            <input id="sourceSearch" type="search" placeholder="搜索站点、地区、adapter" autocomplete="off" />
+          </label>
+          <button class="icon-button" type="button" title="刷新调度台" data-action="refresh">
+            <i data-lucide="rotate-ccw"></i>
+          </button>
+          <button class="secondary-button" type="button" data-action="scheduler-dry-run">
+            <i data-lucide="scan-search"></i>
+            <span>调度预检</span>
+          </button>
+          <button class="primary-button" type="button" data-action="scheduler-run">
+            <i data-lucide="calendar-plus"></i>
+            <span>生成到期任务</span>
+          </button>
+        </div>
+      </header>
+
+      <section class="crawler-metrics" aria-label="调度概览">
+        <article class="crawler-metric">
+          <span>Source Registry</span>
+          <strong id="metricSources">0</strong>
+        </article>
+        <article class="crawler-metric">
+          <span>到期站点</span>
+          <strong id="metricDue">0</strong>
+        </article>
+        <article class="crawler-metric">
+          <span>待跑任务</span>
+          <strong id="metricPending">0</strong>
+        </article>
+        <article class="crawler-metric">
+          <span>运行中</span>
+          <strong id="metricRunning">0</strong>
+        </article>
+        <article class="crawler-metric">
+          <span>失败任务</span>
+          <strong id="metricFailed">0</strong>
+        </article>
+      </section>
+
+      <section class="result-bar crawler-result-bar" aria-label="调度台状态">
+        <div>
+          <strong id="sourceCount">0</strong>
+          <span>个信息价站点</span>
+        </div>
+        <div class="view-actions">
+          <span id="crawlerApiState" class="api-state">未加载</span>
+          <span id="selectedSourcePill" class="domain-pill">全部站点</span>
+        </div>
+      </section>
+
+      <section id="parseManifestStatus" class="parse-manifest-status" aria-label="数据湖解析 Manifest 状态"></section>
+
+      <section class="crawler-panel coverage-console-panel" aria-label="覆盖矩阵补采工作台">
+        <header class="crawler-panel-header coverage-console-header">
+          <div>
+            <strong>覆盖矩阵补采</strong>
+            <span>按地区和期次补数据，完成后刷新覆盖矩阵</span>
+          </div>
+          <div class="coverage-console-controls">
+            <label>
+              <span>地区</span>
+              <input id="coverageRegionCode" type="text" value="110000" list="coverageRegionOptions" autocomplete="off" />
+              <datalist id="coverageRegionOptions"></datalist>
+            </label>
+            <label>
+              <span>年份</span>
+              <select id="coverageYear"></select>
+            </label>
+            <label>
+              <span>起始</span>
+              <input id="coverageStartPeriod" type="month" value="2026-01" />
+            </label>
+            <label>
+              <span>截止</span>
+              <input id="coverageEndPeriod" type="month" value="2026-12" />
+            </label>
+            <button class="secondary-button" type="button" data-action="load-coverage">
+              <i data-lucide="table-2"></i>
+              <span>加载矩阵</span>
+            </button>
+            <button class="secondary-button" type="button" data-action="coverage-range-dry-run">
+              <i data-lucide="scan-search"></i>
+              <span>补采预检</span>
+            </button>
+            <button class="primary-button" type="button" data-action="coverage-range-backfill">
+              <i data-lucide="download-cloud"></i>
+              <span>补采下载</span>
+            </button>
+          </div>
+        </header>
+        <div id="coverageMatrixSummary" class="coverage-console-summary"></div>
+        <div id="coverageMatrixRows" class="coverage-matrix-wrap crawler-coverage-wrap"></div>
+      </section>
+
+      <section class="crawler-grid">
+        <section class="crawler-panel source-panel" aria-label="Source Registry">
+          <header class="crawler-panel-header">
+            <div>
+              <strong>Source Registry</strong>
+              <span>字段预留五域，当前只跑 cost_info</span>
+            </div>
+            <button class="secondary-button" type="button" data-action="clear-selection">全部站点</button>
+          </header>
+          <div class="crawler-table-wrap">
+            <table class="crawler-table source-table">
+              <thead>
+                <tr>
+                  <th>站点</th>
+                  <th>地区</th>
+                  <th>Adapter</th>
+                  <th>调度</th>
+                  <th>任务</th>
+                  <th>最近</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="sourceRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="crawler-panel report-panel" aria-label="Run Report">
+          <header class="crawler-panel-header">
+            <div>
+              <strong>Run Report</strong>
+              <span>stdout JSON，本轮不落表</span>
+            </div>
+            <button class="icon-button" type="button" title="清空报告" data-action="clear-report">
+              <i data-lucide="x"></i>
+            </button>
+          </header>
+          <pre id="runReport" class="run-report">等待操作</pre>
+        </section>
+      </section>
+
+      <section class="crawler-panel parse-manifest-panel" aria-label="解析阻断清单">
+        <header class="crawler-panel-header">
+          <div>
+            <strong>解析 Manifest</strong>
+            <span>NAS 数据湖后续解析前置字段</span>
+          </div>
+          <button class="secondary-button" type="button" data-action="reload-manifest">
+            <i data-lucide="refresh-cw"></i>
+            <span>刷新 Manifest</span>
+          </button>
+        </header>
+        <div class="crawler-table-wrap">
+          <table class="crawler-table parse-manifest-table">
+            <thead>
+              <tr>
+                <th>对象</th>
+                <th>文件名</th>
+                <th>地区 / 期次</th>
+                <th>缺字段</th>
+                <th>来源</th>
+              </tr>
+            </thead>
+            <tbody id="parseManifestRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="crawler-panel task-panel" aria-label="最近任务">
+        <header class="crawler-panel-header">
+          <div>
+            <strong>最近任务</strong>
+            <span id="taskScopeLabel">全部站点</span>
+          </div>
+          <button class="secondary-button" type="button" data-action="reload-tasks">
+            <i data-lucide="list-restart"></i>
+            <span>刷新任务</span>
+          </button>
+        </header>
+        <div class="crawler-table-wrap">
+          <table class="crawler-table task-table">
+            <thead>
+              <tr>
+                <th>任务</th>
+                <th>站点</th>
+                <th>状态</th>
+                <th>计数</th>
+                <th>尝试</th>
+                <th>时间</th>
+                <th>错误</th>
+              </tr>
+            </thead>
+            <tbody id="taskRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

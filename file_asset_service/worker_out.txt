@@ -1,0 +1,60 @@
+{
+  "run_id": "run_20260709080150_e8cf18e9",
+  "trigger": "manual",
+  "run_started_at": "2026-07-09T08:01:50.800445+00:00",
+  "worker_id": "DESKTOP-1TS13S8:28780",
+  "run_finished_at": "2026-07-09T08:01:55.253879+00:00",
+  "duration_seconds": 4,
+  "run_type": "worker",
+  "data_domain": "cost_info",
+  "leased_count": 2,
+  "done_count": 2,
+  "retry_count": 0,
+  "dead_letter_count": 0,
+  "archive_created_count": 0,
+  "duplicate_count": 6,
+  "failed_count": 0,
+  "manual_recovery_count": 0,
+  "per_source": [
+    {
+      "source_id": "e9d367ad-5221-4348-980b-29a2008b753d",
+      "site_id": "cost_info.bj.zjw.main",
+      "adapter_kind": "beijing_pdf",
+      "status": "done",
+      "archive_created": 0,
+      "duplicates": 3,
+      "failed": 0,
+      "early_stopped": true
+    },
+    {
+      "source_id": "f9ae27c4-7830-4c48-acb8-43347d2d3846",
+      "site_id": "cost_info.sh.ciac.info_price",
+      "adapter_kind": "shanghai_excel",
+      "status": "done",
+      "archive_created": 0,
+      "duplicates": 3,
+      "failed": 0,
+      "early_stopped": true
+    }
+  ],
+  "file_processing_rows_created": 0,
+  "file_processing_passes": true,
+  "red_line_violations": [],
+  "health_status": "healthy",
+  "health_reason": "",
+  "summary": {
+    "leased_count": 2,
+    "done_count": 2,
+    "retry_count": 0,
+    "dead_letter_count": 0,
+    "archive_created_count": 0,
+    "duplicate_count": 6,
+    "failed_count": 0,
+    "manual_recovery_count": 0
+  },
+  "red_lines": {
+    "file_processing_rows_created": 0,
+    "file_processing_passes": true,
+    "violations": []
+  }
+}

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>Test</title></head>
+<body>
+<h1>API Test</h1>
+<pre id="result">Loading...</pre>
+<script>
+(async () => {
+  const el = document.getElementById("result");
+  try {
+    const r = await fetch("/api/crawler/sources");
+    el.textContent = "Status: " + r.status + " ok=" + r.ok;
+    if (r.ok) {
+      const data = await r.json();
+      el.textContent += "\nCount: " + data.length;
+      el.textContent += "\nFirst: " + (data[0]?.name || "N/A");
+    } else {
+      el.textContent += "\n" + await r.text();
+    }
+  } catch(e) {
+    el.textContent = "Error: " + e.message;
+  }
+})();
+</script>
+</body>
+</html>

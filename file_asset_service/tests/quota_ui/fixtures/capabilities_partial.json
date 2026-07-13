@@ -1,0 +1,11 @@
+{
+  "features": {
+    "stats": "ready",
+    "facets": "unavailable",
+    "archives": "unavailable",
+    "reconciliation": "ready",
+    "publicationSets": "unavailable",
+    "coverage": "unavailable",
+    "compose": "unavailable"
+  }
+}

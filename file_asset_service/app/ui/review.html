@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>信息价解析复核台 v0.1</title>
+    <link rel="stylesheet" href="/ui-assets/styles.css" />
+    <script defer src="/ui-assets/review.js"></script>
+  </head>
+  <body data-page="review">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">信息价下游 · 第一道门</p>
+        <h1>解析复核台</h1>
+      </div>
+      <div class="topbar-actions">
+        <a href="/ui">采集观测台</a>
+        <a href="/audit">审核台</a>
+        <button id="refreshButton" type="button">刷新</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="notice">
+        复核是加工：把系统抽取结果改对，再提交审核。v0.1 只读观测真实解析结果；
+        材料匹配、原文页码/行号和复核写库在 v0.2 接入。待匹配材料的正式动作包含确认、换、登记新品种。
+      </section>
+
+      <section class="data-section">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">解析批次</p>
+            <h2>选择一份已解析信息价</h2>
+          </div>
+          <select id="extractSelect" class="select-input" aria-label="解析批次"></select>
+        </div>
+      </section>
+
+      <section class="metrics">
+        <article class="metric metric-work">
+          <span>抽取价格行</span>
+          <strong id="metricTotalRows">0</strong>
+        </article>
+        <article class="metric metric-action">
+          <span>待人工</span>
+          <strong id="metricManualRows">0</strong>
+        </article>
+        <article class="metric metric-muted">
+          <span>已自动确认</span>
+          <strong id="metricAutoRows">0</strong>
+        </article>
+        <article class="metric metric-muted">
+          <span>页面角色</span>
+          <strong>复核</strong>
+        </article>
+      </section>
+
+      <section class="layout">
+        <div class="primary-column">
+          <section class="bucket">
+            <div class="section-heading">
+              <h2>待匹配材料</h2>
+              <span class="status-pill">只展示待人工项</span>
+            </div>
+            <div id="materialMatchList" class="row-list"></div>
+          </section>
+
+          <section class="bucket">
+            <div class="section-heading">
+              <h2>低置信抽取</h2>
+              <span class="status-pill">带原文定位</span>
+            </div>
+            <div id="lowConfidenceList" class="row-list"></div>
+          </section>
+
+          <section class="bucket">
+            <div class="section-heading">
+              <h2>底部质量门</h2>
+              <span id="qualityGateNote" class="status-pill">v0.1 只读</span>
+            </div>
+            <div class="form-actions">
+              <button type="button" disabled>打回重解析</button>
+              <button type="button" class="primary" disabled>确认并提交审核</button>
+            </div>
+          </section>
+        </div>
+
+        <aside class="side-column">
+          <section class="bucket compact">
+            <div class="section-heading">
+              <h2>原文对照</h2>
+              <span id="sourceLocationMeta" class="status-pill">待选择</span>
+            </div>
+            <pre id="sourcePreview">点击待人工项，查看解析行与原文定位。v0.1 暂以工作表行号替代 PDF 页/行定位。</pre>
+          </section>
+        </aside>
+      </section>
+    </main>
+  </body>
+</html>
