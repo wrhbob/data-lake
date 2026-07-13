@@ -1,0 +1,127 @@
+# 部署手册（同事照做即可）
+
+信息价 / 清单定额档案台 + 爬虫控制台的部署步骤。目标：在一台 Windows 机器上把控制台跑起来，
+并连上**共享的 PostgreSQL + MinIO**，看到和中心台一样的数据。
+
+> 关键前提：数据（档案元数据在 PostgreSQL、原件文件在 MinIO）**不在代码仓库里**。
+> 本机必须能访问同一套 PG 和 MinIO，才能看到真实数据。
+
+---
+
+## 0. 前置条件
+
+- **Python 3.12+**（中心台用的是 3.14）
+- **Git**
+- 能访问共享的 **PostgreSQL**（默认端口 `15432`，库 `file_asset`）
+- 能访问共享的 **MinIO**（默认端口 `9000`，桶 `cost-raw` 等）
+- 向中心台负责人索取：PG 密码、MinIO access/secret、Basic Auth 账号密码
+
+---
+
+## 1. 克隆代码
+
+```powershell
+git clone https://github.com/tms424001/data-lake.git
+cd data-lake
+```
+
+## 2. 创建虚拟环境并安装依赖
+
+在**仓库根目录**执行：
+
+```powershell
+python -m venv file_asset_service\.venv
+file_asset_service\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+> `requirements.txt` 里的 `uvicorn[standard]` 会自动带入 `python-dotenv`（用于加载 `.env`），无需单独安装。
+
+## 3. 配置 .env（在仓库根目录）
+
+复制模板并填入真实值（此文件**不会进 git**，含密钥务必只留本地）：
+
+```powershell
+copy .env.example .env
+notepad .env
+```
+
+至少填写以下几项（向中心台负责人索取真实值）：
+
+```dotenv
+# 共享 PostgreSQL（元数据）
+FILE_ASSET_DATABASE_URL=postgresql+psycopg://file_asset:<password>@<nas-host>:15432/file_asset
+
+# 共享 MinIO（原件文件）
+FILE_ASSET_S3_ENDPOINT_URL=http://<nas-host>:9000
+FILE_ASSET_S3_ACCESS_KEY_ID=<access-key>
+FILE_ASSET_S3_SECRET_ACCESS_KEY=<secret-key>
+FILE_ASSET_S3_REGION_NAME=us-east-1
+
+# 桶名（保持默认即可）
+FILE_ASSET_RAW_BUCKET=cost-raw
+FILE_ASSET_EXTRACT_BUCKET=cost-extract
+FILE_ASSET_REPORT_BUCKET=cost-report
+
+# 控制台监听地址/端口
+FILE_ASSET_HOST=127.0.0.1
+FILE_ASSET_PORT=8010
+
+# 网页登录（Basic Auth）。留空则不需要登录
+FILE_ASSET_BASIC_AUTH=<用户名>:<密码>
+
+# worker 身份（每台机器必须唯一，若这台也跑采集）
+FILE_ASSET_WORKER_ID=<本机唯一标识>
+```
+
+> 想让局域网同事也能访问这台控制台：把 `FILE_ASSET_HOST` 改为 `0.0.0.0`。
+
+## 4. 启动
+
+激活 venv 后，进入 `file_asset_service` 目录用 `serve.py` 启动
+（`serve.py` 会自动加载根目录 `.env`、等待数据库就绪、再拉起 uvicorn）：
+
+```powershell
+cd file_asset_service
+python serve.py
+```
+
+看到 `[serve] starting uvicorn on 127.0.0.1:8010` 即成功。
+
+- 控制台首页：`http://127.0.0.1:8010/ui`
+- 爬虫台：`http://127.0.0.1:8010/crawler`
+- 健康检查：`http://127.0.0.1:8010/healthz`（免登录）
+
+> ⚠️ **不要**裸跑 `uvicorn ...`。必须用 `serve.py`，否则 `.env` 不会加载，
+> 会回落到本地 `127.0.0.1:9000` + SQLite，数据不进 NAS。
+
+## 5.（可选）开机自启
+
+把控制台注册为登录时自启的计划任务：
+
+```powershell
+python serve.py --install-task      # 创建并立即启动
+python serve.py --uninstall-task    # 移除
+```
+
+---
+
+## 日常同步（拉取中心台的最新迭代）
+
+```powershell
+git pull
+# 若依赖有更新：
+file_asset_service\.venv\Scripts\Activate.ps1; pip install -r requirements.txt
+# 重启服务：结束旧的 python serve.py 进程后重新 python serve.py
+```
+
+---
+
+## 常见问题
+
+- **页面数字为空 / 看不到档案**：多半是 `.env` 没连上共享 PG/MinIO，或裸跑了 uvicorn。检查 `FILE_ASSET_DATABASE_URL`、`FILE_ASSET_S3_ENDPOINT_URL` 是否指向共享服务。
+- **`[serve] waiting for database ...` 一直重试**：本机连不到 PG，检查网络/端口/密码。
+- **端口被占用**：改 `.env` 的 `FILE_ASSET_PORT`，或结束占用 `8010` 的进程。
+- **日志**：`file_asset_service/console_service.log`。
+
+更详细的运行说明见 `docs/windows_startup_guide.md`。
