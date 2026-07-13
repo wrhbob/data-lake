@@ -3077,17 +3077,15 @@ function renderCoverageMatrixTable(rows) {
         <div class="coverage-workbench-title">
           <span class="section-marker" aria-hidden="true"></span>
           <strong>${escapeHtml(coverageMatrixTitle(rows))}</strong>
+          <button class="coverage-crawl-all-btn" type="button" data-action="crawl-scheduler-all" ${state.crawlBusy ? "disabled" : ""}>
+            <i data-lucide="radar"></i>
+            <span>${state.crawlBusy ? "采集中…" : "一键增量全网"}</span>
+          </button>
         </div>
         <div class="coverage-workbench-summary">
           <span>覆盖 ${escapeHtml(stats.covered)}/${escapeHtml(stats.total)}</span>
           <span>待核 ${escapeHtml(stats.pending)}</span>
           <span>缺失 ${escapeHtml(stats.missing)}</span>
-        </div>
-        <div class="coverage-workbench-actions">
-          <button class="tool-button" type="button" data-action="crawl-scheduler-all" ${state.crawlBusy ? "disabled" : ""}>
-            <i data-lucide="radar"></i>
-            <span>${state.crawlBusy ? "采集中…" : "一键增量全网"}</span>
-          </button>
         </div>
       </header>
       <div class="coverage-region-meta">

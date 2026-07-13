@@ -632,11 +632,35 @@ select:focus-visible {
   margin-bottom: 10px;
 }
 
-.coverage-workbench-actions {
+.coverage-crawl-all-btn {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  margin-left: auto;
+  gap: 6px;
+  margin-left: 10px;
+  padding: 3px 10px;
+  border: 1px solid var(--blue);
+  border-radius: var(--radius);
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.coverage-crawl-all-btn:hover:not(:disabled) {
+  background: var(--blue);
+  color: #fff;
+}
+
+.coverage-crawl-all-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.coverage-crawl-all-btn i {
+  width: 14px;
+  height: 14px;
 }
 
 .coverage-year-head {
