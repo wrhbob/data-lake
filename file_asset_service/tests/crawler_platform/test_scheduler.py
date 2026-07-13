@@ -99,6 +99,40 @@ def test_scheduler_skips_disabled_pending_verify_and_policy_disabled_sources(db_
     assert db_session.query(CollectionTask).count() == 1
 
 
+def _make_no_adapter_source(db_session, *, site_id):
+    return create_data_source(
+        db_session,
+        source_scope="platform_public",
+        tenant_code=None,
+        managed_by="platform",
+        source_type="info_price",
+        connector_type="source_registry",
+        name=f"{site_id} 无适配器",
+        data_domain="cost_info",
+        region_code="510600",
+        config={
+            "registry_schema_version": "source_registry.v1",
+            "stable": {"site_id": site_id, "domain_type": "cost_info", "region_code": "510600"},
+            "parser": {"active_parser_version": None, "parsers": {}},
+        },
+        schedule_policy={"enabled": True, "frequency": "daily", "timezone": "Asia/Shanghai", "max_attempts": 3},
+        status="active",
+    )
+
+
+def test_scheduler_skips_source_without_adapter(db_session):
+    # 无采集适配器的源不入队：否则 worker 领到只能失败/重试。一键增量全网从源头规避。
+    make_source(db_session, site_id="cost_info.sc.good")
+    _make_no_adapter_source(db_session, site_id="cost_info.sc.noadapter")
+
+    report = run_scheduler(db_session, now=datetime(2026, 6, 26, 2, 0, tzinfo=UTC), force=True)
+
+    assert report["task_skipped_no_adapter"] == 1
+    assert report["source_due"] == 1
+    assert report["task_created"] == 1
+    assert db_session.query(CollectionTask).count() == 1
+
+
 def test_scheduler_is_idempotent_when_pending_task_exists(db_session):
     source = make_source(db_session)
     create_collection_task(

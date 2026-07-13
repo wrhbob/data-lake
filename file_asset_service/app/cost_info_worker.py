@@ -435,7 +435,30 @@ def run_worker(
     object_store = storage or get_object_store()
 
     for task, source in task_rows:
-        adapter = source_adapter_kind(source)
+        # 适配器解析放进 per-task 保护：单个源缺失适配器不得让整批 worker/run 崩溃、
+        # 也不得把同批其它任务搁死在 running（否则一键增量全网会因某个无适配器源而 400）。
+        try:
+            adapter = source_adapter_kind(source)
+        except Exception as exc:
+            status, manual_recovery = _handle_task_failure(task, source, exc, db, started_at)
+            if status == "retry":
+                report.retry_count += 1
+            else:
+                report.dead_letter_count += 1
+            if manual_recovery:
+                report.manual_recovery_count += 1
+            report.per_source.append(
+                {
+                    "source_id": source.source_id,
+                    "site_id": source_site_id(source),
+                    "adapter_kind": None,
+                    "status": status,
+                    "error_code": task.error_code,
+                    "attempt": task.attempt,
+                    "max_attempts": task.max_attempts,
+                }
+            )
+            continue
         covered_period = _task_period_already_covered(task, source, db)
         if covered_period:
             if not dry_run:

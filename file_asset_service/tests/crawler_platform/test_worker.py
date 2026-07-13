@@ -161,6 +161,31 @@ def test_worker_dispatches_mock_adapter(db_session):
     assert report.per_source[0]["adapter_kind"] == "mock"
 
 
+def test_worker_isolates_source_without_adapter_from_batch(db_session):
+    # 无采集适配器的源不得让整批 worker/run 崩溃，也不得把同批其它任务搁死在 running。
+    bad = make_source(db_session, site_id="cost_info.sc.noadapter", adapter_kind=None)
+    good = make_source(db_session, site_id="cost_info.sc.good", adapter_kind="mock")
+    make_task(db_session, bad)
+    make_task(db_session, good)
+
+    report = run_worker(
+        db_session,
+        limit=10,
+        now=datetime(2026, 6, 26, 2, 0, tzinfo=UTC),
+        storage=FakeObjectStore(),
+    )
+
+    assert report.leased_count == 2
+    statuses = {row["source_id"]: row["status"] for row in report.per_source}
+    assert statuses[good.source_id] == "done"
+    assert statuses[bad.source_id] in ("retry", "dead_letter")
+
+    good_task = db_session.query(CollectionTask).filter_by(source_id=good.source_id).one()
+    assert good_task.status == "done"
+    bad_task = db_session.query(CollectionTask).filter_by(source_id=bad.source_id).one()
+    assert bad_task.status != "running"
+
+
 def test_worker_early_stop_on_three_duplicates(db_session):
     source = make_source(db_session, adapter_kind="mock")
     task = make_task(db_session, source)

@@ -201,6 +201,7 @@ def run_scheduler(
         "task_created": 0,
         "task_skipped_pending": 0,
         "task_skipped_disabled": len(disabled_sources),
+        "task_skipped_no_adapter": 0,
         "dry_run": dry_run,
         "health_status": "healthy",
         "sources": [],
@@ -209,6 +210,11 @@ def run_scheduler(
     for source in active_sources:
         policy = source.schedule_policy or {}
         if policy.get("enabled") is not True:
+            continue
+        # 无采集适配器的源不入队：否则 worker 领到后无法处理，任务只能失败/重试，
+        # 徒增噪声（一键增量全网从源头避免产生跑不了的任务）。
+        if adapter_kind(source) is None:
+            report["task_skipped_no_adapter"] += 1
             continue
         if not is_due(source, session, now=current, force=force):
             continue
