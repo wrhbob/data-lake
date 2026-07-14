@@ -242,7 +242,7 @@ class ArchiveFromIngestEventCreate(BaseModel):
 class ArchiveFileResponse(BaseModel):
     archive_file_id: str
     archive_id: str
-    file_id: str
+    file_id: str | None = None
     file_role: str
     representation_role: str
     item_id: str | None = None
@@ -267,7 +267,7 @@ class ArchiveFileResponse(BaseModel):
 
 
 class ArchivePrimaryFileResponse(BaseModel):
-    file_id: str
+    file_id: str | None = None
     file_name: str
     file_role: str
     mirror_status: str | None = None
