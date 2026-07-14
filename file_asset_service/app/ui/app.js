@@ -4,7 +4,7 @@ const domainConfigs = {
     resultUnit: "份信息价档案",
     searchPlaceholder: "搜索地区、期次、来源、文件名",
     filters: [
-      { key: "publisher_org", label: "发布机构", kind: "publisherOrg", hideWhenNoOptions: true },
+      { key: "publisher_org", label: "发布机构", kind: "publisherOrg", hideWhenNoOptions: true, advanced: true },
       { key: "region_code", label: "地区", kind: "region", metadataKeys: ["province_raw", "city_raw"] },
       { key: "period_year", label: "年份", kind: "year", metadataKeys: ["period_raw", "period_start", "publish_date_raw"] },
       { key: "period_month", label: "月份", kind: "month", metadataKeys: ["period_raw", "period_start", "publish_date_raw"] },
@@ -1687,6 +1687,8 @@ async function submitManualSupplement(archive, entries) {
   const batchId = `supplement-${archive.archive_id}-${Date.now()}`;
   let attachedCount = 0;
   let skippedCount = 0;
+  const skippedFiles = [];
+  const attachedFiles = [];
 
   for (const entry of entries) {
     const formData = new FormData();
@@ -1711,6 +1713,7 @@ async function submitManualSupplement(archive, entries) {
       res.existing_archives.some((a) => a.archive_id === archive.archive_id);
     if (alreadyHere) {
       skippedCount += 1;
+      skippedFiles.push(entry.file.name);
       continue;
     }
     const role = entry.role === "main_document" ? "attachment" : entry.role;
@@ -1726,9 +1729,10 @@ async function submitManualSupplement(archive, entries) {
       }),
     });
     attachedCount += 1;
+    attachedFiles.push(entry.file.name);
   }
 
-  return { attachedCount, skippedCount };
+  return { attachedCount, skippedCount, skippedFiles, attachedFiles };
 }
 
 async function submitManualEdit(item, values) {
@@ -1836,6 +1840,30 @@ function coveragePeriodParams() {
   return { start_period: `${range.startYear}-01`, end_period: `${range.endYear}-12` };
 }
 
+async function fetchWithRetry(url, options = {}) {
+  const timeout = options.timeout || 30000;
+  const retries = options.retries ?? 3;
+  const baseDelay = options.baseDelay || 1000;
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      if (!response.ok) throw new Error(await response.text());
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (attempt < retries && (error.name === "AbortError" || error.name === "TypeError" || error.message.includes("NetworkError"))) {
+        await new Promise((resolve) => setTimeout(resolve, baseDelay * Math.pow(2, attempt)));
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError;
+}
+
 function coverageMatrixUrl() {
   return apiUrl("/api/info-price/coverage-matrix", {
     ...coveragePeriodParams(),
@@ -1849,12 +1877,11 @@ async function loadCoverageMatrix() {
   state.error = "";
   renderApiState();
   try {
-    const response = await fetch(coverageMatrixUrl());
-    if (!response.ok) throw new Error(await response.text());
+    const response = await fetchWithRetry(coverageMatrixUrl(), { timeout: 30000, retries: 3 });
     state.coverageRows = await response.json();
   } catch (error) {
     state.coverageRows = [];
-    state.error = error.message || "覆盖矩阵加载失败";
+    state.error = error.name === "AbortError" ? "覆盖矩阵加载超时，请刷新重试" : (error.message || "覆盖矩阵加载失败");
   } finally {
     state.loading = false;
     renderAll();
@@ -1871,7 +1898,7 @@ async function postJson(path, body) {
 
 async function runIncrementalCrawlAll() {
   if (state.crawlBusy) return;
-  if (!window.confirm("将对所有已启用采集的信息价源执行一次增量抓取（抓各地最新期次）。确认执行？")) return;
+  if (!window.confirm("将对所有已启用采集的信息价源执行一次增量抓取（抓各地最新期次）。系统会根据文件 SHA-256 指纹自动跳过重复文件。确认执行？")) return;
   state.crawlBusy = true;
   showToast("增量全网：调度中…", "success");
   renderAll();
@@ -1882,64 +1909,29 @@ async function runIncrementalCrawlAll() {
       trigger: "coverage_ui_all",
     });
     const created = Number(scheduler.task_created || 0);
+    let workerSummary = {};
     if (created > 0) {
-      await postJson("/api/crawler/worker/run", {
+      const workerResult = await postJson("/api/crawler/worker/run", {
         dry_run: false,
         limit: 50,
         trigger: "coverage_ui_all",
       });
+      workerSummary = workerResult.summary || {};
     }
-    showToast(
-      `增量全网完成：新建任务 ${created} 个 · 进行中跳过 ${scheduler.task_skipped_pending || 0} · 未启用 ${scheduler.task_skipped_disabled || 0}`,
-      created ? "success" : "error"
-    );
+    const dupCount = Number(workerSummary.duplicate_count || 0);
+    const archiveCount = Number(workerSummary.archive_created_count || 0);
+    const failCount = Number(workerSummary.failed_count || 0);
+    const parts = [`新建任务 ${created} 个`];
+    if (archiveCount) parts.push(`新建档案 ${archiveCount}`);
+    if (dupCount) parts.push(`重复跳过 ${dupCount}`);
+    if (failCount) parts.push(`异常 ${failCount}`);
+    parts.push(`进行中跳过 ${scheduler.task_skipped_pending || 0}`);
+    parts.push(`未启用 ${scheduler.task_skipped_disabled || 0}`);
+    const toastKind = failCount ? "error" : !archiveCount && dupCount ? "warning" : "success";
+    showToast(`增量全网完成：${parts.join(" · ")}`, toastKind);
     await loadCoverageMatrix();
   } catch (error) {
     showToast(`增量全网失败：${error.message || error}`, "error");
-  } finally {
-    state.crawlBusy = false;
-    renderAll();
-  }
-}
-
-async function runCoverageBackfillUi({ regionCode, startPeriod, endPeriod, label }) {
-  if (state.crawlBusy) return;
-  if (!regionCode) {
-    showToast("补爬失败：未识别地区", "error");
-    return;
-  }
-  state.crawlBusy = true;
-  showToast(`补爬${label}：预检并下载中…`, "success");
-  renderAll();
-  try {
-    const backfill = await postJson("/api/crawler/coverage-backfill", {
-      region_code: regionCode,
-      start_period: startPeriod,
-      end_period: endPeriod,
-      dry_run: false,
-    });
-    const tasks = (backfill.tasks || []).filter((task) => task.source_id && task.batch_id);
-    for (const task of tasks) {
-      await postJson("/api/crawler/worker/run", {
-        dry_run: false,
-        source_id: task.source_id,
-        batch_id: task.batch_id,
-        limit: 1,
-        trigger: "coverage_backfill_ui",
-      });
-    }
-    const created = Number(backfill.task_created || 0);
-    const noSource = Number(backfill.task_skipped_no_source || 0);
-    const covered = Number(backfill.task_skipped_covered || 0);
-    const existing = Number(backfill.task_skipped_existing || 0);
-    const parts = [`新建 ${created} 个任务`];
-    if (covered) parts.push(`已覆盖跳过 ${covered}`);
-    if (existing) parts.push(`已有任务 ${existing}`);
-    if (noSource) parts.push(`无可用源 ${noSource}`);
-    showToast(`补爬${label}：${parts.join(" · ")}`, created ? "success" : "error");
-    await loadCoverageMatrix();
-  } catch (error) {
-    showToast(`补爬${label}失败：${error.message || error}`, "error");
   } finally {
     state.crawlBusy = false;
     renderAll();
@@ -2286,7 +2278,7 @@ function renderManualUploadModal() {
   const eyebrows = { create: "Manual Upload", supplement: "Attach Files", edit: "Manual Metadata" };
   const notes = {
     create: "提交后将入湖并排队解析（状态：待解析）。原件优先解析，可同时上传封面/附件。",
-    supplement: "文件作为补充挂入该档案，不改档案元数据；已在档的重复文件会自动跳过。",
+    supplement: "文件作为补充挂入该档案，不改档案元数据；系统会根据文件 SHA-256 指纹自动检测重复，已在档的重复文件自动跳过，不会重复上传。",
     edit: "只修改地区/期次/发布主体/标题，不改文件；保存会重算 business_key 并过去重闸。",
   };
   const submitLabels = { create: "提交入湖", supplement: "提交补充", edit: "保存" };
@@ -2336,8 +2328,8 @@ function renderManualUploadModal() {
   refreshIcons();
 }
 
-function showToast(message, kind = "success") {
-  state.toast = { message, kind };
+function showToast(message, kind = "success", duration = 5000) {
+  state.toast = { message, kind, duration };
   renderToast();
 }
 
@@ -2349,10 +2341,13 @@ function renderToast() {
   toast.textContent = state.toast.message || "";
   if (state.toast.message) {
     window.clearTimeout?.(state.toast.timer);
-    state.toast.timer = window.setTimeout?.(() => {
-      state.toast = { message: "", kind: "success" };
-      renderToast();
-    }, 3200);
+    const dur = state.toast.duration ?? 5000;
+    if (dur > 0) {
+      state.toast.timer = window.setTimeout?.(() => {
+        state.toast = { message: "", kind: "success" };
+        renderToast();
+      }, dur);
+    }
   }
 }
 
@@ -2514,9 +2509,15 @@ async function handleManualUploadSubmit(event) {
     } else if (mode === "supplement") {
       if (!entries.length) throw new Error("请至少选择一个文件。");
       const result = await submitManualSupplement(state.manualUpload.archive, entries);
-      const parts = [`挂入 ${result.attachedCount} 个`];
-      if (result.skippedCount) parts.push(`跳过 ${result.skippedCount} 个重复`);
-      showToast(`补充完成：${parts.join("、")}。`, "success");
+      const parts = [];
+      if (result.attachedCount) parts.push(`挂入 ${result.attachedCount} 个`);
+      if (result.skippedCount) {
+        const names = result.skippedFiles.slice(0, 3).map((n) => `「${n}」`).join("、");
+        const more = result.skippedFiles.length > 3 ? ` 等${result.skippedFiles.length}个` : "";
+        parts.push(`跳过重复：${names}${more}`);
+      }
+      const noNew = result.attachedCount === 0;
+      showToast(`补充完成：${parts.join("；")}。`, noNew ? "error" : result.skippedCount ? "warning" : "success");
     } else {
       if (!entries.length) throw new Error("请至少选择一个文件。");
       if (values.region_code && isRegionWithoutSource(values.region_code)) {
@@ -3107,7 +3108,6 @@ function renderCoverageMatrixTable(rows) {
                 <tr>
                   <th class="coverage-year-head">
                     <span>${escapeHtml(year)}年</span>
-                    <button class="coverage-mini-btn" type="button" data-action="crawl-backfill-year" data-region="${escapeHtml(activeRegion.code)}" data-year="${escapeHtml(year)}" title="补爬 ${escapeHtml(year)} 全年" ${state.crawlBusy ? "disabled" : ""}>补爬本年</button>
                   </th>
                   ${months.map((month) => renderCoveragePeriodCell(byPeriod.get(coveragePeriodValue(year, month)), month)).join("")}
                 </tr>
@@ -3149,11 +3149,7 @@ function renderCoveragePeriodCell(row, month) {
     `business-${row.business_coverage_status}`,
     `source-${row.source_completeness_status}`,
   ].join(" ");
-  const canBackfill = row.business_coverage_status !== "covered" && row.coverage_region_code;
-  const backfillBtn = canBackfill
-    ? `<button class="coverage-cell-btn" type="button" data-action="crawl-backfill-month" data-region="${escapeHtml(row.coverage_region_code)}" data-period="${escapeHtml(row.period)}" title="补爬 ${escapeHtml(row.period)}" ${state.crawlBusy ? "disabled" : ""}><i data-lucide="download-cloud"></i></button>`
-    : "";
-  return `<td><span class="${escapeHtml(className)}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>${backfillBtn}</td>`;
+  return `<td><span class="${escapeHtml(className)}" title="${escapeHtml(title)}">${escapeHtml(label)}</span></td>`;
 }
 
 function renderCoverageMatrix() {
@@ -3850,22 +3846,6 @@ function handleClick(event) {
     renderFilters();
   }
   if (action.dataset.action === "crawl-scheduler-all") runIncrementalCrawlAll();
-  if (action.dataset.action === "crawl-backfill-year") {
-    runCoverageBackfillUi({
-      regionCode: action.dataset.region,
-      startPeriod: `${action.dataset.year}-01`,
-      endPeriod: `${action.dataset.year}-12`,
-      label: `${action.dataset.year}全年`,
-    });
-  }
-  if (action.dataset.action === "crawl-backfill-month") {
-    runCoverageBackfillUi({
-      regionCode: action.dataset.region,
-      startPeriod: action.dataset.period,
-      endPeriod: action.dataset.period,
-      label: action.dataset.period,
-    });
-  }
   if (action.dataset.action === "open-upload") openManualUploadDialog();
   if (action.dataset.action === "edit-archive") openArchiveEditDialog(action.dataset.id);
   if (action.dataset.action === "supplement-archive") openManualSupplementDialog(action.dataset.id);

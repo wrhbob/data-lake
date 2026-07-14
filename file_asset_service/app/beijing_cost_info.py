@@ -10,6 +10,7 @@ from urllib.parse import unquote, urljoin, urlsplit
 from sqlalchemy.orm import Session
 
 from app.archive_rules import build_cost_info_business_key
+from app.normalization import normalize_key_text
 from app.sichuan_pdf_cost_info import discover_cost_info_attachments
 from app.source_adapter import (
     SourceRegistryHttpClient,
@@ -149,16 +150,22 @@ class UrllibBeijingCostInfoClient(SourceRegistryHttpClient):
 
 def list_beijing_cost_info_issues(client: BeijingCostInfoClient, *, parser: dict) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    seen: set[str] = set()
+    seen_url: set[str] = set()
+    seen_period_title: set[tuple[str, str]] = set()
     for list_url in _list_urls(parser):
         html = client.get_text(list_url)
         parser_state = _BeijingIssueListParser(base_url=list_url, parser=parser)
         parser_state.feed(html)
         for row in parser_state.rows:
-            key = _row_source_item_key(row)
-            if key in seen:
+            url_key = _row_source_item_key(row)
+            if url_key in seen_url:
                 continue
-            seen.add(key)
+            pt_key = _row_period_title_key(row, parser)
+            if pt_key is not None and pt_key in seen_period_title:
+                continue
+            seen_url.add(url_key)
+            if pt_key is not None:
+                seen_period_title.add(pt_key)
             rows.append(row)
     return rows
 
@@ -468,6 +475,19 @@ def _row_detail_url(row: dict) -> str:
 
 def _row_source_item_key(row: dict) -> str:
     return str(row.get("source_item_id") or _row_detail_url(row))
+
+
+def _row_period_title_key(row: dict, parser: dict) -> tuple[str, str] | None:
+    period = str(row.get("period") or _period_from_title(_row_title(row), parser=parser) or "")
+    title = _normalize_title_for_dedup(_row_title(row) or "")
+    if not period or not title:
+        return None
+    return (period, title)
+
+
+def _normalize_title_for_dedup(title: str) -> str:
+    t = re.sub(r"(\d{4})年(\d)月", r"\1年0\2月", title)
+    return normalize_key_text(t)
 
 
 def _row_attachments(row: dict) -> list[dict[str, object]]:

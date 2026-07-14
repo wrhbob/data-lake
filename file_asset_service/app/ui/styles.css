@@ -1859,6 +1859,12 @@ a.rail-button {
   color: var(--red);
 }
 
+.toast-warning {
+  border-color: #ffe58f;
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
 .viewer {
   position: fixed;
   inset: 0;

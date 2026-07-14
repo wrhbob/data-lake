@@ -4,10 +4,10 @@ from dataclasses import dataclass
 import re
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.archive_rules import metadata_value
-from app.models import Archive, DataSource
+from app.models import Archive, ArchiveFile, DataSource
 
 
 ACTIVE_ARCHIVE_STATUSES = {"pending_tag", "collected", "archived", "ready_for_governance"}
@@ -357,6 +357,7 @@ def _active_cost_info_archives(session: Session) -> list[Archive]:
     return list(
         session.scalars(
             select(Archive)
+            .options(selectinload(Archive.files).selectinload(ArchiveFile.file_asset))
             .where(Archive.domain_type == "cost_info")
             .where(Archive.status.in_(ACTIVE_ARCHIVE_STATUSES))
             .where(Archive.is_current.is_(True))
