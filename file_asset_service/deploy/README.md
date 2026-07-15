@@ -16,7 +16,7 @@ docker compose up -d minio
 Initialize or migrate the catalog schema once from any machine that can reach the NAS PostgreSQL:
 
 ```bash
-export FILE_ASSET_DATABASE_URL='postgresql+psycopg://file_asset:<password>@<nas-host>:15432/file_asset'
+export FILE_ASSET_DATABASE_URL='postgresql+psycopg://file_asset:<password>@djtsoft.x3322.net:5433/file_asset'
 python - <<'PY'
 from app.database import init_db
 init_db()

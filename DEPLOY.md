@@ -12,7 +12,7 @@
 
 - **Python 3.12+**（中心台用的是 3.14）
 - **Git**
-- 能访问共享的 **PostgreSQL**（默认端口 `15432`，库 `file_asset`）
+- 能访问共享的 **PostgreSQL**（当前公网入口端口 `5433`，库 `file_asset`）
 - 能访问共享的 **MinIO**（默认端口 `9000`，桶 `cost-raw` 等）
 - 向中心台负责人索取：PG 密码、MinIO access/secret、Basic Auth 账号密码
 
@@ -50,7 +50,7 @@ notepad .env
 
 ```dotenv
 # 共享 PostgreSQL（元数据）
-FILE_ASSET_DATABASE_URL=postgresql+psycopg://file_asset:<password>@<nas-host>:15432/file_asset
+FILE_ASSET_DATABASE_URL=postgresql+psycopg://file_asset:<password>@djtsoft.x3322.net:5433/file_asset
 
 # 共享 MinIO（原件文件）
 FILE_ASSET_S3_ENDPOINT_URL=http://<nas-host>:9000
