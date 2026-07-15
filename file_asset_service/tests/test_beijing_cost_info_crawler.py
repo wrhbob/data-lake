@@ -105,6 +105,36 @@ def test_beijing_list_parser_keeps_main_issue_and_filters_reference_price_rows()
     ]
 
 
+def test_beijing_list_parser_follows_official_history_page_until_requested_months_found():
+    page_two_url = "https://zjw.beijing.gov.cn/bjjs/gczj14/zjxx/gczjxxj64/5b39e933-2.shtml"
+    client = FakeBeijingCostInfoClient(
+        texts={
+            BEIJING_ENTRY_URL: "",
+            BEIJING_MORE_URL: """
+            <ul><li><a href="/202407.pdf">2024年07月北京工程造价信息</a><span>2024-07-24</span></li></ul>
+            <a onclick="queryArticleByCondition(this,'/bjjs/gczj14/zjxx/gczjxxj64/5b39e933-2.shtml')">2</a>
+            <a onclick="queryArticleByCondition(this,'/bjjs/gczj14/zjxx/gczjxxj64/5b39e933-3.shtml')">3</a>
+            """,
+            page_two_url: """
+            <ul><li><a href="/202401.pdf">2024年01月北京工程造价信息</a><span>2024-01-25</span></li></ul>
+            """,
+        }
+    )
+    config = beijing_cost_info_source_config()
+    parser = {
+        **config["parser"]["parsers"][BEIJING_COST_INFO_PARSER_VERSION],
+        "min_period": "2024-01",
+        "_history_pagination": True,
+        "_history_page_limit": 8,
+        "_requested_periods": ["2024-01"],
+    }
+
+    rows = list_beijing_cost_info_issues(client, parser=parser)
+
+    assert [row["period"] for row in rows] == ["2024-07", "2024-01"]
+    assert page_two_url in client.texts
+
+
 def test_beijing_direct_pdf_ingests_layer0_archive_without_processing(db_session):
     pdf_url = "https://zjw.beijing.gov.cn/bjjs/resource/cms/article/743943530/744045772/2026062214251496508.pdf"
     client = FakeBeijingCostInfoClient(

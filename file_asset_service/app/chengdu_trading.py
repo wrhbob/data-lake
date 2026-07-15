@@ -353,8 +353,10 @@ def run_chengdu_trading_channels(
     as_of_date: str | date | None = None,
     start_date: str | date | None = None,
     end_date: str | date | None = None,
+    stop_on_existing: bool = True,
 ) -> dict[str, object]:
     source = require_data_source(session, source_id, domain_type="trading")
+    resolved_source_id = source.source_id
     config = source.config or chengdu_trading_source_config()
     parser = config["parser"]["parsers"][CHENGDU_TRADING_PARSER_VERSION]
 
@@ -392,14 +394,14 @@ def run_chengdu_trading_channels(
         ingest=lambda summary: ingest_chengdu_trading_notice(
             session,
             storage,
-            source_id=source.source_id,
+            source_id=resolved_source_id,
             client=client,
             summary=summary,
             actor_id=actor_id,
         ),
         on_ingest_error=lambda summary, exc: _record_chengdu_ingest_failure(
             session,
-            source_id=source.source_id,
+            source_id=resolved_source_id,
             actor_id=actor_id,
             summary=summary,
             exc=exc,
@@ -408,6 +410,7 @@ def run_chengdu_trading_channels(
         page_size=page_size,
         max_items_per_channel=max_items_per_channel,
         as_of_date=as_of_date,
+        stop_on_existing=stop_on_existing,
     )
 
 
@@ -441,6 +444,10 @@ def _record_chengdu_ingest_failure(
     summary: ChengduNoticeSummary,
     exc: Exception,
 ) -> dict[str, object]:
+    # A failed SQL flush leaves the session unusable until rollback.  The
+    # channel runner deliberately handles individual notice failures, so it
+    # must restore the session before writing the audit event and continuing.
+    session.rollback()
     failed_at = utcnow().isoformat()
     if isinstance(exc, ChengduAttachmentDownloadError):
         payload = {

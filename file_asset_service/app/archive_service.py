@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
@@ -424,20 +424,31 @@ def _serialize_archive_file(
 
 
 def _archive_summary_rows(session: Session, archives: list[Archive], *, mirror: FileMirror | None = None) -> list[dict[str, object]]:
+    if not archives:
+        return []
+
+    archive_ids = [archive.archive_id for archive in archives]
+    files_by_archive: dict[str, list[tuple[ArchiveFile, FileAsset | None]]] = {}
+    for mounted, asset in session.execute(
+        select(ArchiveFile, FileAsset)
+        .outerjoin(FileAsset, ArchiveFile.file_id == FileAsset.file_id)
+        .where(ArchiveFile.archive_id.in_(archive_ids))
+        .order_by(ArchiveFile.archive_id, ArchiveFile.sort_order, ArchiveFile.added_at)
+    ).all():
+        files_by_archive.setdefault(mounted.archive_id, []).append((mounted, asset))
+
+    source_ids = {archive.source_id for archive in archives if archive.source_id}
+    sources_by_id = {
+        source.source_id: source
+        for source in session.scalars(select(DataSource).where(DataSource.source_id.in_(source_ids))).all()
+    } if source_ids else {}
+
     rows: list[dict[str, object]] = []
-    source_cache: dict[str, DataSource | None] = {}
     for archive in archives:
-        files = session.execute(
-            select(ArchiveFile, FileAsset)
-            .outerjoin(FileAsset, ArchiveFile.file_id == FileAsset.file_id)
-            .where(ArchiveFile.archive_id == archive.archive_id)
-            .order_by(ArchiveFile.sort_order, ArchiveFile.added_at)
-        ).all()
+        files = files_by_archive.get(archive.archive_id, [])
         primary_file = next((item for item in files if item[0].is_primary), files[0] if files else None)
         row = _serialize_archive_base(archive)
-        if archive.source_id not in source_cache:
-            source_cache[archive.source_id] = session.get(DataSource, archive.source_id)
-        _apply_source_config_metadata_fallback(row, source_cache[archive.source_id])
+        _apply_source_config_metadata_fallback(row, sources_by_id.get(archive.source_id))
         row["file_count"] = len(files)
         row["priced_source_count"] = sum(1 for mounted, _ in files if mounted.file_role == "priced_source")
         row["primary_file"] = (
@@ -778,6 +789,7 @@ def _apply_archive_list_filters(
     source_id: str | None = None,
     search: str | None = None,
 ):
+    statement = statement.where(Archive.is_withdrawn.is_(False))
     if domain_type:
         statement = statement.where(Archive.domain_type == domain_type)
     if status:
@@ -848,8 +860,15 @@ def list_archives(
         source_id=source_id,
         search=search,
     )
+    # The archive list is a publication feed. Newest source publication must
+    # lead, rather than the moment our crawler happened to ingest a record.
+    # Explicit NULLS LAST keeps un-dated/manual archives below dated notices.
     statement = (
-        statement.order_by(Archive.created_at.desc(), Archive.archive_id.desc())
+        statement.order_by(
+            Archive.publish_date.desc().nullslast(),
+            Archive.created_at.desc(),
+            Archive.archive_id.desc(),
+        )
         .offset(safe_offset)
         .limit(capped_limit)
     )
@@ -1047,6 +1066,60 @@ def delete_archive(
     )
     session.commit()
     return before_payload
+
+
+def withdraw_archive(
+    session: Session,
+    archive_id: str,
+    *,
+    actor_type: str | None = None,
+    actor_id: str | None = None,
+) -> Archive:
+    """Soft-delete an archive while preserving files, lineage, and audit history."""
+
+    archive = session.get(Archive, archive_id)
+    if archive is None:
+        raise ValueError(f"ARCHIVE_NOT_FOUND: {archive_id}")
+    if archive.is_withdrawn:
+        raise ValueError(f"ARCHIVE_ALREADY_WITHDRAWN: {archive_id}")
+
+    before_payload = {
+        "is_current": archive.is_current,
+        "is_withdrawn": archive.is_withdrawn,
+        "status": archive.status,
+    }
+    archive.is_current = False
+    archive.is_withdrawn = True
+    archive.updated_at = datetime.now(UTC)
+    after_payload = {
+        "is_current": False,
+        "is_withdrawn": True,
+        "status": archive.status,
+        "storage_deleted": False,
+    }
+    _add_event(
+        session,
+        archive_id=archive.archive_id,
+        event_type="ARCHIVE_WITHDRAWN",
+        actor_type=actor_type,
+        actor_id=actor_id,
+        before_payload=before_payload,
+        after_payload=after_payload,
+    )
+    session.add(
+        AuditLog(
+            actor_type=actor_type,
+            actor_id=actor_id,
+            action="ARCHIVE_WITHDRAWN",
+            target_type="archive",
+            target_id=archive.archive_id,
+            before_payload=before_payload,
+            after_payload=after_payload,
+        )
+    )
+    session.commit()
+    session.refresh(archive)
+    return archive
 
 
 def attach_file(

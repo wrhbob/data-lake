@@ -1,8 +1,10 @@
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from app import database
+from app.config import RuntimeConfigurationError, get_settings
 from app.models import Base
 
 
@@ -17,6 +19,21 @@ def test_get_db_session_opens_session_from_configured_factory(monkeypatch):
 
     assert session.bind is engine
     generator.close()
+
+
+def test_settings_require_shared_postgres_url(monkeypatch):
+    monkeypatch.delenv("FILE_ASSET_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with pytest.raises(RuntimeConfigurationError, match="FILE_ASSET_DATABASE_URL"):
+        get_settings()
+
+
+def test_settings_reject_sqlite_fallback(monkeypatch):
+    monkeypatch.setenv("FILE_ASSET_DATABASE_URL", "sqlite:///file_asset.db")
+
+    with pytest.raises(RuntimeConfigurationError, match="NAS PostgreSQL"):
+        get_settings()
 
 
 def test_migrate_ingest_event_t2_columns_adds_missing_columns():

@@ -13,7 +13,7 @@ from app.models import CollectionTask, DataSource
 DATA_DOMAIN = "cost_info"
 SOURCE_TYPE = "info_price"
 CONNECTOR_TYPE = "source_registry"
-WORKER_TASK_TYPES = {"crawl_incremental", "crawl_issue"}
+WORKER_TASK_TYPES = {"crawl_incremental", "crawl_issue", "crawl_campaign_collect"}
 MANIFEST_ISSUE_FIELDS = [
     "object_key",
     "sha256",

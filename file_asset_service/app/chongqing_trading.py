@@ -416,8 +416,10 @@ def run_chongqing_trading_channels(
     as_of_date: str | date | None = None,
     start_date: str | date | None = None,
     end_date: str | date | None = None,
+    stop_on_existing: bool = True,
 ) -> dict[str, object]:
     source = require_data_source(session, source_id, domain_type="trading")
+    resolved_source_id = source.source_id
     config = source.config or chongqing_trading_source_config()
     parser = config["parser"]["parsers"][CHONGQING_TRADING_PARSER_VERSION]
 
@@ -455,14 +457,14 @@ def run_chongqing_trading_channels(
         ingest=lambda summary: ingest_chongqing_trading_notice(
             session,
             storage,
-            source_id=source.source_id,
+            source_id=resolved_source_id,
             client=client,
             summary=summary,
             actor_id=actor_id,
         ),
         on_ingest_error=lambda summary, exc: _record_chongqing_ingest_failure(
             session,
-            source_id=source.source_id,
+            source_id=resolved_source_id,
             actor_id=actor_id,
             summary=summary,
             exc=exc,
@@ -471,6 +473,7 @@ def run_chongqing_trading_channels(
         page_size=page_size,
         max_items_per_channel=max_items_per_channel,
         as_of_date=as_of_date,
+        stop_on_existing=stop_on_existing,
     )
 
 
@@ -657,6 +660,9 @@ def _record_chongqing_ingest_failure(
     summary: ChongqingNoticeSummary,
     exc: Exception,
 ) -> dict[str, object]:
+    # See Chengdu's equivalent handler: continue the bounded batch after a
+    # record-level DB error instead of leaving its SQLAlchemy session poisoned.
+    session.rollback()
     failed_at = utcnow().isoformat()
     if isinstance(exc, ChongqingAttachmentDownloadError):
         payload = {

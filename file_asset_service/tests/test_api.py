@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import get_db_session
 from app.main import create_app
-from app.models import Base
+from app.models import Archive, ArchiveFile, Base
 from app.storage import FakeObjectStore, get_object_store
 
 
@@ -237,6 +237,50 @@ def test_storage_audit_endpoint_reports_missing_file_asset_objects():
     assert body["issues"][0]["file_name"] == "德阳市2026年2月信息价.pdf"
 
 
+def test_storage_audit_endpoint_degrades_for_orphan_archive_file_reference():
+    client, _ = build_client()
+    session_generator = client.app.dependency_overrides[get_db_session]()
+    session = next(session_generator)
+    try:
+        archive = Archive(
+            domain_type="cost_info",
+            channel_type="crawler",
+            collection_method="legacy_batch_import",
+            business_key="cost_info:orphan:110000:2025-12",
+            title="2025年12月北京工程造价信息",
+            region_code="110000",
+            source_id="source-beijing",
+            tenant_code="platform_public",
+            visibility_scope="public",
+            status="collected",
+            metadata_payload={},
+            field_sources={},
+        )
+        session.add(archive)
+        session.flush()
+        session.add(
+            ArchiveFile(
+                archive_id=archive.archive_id,
+                file_id="missing-file-asset-id",
+                file_role="main_document",
+                is_primary=True,
+                display_name="2025年12月北京工程造价信息.pdf",
+            )
+        )
+        session.commit()
+    finally:
+        session_generator.close()
+
+    response = client.get("/api/storage-audit/file-assets")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["health_status"] == "degraded"
+    assert body["orphan_reference_count"] == 1
+    assert body["orphan_archive_count"] == 1
+    assert body["issues"][0]["status"] == "orphan_file_reference"
+
+
 def test_storage_audit_endpoint_filters_archived_cost_info_region_assets():
     client, storage = build_client()
     source = create_data_source(
@@ -322,14 +366,53 @@ def test_storage_audit_endpoint_filters_archived_cost_info_region_assets():
 
 def test_preview_pdf_returns_inline_original_blob_bytes():
     client, _ = build_client()
-    uploaded = upload(client, "2025年成都市信息价02期.pdf", b"%PDF original bytes").json()
+    content = b"%PDF original bytes"
+    uploaded = upload(client, "2025年成都市信息价02期.pdf", content).json()
 
     response = client.get(f"/api/file-assets/{uploaded['file_id']}/preview")
 
     assert response.status_code == 200
-    assert response.content == b"%PDF original bytes"
+    assert response.content == content
     assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["accept-ranges"] == "bytes"
+    assert response.headers["content-length"] == str(len(content))
     assert "inline;" in response.headers["content-disposition"]
+
+
+def test_preview_pdf_supports_closed_open_and_suffix_byte_ranges():
+    client, _ = build_client()
+    content = b"%PDF original bytes"
+    uploaded = upload(client, "2025年成都市信息价02期.pdf", content).json()
+    preview_url = f"/api/file-assets/{uploaded['file_id']}/preview"
+
+    for range_header, start, end in (
+        ("bytes=5-12", 5, 12),
+        ("bytes=5-", 5, len(content) - 1),
+        ("bytes=-5", len(content) - 5, len(content) - 1),
+    ):
+        response = client.get(preview_url, headers={"Range": range_header})
+
+        assert response.status_code == 206
+        assert response.content == content[start : end + 1]
+        assert response.headers["accept-ranges"] == "bytes"
+        assert response.headers["content-range"] == f"bytes {start}-{end}/{len(content)}"
+        assert response.headers["content-length"] == str(end - start + 1)
+        assert "inline;" in response.headers["content-disposition"]
+
+
+def test_preview_pdf_rejects_invalid_or_unsatisfiable_byte_ranges():
+    client, _ = build_client()
+    content = b"%PDF original bytes"
+    uploaded = upload(client, "2025年成都市信息价02期.pdf", content).json()
+    preview_url = f"/api/file-assets/{uploaded['file_id']}/preview"
+
+    for range_header in ("bytes=999-1000", "items=0-1", "bytes=1-2,4-5", "bytes=-0"):
+        response = client.get(preview_url, headers={"Range": range_header})
+
+        assert response.status_code == 416
+        assert response.headers["accept-ranges"] == "bytes"
+        assert response.headers["content-range"] == f"bytes */{len(content)}"
+        assert response.json()["detail"] == "PREVIEW_RANGE_NOT_SATISFIABLE"
 
 
 def test_preview_excel_returns_ephemeral_html_without_file_processing():

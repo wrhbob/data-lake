@@ -119,20 +119,20 @@ def test_audit_file_asset_objects_filters_by_archive_domain_and_region(db_sessio
     ]
 
 
-def test_audit_file_asset_objects_scoped_audit_excludes_non_archived_matches(db_session):
+def test_audit_file_asset_objects_scoped_audit_includes_collected_and_excludes_pending_matches(db_session):
     from app.storage_audit import audit_file_asset_objects
 
     storage = FakeObjectStore()
     now = datetime(2026, 6, 30, 11, 0, tzinfo=UTC)
     pending = add_asset(db_session, "成都市2026年6月信息价-待确认.pdf", "pending-chengdu.pdf", 7, created_at=now)
-    archived = add_asset(
+    collected = add_asset(
         db_session,
-        "成都市2026年6月信息价-已归档.pdf",
-        "archived-chengdu.pdf",
+        "成都市2026年6月信息价-已采集.pdf",
+        "collected-chengdu.pdf",
         4,
         created_at=now - timedelta(minutes=1),
     )
-    storage.put_object(archived.bucket, archived.object_key, b"1234", content_type="application/pdf")
+    storage.put_object(collected.bucket, collected.object_key, b"1234", content_type="application/pdf")
     add_archive_with_file(
         db_session,
         asset=pending,
@@ -143,10 +143,11 @@ def test_audit_file_asset_objects_scoped_audit_excludes_non_archived_matches(db_
     )
     add_archive_with_file(
         db_session,
-        asset=archived,
-        title="成都市2026年6月信息价-已归档",
+        asset=collected,
+        title="成都市2026年6月信息价-已采集",
         domain_type="cost_info",
         region_code="510100",
+        status="collected",
     )
 
     result = audit_file_asset_objects(db_session, storage, domain_type="cost_info", region_code="510100")
@@ -154,6 +155,91 @@ def test_audit_file_asset_objects_scoped_audit_excludes_non_archived_matches(db_
     assert result["checked_count"] == 1
     assert result["ok_count"] == 1
     assert result["missing_count"] == 0
+    assert result["issues"] == []
+
+
+def test_audit_file_asset_objects_reports_orphan_archive_file_references(db_session):
+    from app.storage_audit import audit_file_asset_objects
+
+    archive = Archive(
+        domain_type="cost_info",
+        channel_type="crawler",
+        collection_method="legacy_batch_import",
+        business_key="cost_info:orphan:110000:2025-12",
+        title="2025年12月北京工程造价信息",
+        region_code="110000",
+        source_id="source-beijing",
+        tenant_code="platform_public",
+        visibility_scope="public",
+        status="archived",
+        metadata_payload={},
+        field_sources={},
+    )
+    db_session.add(archive)
+    db_session.flush()
+    mounted = ArchiveFile(
+        archive_id=archive.archive_id,
+        file_id="missing-file-asset-id",
+        file_role="main_document",
+        is_primary=True,
+        display_name="2025年12月北京工程造价信息.pdf",
+    )
+    db_session.add(mounted)
+    db_session.commit()
+
+    result = audit_file_asset_objects(db_session, FakeObjectStore())
+
+    assert result["checked_count"] == 0
+    assert result["orphan_reference_count"] == 1
+    assert result["orphan_archive_count"] == 1
+    assert result["issues"] == [
+        {
+            "status": "orphan_file_reference",
+            "archive_id": archive.archive_id,
+            "archive_title": archive.title,
+            "region_code": "110000",
+            "archive_file_id": mounted.archive_file_id,
+            "file_id": "missing-file-asset-id",
+            "file_name": "2025年12月北京工程造价信息.pdf",
+        }
+    ]
+
+
+def test_audit_file_asset_objects_ignores_orphans_on_withdrawn_archives(db_session):
+    from app.storage_audit import audit_file_asset_objects
+
+    archive = Archive(
+        domain_type="cost_info",
+        channel_type="crawler",
+        collection_method="legacy_batch_import",
+        business_key="cost_info:withdrawn-orphan:110000:2025-12",
+        title="已撤下的重复信息价",
+        region_code="110000",
+        source_id="source-beijing",
+        tenant_code="platform_public",
+        visibility_scope="public",
+        status="archived",
+        is_withdrawn=True,
+        is_current=False,
+        metadata_payload={},
+        field_sources={},
+    )
+    db_session.add(archive)
+    db_session.flush()
+    db_session.add(
+        ArchiveFile(
+            archive_id=archive.archive_id,
+            file_id="missing-file-on-withdrawn-archive",
+            file_role="main_document",
+            is_primary=True,
+        )
+    )
+    db_session.commit()
+
+    result = audit_file_asset_objects(db_session, FakeObjectStore())
+
+    assert result["orphan_reference_count"] == 0
+    assert result["orphan_archive_count"] == 0
     assert result["issues"] == []
 
 

@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import Protocol
+from io import BytesIO
+from typing import Iterator, Protocol
 
 from app.config import get_settings
 
@@ -17,6 +18,29 @@ class ObjectStat:
     etag: str | None = None
 
 
+class ReadableObjectBody(Protocol):
+    def read(self, amount: int = -1) -> bytes:
+        ...
+
+    def close(self) -> None:
+        ...
+
+
+@dataclass
+class ObjectStream:
+    body: ReadableObjectBody
+    content_length: int
+    content_type: str | None = None
+    etag: str | None = None
+
+    def iter_chunks(self, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
+        try:
+            while chunk := self.body.read(chunk_size):
+                yield chunk
+        finally:
+            self.body.close()
+
+
 class ObjectStore(Protocol):
     def ensure_buckets(self, buckets: tuple[str, ...] = V01_BUCKETS) -> None:
         ...
@@ -28,6 +52,14 @@ class ObjectStore(Protocol):
         ...
 
     def get_object(self, bucket: str, object_key: str) -> bytes:
+        ...
+
+    def open_object(
+        self,
+        bucket: str,
+        object_key: str,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ObjectStream:
         ...
 
 
@@ -56,6 +88,24 @@ class FakeObjectStore:
 
     def get_object(self, bucket: str, object_key: str) -> bytes:
         return self.objects[(bucket, object_key)].content
+
+    def open_object(
+        self,
+        bucket: str,
+        object_key: str,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ObjectStream:
+        stored = self.objects[(bucket, object_key)]
+        content = stored.content
+        if byte_range is not None:
+            start, end = byte_range
+            content = content[start : end + 1]
+        return ObjectStream(
+            body=BytesIO(content),
+            content_length=len(content),
+            content_type=stored.content_type,
+            etag=stored.etag,
+        )
 
     def stat_object(self, bucket: str, object_key: str) -> ObjectStat:
         stored = self.objects[(bucket, object_key)]
@@ -112,15 +162,33 @@ class S3ObjectStore:
         )
 
     def get_object(self, bucket: str, object_key: str) -> bytes:
+        stream = self.open_object(bucket, object_key)
+        return b"".join(stream.iter_chunks())
+
+    def open_object(
+        self,
+        bucket: str,
+        object_key: str,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ObjectStream:
         from botocore.exceptions import ClientError
 
+        kwargs: dict[str, object] = {"Bucket": bucket, "Key": object_key}
+        if byte_range is not None:
+            start, end = byte_range
+            kwargs["Range"] = f"bytes={start}-{end}"
         try:
-            response = self.client.get_object(Bucket=bucket, Key=object_key)
+            response = self.client.get_object(**kwargs)
         except ClientError as exc:
             if _is_missing_object_error(exc):
                 raise KeyError((bucket, object_key)) from exc
             raise
-        return response["Body"].read()
+        return ObjectStream(
+            body=response["Body"],
+            content_length=int(response.get("ContentLength", 0)),
+            content_type=response.get("ContentType"),
+            etag=str(response.get("ETag", "")).strip('"') or None,
+        )
 
 
 def _is_missing_object_error(exc: object) -> bool:

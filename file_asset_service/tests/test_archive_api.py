@@ -119,27 +119,70 @@ def create_source(client):
     return response.json()
 
 
-def create_archive(client, source_id, *, business_key="trading:src:notice-api-001", status="pending_tag"):
+def create_archive(
+    client,
+    source_id,
+    *,
+    business_key="trading:src:notice-api-001",
+    status="pending_tag",
+    title="学校施工招标公告",
+    publish_date=None,
+):
     response = client.post(
         "/api/archives",
         json={
             "domain_type": "trading",
             "channel_type": "crawler",
             "business_key": business_key,
-            "title": "学校施工招标公告",
+            "title": title,
             "source_id": source_id,
             "tenant_code": "platform_public",
             "visibility_scope": "public",
             "status": status,
+            "publish_date": publish_date,
             "metadata": {
                 "project_code_raw": cell("P-API-001"),
                 "notice_type_raw": cell("招标公告"),
             },
-            "field_sources": field_sources("domain_type", "channel_type", "business_key", "title"),
+            "field_sources": field_sources("domain_type", "channel_type", "business_key", "title", "publish_date"),
         },
     )
     assert response.status_code == 200
     return response.json()
+
+
+def test_archive_api_lists_latest_publication_date_first():
+    client, _ = build_client()
+    source = create_source(client)
+    older = create_archive(
+        client,
+        source["source_id"],
+        business_key="trading:src:publication-old",
+        title="较早公告",
+        publish_date="2026-07-06",
+    )
+    newest = create_archive(
+        client,
+        source["source_id"],
+        business_key="trading:src:publication-new",
+        title="最新公告",
+        publish_date="2026-07-15",
+    )
+    undated = create_archive(
+        client,
+        source["source_id"],
+        business_key="trading:src:publication-undated",
+        title="未标发布日期公告",
+    )
+
+    response = client.get("/api/archives", params={"domain_type": "trading"})
+
+    assert response.status_code == 200
+    assert [row["archive_id"] for row in response.json()] == [
+        newest["archive_id"],
+        older["archive_id"],
+        undated["archive_id"],
+    ]
 
 
 def test_cost_info_archive_api_exposes_price_kind_as_additive_field():
@@ -1169,6 +1212,37 @@ def test_manual_archive_delete_removes_archive_but_keeps_file_reuploadable():
     )
     assert reuploaded["business_key"] == archive["business_key"]
     assert reuploaded["archive_id"] != archive["archive_id"]
+
+
+def test_archive_withdraw_soft_deletes_catalog_row_but_keeps_file_asset():
+    client, _ = build_client()
+    source = create_cost_info_manual_source(client)
+    archive = create_cost_info_manual_archive(
+        client,
+        source,
+        period="2026-07",
+        title="2026年第7期眉山市建设工程造价信息.pdf",
+        content=b"%PDF meishan soft delete",
+    )
+    detail = client.get(f"/api/archives/{archive['archive_id']}").json()
+    file_id = detail["files"][0]["file_id"]
+
+    withdrawn = client.post(f"/api/archives/{archive['archive_id']}/withdraw")
+
+    assert withdrawn.status_code == 200
+    assert withdrawn.json() == {
+        "archive_id": archive["archive_id"],
+        "withdrawn": True,
+        "storage_deleted": False,
+    }
+    assert client.get(f"/api/archives/{archive['archive_id']}").status_code == 404
+    assert all(
+        row["archive_id"] != archive["archive_id"]
+        for row in client.get("/api/archives", params={"domain_type": "cost_info"}).json()
+    )
+    download = client.get(f"/api/file-assets/{file_id}/download")
+    assert download.status_code == 200
+    assert download.content == b"%PDF meishan soft delete"
 
 
 def test_manual_upload_ingest_can_disable_zip_processing():

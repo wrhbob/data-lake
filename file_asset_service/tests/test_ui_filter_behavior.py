@@ -3,7 +3,7 @@ import subprocess
 import textwrap
 
 
-def test_trading_exchange_filter_auto_hides_until_multiple_exchange_centers():
+def test_trading_does_not_offer_exchange_center_filter():
     app_js = Path(__file__).parents[1] / "app" / "ui" / "app.js"
     script = textwrap.dedent(
         f"""
@@ -15,21 +15,9 @@ def test_trading_exchange_filter_auto_hides_until_multiple_exchange_centers():
         const result = vm.runInNewContext(appCode + `
           state.domain = "trading";
           state.viewMode = "archives";
-          const cell = (value) => ({{ value }});
-          state.archives = [
-            {{ metadata: {{ exchange_name: cell("成都市公共资源交易服务中心") }} }},
-            {{ metadata: {{ exchange_name: cell("成都市公共资源交易服务中心") }} }},
-          ];
-          const oneExchange = visibleFilterKeys();
-          state.archives = [
-            {{ metadata: {{ exchange_name: cell("成都市公共资源交易服务中心") }} }},
-            {{ metadata: {{ exchange_name: cell("江西省公共资源交易平台") }} }},
-          ];
-          const twoExchanges = visibleFilterKeys();
           JSON.stringify({{
-            exchangeAutoHide: domainConfigs.trading.filters.find((filter) => filter.key === "exchange_name").autoHideSingleValue,
-            oneExchange,
-            twoExchanges,
+            filterKeys: domainConfigs.trading.filters.map((filter) => filter.key),
+            visibleKeys: visibleFilterKeys(),
           }});
         `, {{ Intl, Date }});
         console.log(result);
@@ -38,9 +26,9 @@ def test_trading_exchange_filter_auto_hides_until_multiple_exchange_centers():
 
     completed = subprocess.run(["node", "-e", script], text=True, capture_output=True, check=True)
 
-    assert '"exchangeAutoHide":true' in completed.stdout
-    assert '"oneExchange":["region_code","publish_year","publish_month"]' in completed.stdout
-    assert '"twoExchanges":["region_code","exchange_name","publish_year","publish_month"]' in completed.stdout
+    assert '"filterKeys":["region_code","publish_year","publish_month","publish_day","notice_type_raw","channel_type"]' in completed.stdout
+    assert '"visibleKeys":["region_code","publish_year","publish_month"]' in completed.stdout
+    assert "exchange_name" not in completed.stdout
 
 
 def test_trading_day_filter_only_lists_days_with_data_for_selected_month():
@@ -115,6 +103,34 @@ def test_trading_day_filter_lists_month_days_when_year_is_all():
     assert '"dayOptions":[{"label":"全部","value":"all"},{"label":"21日","value":"21"},{"label":"22日","value":"22"}]' in completed.stdout
 
 
+def test_trading_archives_sort_latest_publication_first_even_when_api_pages_arrive_out_of_order():
+    app_js = Path(__file__).parents[1] / "app" / "ui" / "app.js"
+    script = textwrap.dedent(
+        f"""
+        const fs = require("fs");
+        const vm = require("vm");
+        const source = fs.readFileSync({str(app_js)!r}, "utf8");
+        const browserBootIndex = source.indexOf('document.addEventListener("click"');
+        const appCode = source.slice(0, browserBootIndex);
+        const result = vm.runInNewContext(appCode + `
+          state.domain = "trading";
+          state.viewMode = "archives";
+          state.archives = [
+            {{ archive_id: "old", title: "7月6日", publish_date: "2026-07-06", created_at: "2026-07-15T10:00:00Z" }},
+            {{ archive_id: "new", title: "7月15日", publish_date: "2026-07-15", created_at: "2026-07-15T09:00:00Z" }},
+            {{ archive_id: "undated", title: "无发布时间", created_at: "2026-07-15T11:00:00Z" }},
+          ];
+          JSON.stringify(filteredArchives().map((item) => item.title));
+        `, {{ Intl, Date }});
+        console.log(result);
+        """
+    )
+
+    completed = subprocess.run(["node", "-e", script], text=True, capture_output=True, check=True)
+
+    assert completed.stdout.strip() == '["7月15日","7月6日","无发布时间"]'
+
+
 def test_cost_info_beijing_year_and_month_filters_use_real_archives_only():
     app_js = Path(__file__).parents[1] / "app" / "ui" / "app.js"
     script = textwrap.dedent(
@@ -155,6 +171,69 @@ def test_cost_info_beijing_year_and_month_filters_use_real_archives_only():
     assert '"yearOptions":[{"label":"全部","value":"all"},{"label":"2026","value":"2026"}]' in completed.stdout
     assert '"monthOptions":[{"label":"全部","value":"all"},{"label":"1月","value":"01"},{"label":"2月","value":"02"},{"label":"3月","value":"03"},{"label":"4月","value":"04"},{"label":"5月","value":"05"},{"label":"6月","value":"06"}]' in completed.stdout
     assert '"7月"' not in completed.stdout
+
+
+def test_cost_info_selected_year_sorts_monthly_archives_from_january_to_december():
+    app_js = Path(__file__).parents[1] / "app" / "ui" / "app.js"
+    script = textwrap.dedent(
+        f"""
+        const fs = require("fs");
+        const vm = require("vm");
+        const source = fs.readFileSync({str(app_js)!r}, "utf8");
+        const browserBootIndex = source.indexOf('document.addEventListener("click"');
+        const appCode = source.slice(0, browserBootIndex);
+        const result = vm.runInNewContext(appCode + `
+          state.domain = "cost_info";
+          state.viewMode = "archives";
+          state.filters.region_code = "11";
+          state.filters.period_year = "2025";
+          const cell = (value) => ({{ value }});
+          state.archives = [
+            {{ title: "12月", region_code: "110000", metadata: {{ period: cell("2025-12") }} }},
+            {{ title: "3月", region_code: "110000", metadata: {{ period: cell("2025-03") }} }},
+            {{ title: "11月", region_code: "110000", metadata: {{ period: cell("2025-11") }} }},
+            {{ title: "1月", region_code: "110000", metadata: {{ period: cell("2025-01") }} }},
+            {{ title: "2月", region_code: "110000", metadata: {{ period: cell("2025-02") }} }},
+          ];
+          JSON.stringify(filteredArchives().map((item) => item.title));
+        `, {{ Intl, Date }});
+        console.log(result);
+        """
+    )
+
+    completed = subprocess.run(["node", "-e", script], text=True, capture_output=True, check=True)
+
+    assert completed.stdout.strip() == '["1月","2月","3月","11月","12月"]'
+
+
+def test_cost_info_all_years_keeps_latest_first_api_order():
+    app_js = Path(__file__).parents[1] / "app" / "ui" / "app.js"
+    script = textwrap.dedent(
+        f"""
+        const fs = require("fs");
+        const vm = require("vm");
+        const source = fs.readFileSync({str(app_js)!r}, "utf8");
+        const browserBootIndex = source.indexOf('document.addEventListener("click"');
+        const appCode = source.slice(0, browserBootIndex);
+        const result = vm.runInNewContext(appCode + `
+          state.domain = "cost_info";
+          state.viewMode = "archives";
+          state.filters.region_code = "11";
+          state.filters.period_year = "all";
+          const cell = (value) => ({{ value }});
+          state.archives = [
+            {{ title: "2026年6月", region_code: "110000", metadata: {{ period: cell("2026-06") }} }},
+            {{ title: "2025年12月", region_code: "110000", metadata: {{ period: cell("2025-12") }} }},
+          ];
+          JSON.stringify(filteredArchives().map((item) => item.title));
+        `, {{ Intl, Date }});
+        console.log(result);
+        """
+    )
+
+    completed = subprocess.run(["node", "-e", script], text=True, capture_output=True, check=True)
+
+    assert completed.stdout.strip() == '["2026年6月","2025年12月"]'
 
 
 def test_cost_info_sichuan_city_and_luzhou_month_filters_use_real_archives_only():
@@ -265,7 +344,7 @@ def test_cost_info_city_options_include_source_registry_cities_without_archives(
     assert '"cityOptions":["全部","三明市"]' in completed.stdout
 
 
-def test_cost_info_guizhou_issue_based_filters_show_year_and_month_frame_with_issue_label():
+def test_cost_info_guizhou_issue_based_filters_project_issues_to_months_and_keep_issue_label():
     app_js = Path(__file__).parents[1] / "app" / "ui" / "app.js"
     script = textwrap.dedent(
         f"""
@@ -289,6 +368,8 @@ def test_cost_info_guizhou_issue_based_filters_show_year_and_month_frame_with_is
               period_raw: cell("2026年第" + issue + "期"),
               period_year: cell("2026"),
               period_issue_no: cell(issue),
+              period_start: cell("2026-" + String(issue).padStart(2, "0")),
+              period_month: cell(issue),
               publisher_type: cell("industry_association"),
               publisher_scope: cell("province"),
             }},
@@ -297,11 +378,18 @@ def test_cost_info_guizhou_issue_based_filters_show_year_and_month_frame_with_is
           const yearFilter = domainConfigs.cost_info.filters.find((filter) => filter.key === "period_year");
           const monthFilter = domainConfigs.cost_info.filters.find((filter) => filter.key === "period_month");
           const issueFilter = domainConfigs.cost_info.filters.find((filter) => filter.key === "period_issue");
+          const defaultVisible = visibleFilterKeys();
+          state.filterAdvancedOpen = true;
+          const advancedVisible = visibleFilterKeys();
+          const projectedMonthOptions = filterOptions(monthFilter);
+          const marchTitles = state.archives.filter((item) => matchesMonth(item, monthFilter, "03")).map((item) => item.title);
           JSON.stringify({{
-            visible: visibleFilterKeys(),
+            defaultVisible,
+            advancedVisible,
             cityOptions: cityOptions("52", regionFilter).map((option) => option.label),
             yearOptions: filterOptions(yearFilter),
-            monthOptions: filterOptions(monthFilter),
+            monthOptions: projectedMonthOptions,
+            marchTitles,
             issueFilterExists: Boolean(issueFilter),
             issueTitle: renderTitleCell(state.archives[2]),
           }});
@@ -312,10 +400,12 @@ def test_cost_info_guizhou_issue_based_filters_show_year_and_month_frame_with_is
 
     completed = subprocess.run(["node", "-e", script], text=True, capture_output=True, check=True)
 
-    assert '"visible":["publisher_org","region_code","period_year","period_month"]' in completed.stdout
+    assert '"defaultVisible":["region_code","period_year","period_month"]' in completed.stdout
+    assert '"advancedVisible":["publisher_org",' in completed.stdout
     assert '"cityOptions":["全部"]' in completed.stdout
     assert '"yearOptions":[{"label":"全部","value":"all"},{"label":"2026","value":"2026"}]' in completed.stdout
-    assert '"monthOptions":[{"label":"全部","value":"all"}]' in completed.stdout
+    assert '"monthOptions":[{"label":"全部","value":"all"},{"label":"1月","value":"01"},{"label":"2月","value":"02"},{"label":"3月","value":"03"},{"label":"4月","value":"04"},{"label":"5月","value":"05"}]' in completed.stdout
+    assert '"marchTitles":["贵州省建设工程造价信息2026年第3期"]' in completed.stdout
     assert '"issueFilterExists":false' in completed.stdout
     assert "第3期" in completed.stdout
     assert "issue-tag" in completed.stdout
@@ -399,7 +489,7 @@ def test_cost_info_mixed_period_kinds_keep_month_filter_only_and_issue_as_row_la
 
     completed = subprocess.run(["node", "-e", script], text=True, capture_output=True, check=True)
 
-    assert '"visible":["publisher_org","region_code","period_year","period_month"]' in completed.stdout
+    assert '"visible":["region_code","period_year","period_month"]' in completed.stdout
     assert '"publisherOptions":[{"label":"全部","value":"all"},{"label":"省站","value":"station:province"},{"label":"市站","value":"station:city"},{"label":"省协会","value":"association:province"}]' in completed.stdout
     assert '"monthOptions":[{"label":"全部","value":"all"},{"label":"1月","value":"01"},{"label":"6月","value":"06"}]' in completed.stdout
     assert '"issueFilterExists":false' in completed.stdout
@@ -698,7 +788,7 @@ def test_cost_info_cascade_options_reuse_dimension_index_without_rescanning_arch
     assert '"cityScans":0' in completed.stdout
 
 
-def test_hidden_single_value_filter_is_not_applied_to_trading_results():
+def test_legacy_trading_exchange_filter_value_does_not_filter_results():
     app_js = Path(__file__).parents[1] / "app" / "ui" / "app.js"
     script = textwrap.dedent(
         f"""
@@ -715,13 +805,12 @@ def test_hidden_single_value_filter_is_not_applied_to_trading_results():
           state.archives = [
             {{ title: "成都公告", status: "collected", metadata: {{ exchange_name: cell("成都市公共资源交易服务中心") }} }},
           ];
-          const hiddenFilterCount = filteredArchives().length;
           state.archives = [
             {{ title: "成都公告", status: "collected", metadata: {{ exchange_name: cell("成都市公共资源交易服务中心") }} }},
             {{ title: "江西公告", status: "collected", metadata: {{ exchange_name: cell("江西省公共资源交易平台") }} }},
           ];
-          const visibleFilterTitles = filteredArchives().map((item) => item.title);
-          JSON.stringify({{ hiddenFilterCount, visibleFilterTitles }});
+          const titles = filteredArchives().map((item) => item.title);
+          JSON.stringify({{ titles }});
         `, {{ Intl, Date }});
         console.log(result);
         """
@@ -729,5 +818,4 @@ def test_hidden_single_value_filter_is_not_applied_to_trading_results():
 
     completed = subprocess.run(["node", "-e", script], text=True, capture_output=True, check=True)
 
-    assert '"hiddenFilterCount":1' in completed.stdout
-    assert '"visibleFilterTitles":["江西公告"]' in completed.stdout
+    assert '"titles":["成都公告","江西公告"]' in completed.stdout

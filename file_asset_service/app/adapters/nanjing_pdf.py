@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy.orm import object_session
 
 from app.adapters.base_cost_info_adapter import DiscoveredIssue
+from app.adapters.history_scope import is_history_backfill
 from app.archive_rules import build_cost_info_business_key
 from app.nanjing_cost_info import ingest_nanjing_cost_info_issue, list_nanjing_cost_info_issues
 
@@ -16,7 +17,11 @@ class NanjingPdfAdapter:
 
     def discover(self, source, task, client) -> list[DiscoveredIssue]:
         parser = _active_parser(source)
-        rows = list_nanjing_cost_info_issues(client, parser=parser, max_pages=1)
+        rows = list_nanjing_cost_info_issues(
+            client,
+            parser=parser,
+            max_pages=None if is_history_backfill(task) else 1,
+        )
         rows = _limit_rows(rows, source)
         self._rows_by_key = {_row_source_item_key(row): row for row in rows}
         self._client = client

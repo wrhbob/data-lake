@@ -246,6 +246,32 @@ def test_coverage_matrix_normalizes_prefecture_target_level_to_city(db_session):
     assert rows[0].to_dict()["target_level"] == "city"
 
 
+def test_coverage_matrix_maps_municipality_province_target_to_city(db_session):
+    source = cost_info_source(
+        db_session,
+        name="北京市住房和城乡建设委员会",
+        region_code="110000",
+        publisher_scope="province",
+        target_region_code="110000",
+    )
+    config = dict(source.config)
+    coverage = dict(config["coverage_expectation"])
+    target = dict(coverage["target_regions"][0])
+    target["region_name"] = "北京市"
+    target["target_level"] = "province"
+    coverage["target_regions"] = [target]
+    config["coverage_expectation"] = coverage
+    source.config = config
+    db_session.add(source)
+    db_session.commit()
+
+    rows = build_coverage_matrix(db_session, start_period="2024-01", end_period="2024-01", province_code="110000")
+
+    assert len(rows) == 1
+    assert rows[0].coverage_region_name == "北京市"
+    assert rows[0].target_level == "city"
+
+
 def test_issue_groups_same_region_period_archives_without_adoption(db_session):
     province = cost_info_source(
         db_session,

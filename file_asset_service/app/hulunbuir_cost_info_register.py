@@ -46,8 +46,6 @@ def ensure(s):
     s.add(d);s.flush();print(f"[OK] DS created: {d.source_id}");return d
 
 def main():
-    os.environ.setdefault("FILE_ASSET_DATABASE_URL","postgresql+psycopg://file_asset:file_asset@127.0.0.1:15432/file_asset")
-    for k,v in[("FILE_ASSET_S3_ENDPOINT_URL","http://djtsoft.x3322.net:9000"),("FILE_ASSET_S3_ACCESS_KEY_ID","admin"),("FILE_ASSET_S3_SECRET_ACCESS_KEY","Admin@123456")]:os.environ.setdefault(k,v)
     init_db();store=get_object_store();factory=get_session_factory()
     with factory() as s:
         ds=ensure(s);s.commit();print()

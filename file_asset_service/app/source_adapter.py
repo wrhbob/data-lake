@@ -297,6 +297,7 @@ def run_incremental_channel_crawl(
     page_size: int = 10,
     max_items_per_channel: int | None = None,
     as_of_date: str | date | None = None,
+    stop_on_existing: bool = True,
 ) -> dict[str, object]:
     selected = set(selected_channel_ids or [])
     channel_reports: list[dict[str, object]] = []
@@ -328,9 +329,14 @@ def run_incremental_channel_crawl(
                 if archive_exists(business_key_for(summary)):
                     skipped_existing_count += 1
                     channel_skipped += 1
-                    stop_channel = True
-                    stopped_on_existing = True
-                    break
+                    if stop_on_existing:
+                        stop_channel = True
+                        stopped_on_existing = True
+                        break
+                    # Historical backfills must continue beyond records already
+                    # in the lake, otherwise the first known newest record
+                    # would hide all older notices in the requested window.
+                    continue
                 try:
                     ingest(summary)
                 except Exception as exc:

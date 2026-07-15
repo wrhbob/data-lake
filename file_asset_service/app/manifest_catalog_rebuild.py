@@ -28,11 +28,12 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.archive_rules import build_cost_info_business_key
+from app.archive_rules import build_cost_info_business_key, metadata_value
 from app.archive_service import create_archive_from_ingest_event
 from app.collection import PLATFORM_PUBLIC_TENANT, create_data_source
 from app.database import get_session_factory, init_db
 from app.models import Archive, ArchiveFile, Blob, DataSource, FileAsset, IngestEvent
+from app.normalization import normalize_key_text, normalize_source_url
 
 DOMAIN_TYPE = "cost_info"
 CHANNEL_TYPE = "crawler"  # VALID_CHANNEL_TYPES
@@ -53,6 +54,7 @@ class RebuildResult:
     archives_created: int = 0
     archives_attached: int = 0  # extra file attached to an existing archive
     skipped_existing: int = 0  # file already mounted to a cost_info archive
+    skipped_cross_source_duplicate: int = 0  # same archive already exists under another source_id
     skipped_incomplete: int = 0  # not ready / missing key fields / wrong domain
     errors: int = 0
     blobs_created: int = 0
@@ -287,6 +289,68 @@ def _already_mounted_cost_info(session: Session, file_id: str) -> bool:
     )
 
 
+def _archive_period(archive: Archive) -> str:
+    if archive.coverage_period:
+        return archive.coverage_period.strip()
+    metadata = archive.metadata_payload or {}
+    for key in ("period_start", "period", "period_raw"):
+        value = metadata_value(metadata.get(key))
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _find_valid_cross_source_duplicate(
+    session: Session,
+    *,
+    tenant_code: str,
+    source_id: str,
+    region_code: str,
+    period: str,
+    title: str,
+    source_url: str | None,
+    sha256: str,
+) -> Archive | None:
+    """Find the same valid archive even when a rebuild matched another data source.
+
+    The normal business key contains ``source_id``.  A restored manifest can be
+    matched to a duplicate source registry row, so the database uniqueness key
+    alone cannot prevent a second archive.  Require matching business
+    coordinates plus strong file evidence (canonical URL or SHA-256), and only
+    reuse candidates that still have a valid FileAsset relationship.
+    """
+
+    normalized_title = normalize_key_text(title)
+    normalized_url = normalize_source_url(source_url)
+    candidates = session.scalars(
+        select(Archive).where(
+            Archive.tenant_code == tenant_code,
+            Archive.domain_type == DOMAIN_TYPE,
+            Archive.region_code == region_code,
+            Archive.source_id != source_id,
+            Archive.is_withdrawn.is_(False),
+        )
+    ).all()
+    for candidate in candidates:
+        if normalize_key_text(candidate.title) != normalized_title or _archive_period(candidate) != period:
+            continue
+        mounted_assets = session.execute(
+            select(ArchiveFile, FileAsset)
+            .join(FileAsset, ArchiveFile.file_id == FileAsset.file_id)
+            .where(ArchiveFile.archive_id == candidate.archive_id)
+        ).all()
+        if not mounted_assets:
+            continue
+        url_matches = bool(normalized_url) and any(
+            normalize_source_url(mounted.source_url or candidate.source_url) == normalized_url
+            for mounted, _asset in mounted_assets
+        )
+        hash_matches = any(asset.sha256 == sha256 for _mounted, asset in mounted_assets)
+        if url_matches or hash_matches:
+            return candidate
+    return None
+
+
 def rebuild_from_manifest(
     session: Session,
     csv_path: str | Path,
@@ -344,6 +408,21 @@ def rebuild_from_manifest(
 
             source_id, match_kind, tenant_code = matcher.match(region_code, source_name)
             result.source_match[match_kind] += 1
+
+            period_for_key = period_start or period_raw
+            duplicate = _find_valid_cross_source_duplicate(
+                session,
+                tenant_code=tenant_code,
+                source_id=source_id,
+                region_code=region_code,
+                period=period_for_key,
+                title=title,
+                source_url=source_url,
+                sha256=sha,
+            )
+            if duplicate is not None:
+                result.skipped_cross_source_duplicate += 1
+                continue
 
             blob, blob_new = _get_or_create_blob(
                 session,
@@ -405,7 +484,6 @@ def rebuild_from_manifest(
             if publish_date:
                 field_sources["publish_date"] = _field_source()
 
-            period_for_key = period_start or period_raw
             business_key = build_cost_info_business_key(
                 source_id=source_id,
                 region_code=region_code,
@@ -466,6 +544,7 @@ def main() -> int:
     print(f"archives_created      = {result.archives_created}")
     print(f"archives_attached     = {result.archives_attached}")
     print(f"skipped_existing      = {result.skipped_existing}")
+    print(f"skipped_cross_source  = {result.skipped_cross_source_duplicate}")
     print(f"skipped_incomplete    = {result.skipped_incomplete}")
     print(f"errors                = {result.errors}")
     print(f"blobs_created         = {result.blobs_created}")

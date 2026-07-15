@@ -212,6 +212,8 @@ def ingest_guizhou_cost_info_issue(
             "source_item_id": row["source_item_key"],
             "listed_title": row["title"],
             "period_kind": stable.get("period_kind") or "issue_based",
+            "period_start": row["period_start"],
+            "period_month": row["period_month"],
             "price_kind": price_coordinates.get("price_kind") or "guidance",
             "price_source_type": price_coordinates.get("price_source_type") or "info_price",
             "tax_type": price_coordinates.get("tax_type"),
@@ -311,12 +313,18 @@ def _normalize_list_row(row: dict) -> dict[str, object] | None:
         return None
     year = int(match.group("year"))
     issue_no = int(match.group("issue"))
+    if not 1 <= issue_no <= 12:
+        return None
     return {
         "source_item_key": f"PoliciesDetail/{policy_id}",
         "title": title,
         "period": f"{year}年第{issue_no}期",
         "period_year": year,
         "period_issue_no": issue_no,
+        # The association publishes each issue in the following month. Its
+        # numbered issue is the information-price month, not the publish month.
+        "period_start": f"{year}-{issue_no:02d}",
+        "period_month": issue_no,
         "publish_date": _aspnet_date(row.get("EntryDate")),
         "detail_url": urljoin(GUIZHOU_BASE_URL, f"/Home/PoliciesDetail/{policy_id}"),
         "attachments": attachments,

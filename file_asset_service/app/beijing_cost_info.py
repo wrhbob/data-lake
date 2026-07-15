@@ -152,7 +152,17 @@ def list_beijing_cost_info_issues(client: BeijingCostInfoClient, *, parser: dict
     rows: list[dict[str, object]] = []
     seen_url: set[str] = set()
     seen_period_title: set[tuple[str, str]] = set()
-    for list_url in _list_urls(parser):
+    pending_urls = _list_urls(parser)
+    queued_urls = set(pending_urls)
+    requested_periods = _requested_periods_for_list(parser)
+    history_page_limit = _history_page_limit(parser)
+    pagination_url_count = 0
+
+    while pending_urls:
+        list_url = pending_urls.pop(0)
+        if list_url in seen_url:
+            continue
+        seen_url.add(list_url)
         html = client.get_text(list_url)
         parser_state = _BeijingIssueListParser(base_url=list_url, parser=parser)
         parser_state.feed(html)
@@ -167,6 +177,24 @@ def list_beijing_cost_info_issues(client: BeijingCostInfoClient, *, parser: dict
             if pt_key is not None:
                 seen_period_title.add(pt_key)
             rows.append(row)
+
+        # The official list's first page currently ends at 2024-07.  Follow
+        # its own static EasySite pagination only for an explicit history
+        # request; routine monthly scans remain a two-page fast path.
+        if history_page_limit:
+            for page_url in _official_pagination_urls(html, base_url=list_url):
+                if page_url in seen_url or page_url in queued_urls:
+                    continue
+                if pagination_url_count >= history_page_limit:
+                    break
+                pending_urls.append(page_url)
+                queued_urls.add(page_url)
+                pagination_url_count += 1
+
+        if requested_periods and requested_periods.issubset(
+            {str(row.get("period")) for row in rows if row.get("period")}
+        ):
+            break
     return rows
 
 
@@ -446,6 +474,41 @@ def _list_urls(parser: dict) -> list[str]:
     if isinstance(value, list) and value:
         return [str(item) for item in value if item]
     return [str(parser.get("list_url") or BEIJING_ENTRY_URL)]
+
+
+def _requested_periods_for_list(parser: dict) -> set[str]:
+    values = parser.get("_requested_periods")
+    if not isinstance(values, (list, tuple, set)):
+        return set()
+    return {str(value) for value in values if value}
+
+
+def _history_page_limit(parser: dict) -> int:
+    if not parser.get("_history_pagination"):
+        return 0
+    pagination = parser.get("pagination") if isinstance(parser.get("pagination"), dict) else {}
+    raw_limit = parser.get("_history_page_limit") or pagination.get("max_pages") or 8
+    try:
+        return max(1, min(int(raw_limit), 100))
+    except (TypeError, ValueError):
+        return 8
+
+
+def _official_pagination_urls(html: str, *, base_url: str) -> list[str]:
+    """Extract same-site EasySite static-page links from an official list page."""
+
+    base = urlsplit(base_url)
+    urls: list[str] = []
+    for raw_url in re.findall(r"queryArticleByCondition\(\s*this\s*,\s*['\"]([^'\"]+)['\"]\s*\)", html):
+        candidate = urljoin(base_url, raw_url)
+        parsed = urlsplit(candidate)
+        if parsed.scheme not in {"http", "https"} or parsed.netloc != base.netloc:
+            continue
+        if "/gczj14/zjxx/gczjxxj64/" not in parsed.path:
+            continue
+        if candidate not in urls:
+            urls.append(candidate)
+    return urls
 
 
 def _allowed_extensions(parser: dict) -> set[str]:

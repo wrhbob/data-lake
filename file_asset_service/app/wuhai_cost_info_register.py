@@ -115,9 +115,6 @@ def main() -> None:
         load_dotenv(os.path.join(_root, ".env"), override=False)
     except Exception:
         pass
-    os.environ.setdefault("FILE_ASSET_DATABASE_URL", "postgresql+psycopg://file_asset:file_asset@127.0.0.1:15432/file_asset")
-    os.environ.setdefault("FILE_ASSET_S3_ENDPOINT_URL", "http://djtsoft.x3322.net:9000")
-
     print(f"DB: {get_settings().database_url}")
     print(f"N:   {len(ISSUES)} issues")
     print()

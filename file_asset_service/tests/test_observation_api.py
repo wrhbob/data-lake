@@ -38,7 +38,7 @@ def run_ui_probe(probe_js: str) -> None:
         const window = {{ addEventListener() {{}}, lucide: {{ createIcons() {{}} }} }};
         const context = {{ console, document, window, Date, Intl, URL, Map, Object, String, Number, Array }};
         vm.createContext(context);
-        vm.runInContext(appJs + "\\nglobalThis.__probe = {{ state, domainConfigs, metadata, policyEffectiveStatus, collectPatch, filterOptions, cityOptions, regionLabel, filteredArchives, downloadUrl, previewUrl, renderViewerCanvas, resetViewerScroll, coverageMatrixUrl, filteredCoverageRows, renderCoverageMatrixTable, renderStorageAuditBar, renderAttachmentList, renderViewerShell, manualUploadDefaults, buildManualUploadArchivePayload, manualEditDefaults, buildManualEditPatch, submitManualUpload, loadArchives }};", context);
+        vm.runInContext(appJs + "\\nglobalThis.__probe = {{ state, domainConfigs, metadata, policyEffectiveStatus, collectPatch, filterOptions, cityOptions, regionLabel, filteredArchives, downloadUrl, previewUrl, renderViewerCanvas, resetViewerScroll, coverageMatrixUrl, filteredCoverageRows, renderCoverageMatrixTable, renderStorageAuditBar, renderAttachmentList, renderViewerShell, manualUploadDefaults, buildManualUploadArchivePayload, manualEditDefaults, buildManualEditPatch, submitManualUpload, loadArchives, loadCoverageMatrix, loadCurrentView, latestCostInfoPeriodLabel, costInfoOverviewModel }};", context);
         const __probePromise = (async () => {{
         {probe_js}
         }})();
@@ -137,6 +137,7 @@ def test_ui_shell_exposes_domain_archive_shell_and_trading_hooks():
     assert 'data-view-mode="coverage"' in html
     assert 'id="coverageMatrixCard"' in html
     assert 'id="coverageMatrixRows"' in html
+    assert 'id="costInfoOverview"' in html
     assert 'id="attachmentList"' in html
     assert 'id="metadataFields"' in html
     assert 'id="viewerBody"' in html
@@ -151,6 +152,28 @@ def test_ui_shell_exposes_domain_archive_shell_and_trading_hooks():
     assert "app.js?v=" in html
     assert "项目大盘" not in html
     assert "中标金额" not in html
+
+
+def test_cost_info_overview_uses_real_archive_metrics():
+    run_ui_probe(
+        """
+        const cell = (value) => ({ value });
+        context.__probe.state.domain = "cost_info";
+        context.__probe.state.viewMode = "archives";
+        context.__probe.state.archiveTotalCount = 3;
+        context.__probe.state.archives = [
+          { region_code: "510100", channel_type: "auto_crawl", metadata: { period: cell("2026-05") } },
+          { region_code: "510500", channel_type: "manual_upload", metadata: { period: cell("2026-06") } },
+          { region_code: "510500", channel_type: "auto_crawl", metadata: { period: cell("2025-12") } },
+        ];
+        const model = context.__probe.costInfoOverviewModel();
+        const values = Object.fromEntries(model.metrics.map((item) => [item.label, item.value]));
+        if (values["档案总量"] !== "3") throw new Error("unexpected total " + values["档案总量"]);
+        if (values["覆盖地区"] !== "2") throw new Error("unexpected regions " + values["覆盖地区"]);
+        if (values["最新期次"] !== "2026年6月") throw new Error("unexpected period " + values["最新期次"]);
+        if (values["人工补录"] !== "1") throw new Error("unexpected manual count " + values["人工补录"]);
+        """
+    )
 
 
 def test_ui_script_uses_archive_api_and_does_not_define_project_fields():
@@ -223,7 +246,7 @@ def test_ui_domain_filters_match_archive_specs():
         """
         const expected = {
           cost_info: ["publisher_org", "category_raw", "region_code", "period_year", "period_month", "channel_type"],
-          trading: ["notice_type_raw", "region_code", "exchange_name", "publish_year", "publish_month", "publish_day", "channel_type"],
+          trading: ["notice_type_raw", "region_code", "publish_year", "publish_month", "publish_day", "channel_type"],
           quota: ["region_code", "specialty_raw", "file_role", "version_year", "channel_type"],
           policy_regulation: ["issuing_authority_raw", "policy_type_raw", "region_code", "policy_effective_status", "publish_year", "channel_type"],
           standard_atlas: ["standard_type_raw", "discipline_raw", "construction_topic_raw", "version_year", "channel_type"],
@@ -250,6 +273,9 @@ def test_ui_domain_filters_match_archive_specs():
           throw new Error(`publisher should still be visible in detail metadata fields; got ${costInfoMetadataFields.join(",")}`);
         }
         const tradingFilters = context.__probe.domainConfigs.trading.filters.map((filter) => filter.key);
+        if (tradingFilters.includes("exchange_name")) {
+          throw new Error(`trading exchange center should not be a filter; got ${tradingFilters.join(",")}`);
+        }
         if (tradingFilters.includes("priced_source")) {
           throw new Error(`trading priced_source filter should stay hidden until role filters expand; got ${tradingFilters.join(",")}`);
         }
@@ -420,14 +446,13 @@ def test_manual_upload_defaults_prefill_from_cost_info_filters():
           channel_type: "all",
         };
 
-        const defaults = context.__probe.manualUploadDefaults({ name: "眉山市2026年6月信息价.pdf" });
+        const defaults = context.__probe.manualUploadDefaults();
 
         if (defaults.region_code !== "511400") throw new Error(`expected 511400, got ${defaults.region_code}`);
         if (defaults.period !== "2026-06") throw new Error(`expected 2026-06, got ${defaults.period}`);
-        if (defaults.price_source_type !== "info_price") throw new Error(`expected info_price, got ${defaults.price_source_type}`);
         if (defaults.tax_type !== "") throw new Error(`tax_type should default blank/null, got ${defaults.tax_type}`);
         if (defaults.publisher !== "") throw new Error(`publisher should stay manual, got ${defaults.publisher}`);
-        if (defaults.title !== "眉山市2026年6月信息价.pdf") throw new Error(`title should default to file name, got ${defaults.title}`);
+        if (defaults.title !== "") throw new Error(`title should remain blank for multi-file uploads, got ${defaults.title}`);
         """
     )
 
@@ -537,7 +562,7 @@ def test_submit_manual_upload_calls_existing_backend_chain():
         };
 
         await context.__probe.submitManualUpload(
-          { name: "眉山市2026年6月信息价.pdf", size: 2048 },
+          [{ file: { name: "眉山市2026年6月信息价.pdf", size: 2048 }, role: "main_document" }],
           {
             region_code: "511400",
             period: "2026-06",
@@ -590,6 +615,9 @@ def test_ui_load_archives_pages_until_total_count_is_loaded():
         };
 
         await context.__probe.loadArchives();
+        for (let index = 0; index < 10 && context.__probe.state.archives.length < 3; index += 1) {
+          await Promise.resolve();
+        }
 
         if (context.__probe.state.archiveTotalCount !== 3) {
           throw new Error(`expected total count 3, got ${context.__probe.state.archiveTotalCount}`);
@@ -702,6 +730,8 @@ def test_manual_upload_rows_expose_edit_and_delete_actions():
           primary_file: { file_id: "f2", file_name: "绵阳信息价.pdf", file_role: "main_document" },
         });
         if (crawlerHtml.includes('data-action="delete-archive"')) throw new Error(crawlerHtml);
+        if (!crawlerHtml.includes('data-action="withdraw-archive"')) throw new Error(crawlerHtml);
+        if (!crawlerHtml.includes('不删除 NAS 原件')) throw new Error(crawlerHtml);
         """
     )
 
@@ -730,6 +760,7 @@ def test_storage_audit_bar_renders_missing_nas_object_state():
             ok_count: 848,
             missing_count: 1,
             size_mismatch_count: 0,
+            orphan_reference_count: 7,
             error_count: 0,
             availability_rate: 848 / 849,
             issues: [
@@ -741,6 +772,7 @@ def test_storage_audit_bar_renders_missing_nas_object_state():
         if (!html.includes("NAS 原件")) throw new Error(html);
         if (!html.includes("848/849")) throw new Error(html);
         if (!html.includes("缺失 1")) throw new Error(html);
+        if (!html.includes("孤儿引用 7")) throw new Error(html);
         if (!html.includes("德阳市2026年2月信息价.pdf")) throw new Error(html);
         if (!html.includes("storage-audit-degraded")) throw new Error(html);
         """
@@ -871,7 +903,51 @@ def test_coverage_matrix_url_defaults_to_sichuan_city_level():
     )
 
 
-def test_coverage_matrix_filter_panel_only_keeps_region_and_city_selector():
+def test_coverage_matrix_loads_without_waiting_for_source_dimensions_and_ignores_stale_results():
+    run_ui_probe(
+        """
+        const pending = [];
+        context.AbortController = class {
+          constructor() { this.signal = {}; }
+          abort() {}
+        };
+        context.setTimeout = () => 1;
+        context.clearTimeout = () => {};
+        context.fetch = (url) => new Promise((resolve) => pending.push({ url, resolve }));
+        context.__probe.state.domain = "cost_info";
+        context.__probe.state.viewMode = "coverage";
+
+        const initial = context.__probe.loadCurrentView();
+        await Promise.resolve();
+        const sourceRequest = pending.find((request) => request.url.includes("/api/data-sources"));
+        const matrixRequest = pending.find((request) => request.url.includes("/api/info-price/coverage-matrix"));
+        if (!sourceRequest || !matrixRequest) throw new Error("coverage and source requests should start together");
+
+        matrixRequest.resolve({ ok: true, json: async () => [{ coverage_region_name: "北京市" }] });
+        for (let index = 0; index < 10 && !context.__probe.state.coverageRows.length; index += 1) {
+          await Promise.resolve();
+        }
+        if (context.__probe.state.coverageRows[0]?.coverage_region_name !== "北京市") throw new Error("matrix result was delayed by source dimensions");
+
+        sourceRequest.resolve({ ok: true, json: async () => [] });
+        await initial;
+
+        const older = context.__probe.loadCoverageMatrix();
+        await Promise.resolve();
+        const olderRequest = pending[pending.length - 1];
+        const newer = context.__probe.loadCoverageMatrix();
+        await Promise.resolve();
+        const newerRequest = pending[pending.length - 1];
+        newerRequest.resolve({ ok: true, json: async () => [{ coverage_region_name: "上海市" }] });
+        await newer;
+        olderRequest.resolve({ ok: true, json: async () => [{ coverage_region_name: "北京市" }] });
+        await older;
+        if (context.__probe.state.coverageRows[0]?.coverage_region_name !== "上海市") throw new Error("stale coverage response replaced current filters");
+        """
+    )
+
+
+def test_coverage_matrix_filter_panel_keeps_region_and_year_selector():
     run_ui_probe(
         """
         context.__probe.state.viewMode = "coverage";
@@ -885,7 +961,7 @@ def test_coverage_matrix_filter_panel_only_keeps_region_and_city_selector():
           source_completeness_status: "all",
         };
         const keys = context.visibleFilterKeys();
-        if (JSON.stringify(keys) !== JSON.stringify(["region_code"])) throw new Error(keys.join(","));
+        if (JSON.stringify(keys) !== JSON.stringify(["region_code", "period_year"])) throw new Error(keys.join(","));
         """
     )
 

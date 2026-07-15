@@ -9,6 +9,9 @@ from app.models import Archive, ArchiveFile, FileAsset
 from app.storage import ObjectStore
 
 
+AUDITABLE_ARCHIVE_STATUSES = {"collected", "archived", "ready_for_governance"}
+
+
 def audit_file_asset_objects(
     session: Session,
     storage: ObjectStore,
@@ -28,7 +31,7 @@ def audit_file_asset_objects(
             )
             .join(ArchiveFile, ArchiveFile.file_id == FileAsset.file_id)
             .join(Archive, Archive.archive_id == ArchiveFile.archive_id)
-            .where(Archive.status == "archived")
+            .where(Archive.status.in_(AUDITABLE_ARCHIVE_STATUSES))
         )
         if domain_type is not None:
             statement = statement.where(Archive.domain_type == domain_type)
@@ -47,10 +50,37 @@ def audit_file_asset_objects(
         "missing_count": 0,
         "size_mismatch_count": 0,
         "error_count": 0,
+        "orphan_reference_count": 0,
+        "orphan_archive_count": 0,
         "expected_bytes": 0,
         "available_bytes": 0,
     }
     issues: list[dict[str, Any]] = []
+
+    orphan_statement = (
+        select(ArchiveFile, Archive)
+        .join(Archive, Archive.archive_id == ArchiveFile.archive_id)
+        .outerjoin(FileAsset, ArchiveFile.file_id == FileAsset.file_id)
+        .where(
+            Archive.is_withdrawn.is_(False),
+            ArchiveFile.file_id.is_not(None),
+            FileAsset.file_id.is_(None),
+        )
+        .order_by(Archive.created_at.desc(), ArchiveFile.archive_file_id.asc())
+    )
+    if archive_scoped:
+        orphan_statement = orphan_statement.where(Archive.status.in_(AUDITABLE_ARCHIVE_STATUSES))
+        if domain_type is not None:
+            orphan_statement = orphan_statement.where(Archive.domain_type == domain_type)
+        if region_code is not None:
+            orphan_statement = orphan_statement.where(Archive.region_code == region_code)
+
+    orphan_archive_ids: set[str] = set()
+    for mounted, archive in session.execute(orphan_statement).all():
+        counters["orphan_reference_count"] += 1
+        orphan_archive_ids.add(archive.archive_id)
+        _append_orphan_issue(issues, issue_limit, mounted=mounted, archive=archive)
+    counters["orphan_archive_count"] = len(orphan_archive_ids)
 
     for row in session.execute(statement).all():
         row_mapping = row._mapping
@@ -111,6 +141,28 @@ def audit_file_asset_objects(
         )
 
     return {**counters, "issues": issues}
+
+
+def _append_orphan_issue(
+    issues: list[dict[str, Any]],
+    issue_limit: int,
+    *,
+    mounted: ArchiveFile,
+    archive: Archive,
+) -> None:
+    if len(issues) >= max(issue_limit, 0):
+        return
+    issues.append(
+        {
+            "status": "orphan_file_reference",
+            "archive_id": archive.archive_id,
+            "archive_title": archive.title,
+            "region_code": archive.region_code,
+            "archive_file_id": mounted.archive_file_id,
+            "file_id": mounted.file_id,
+            "file_name": mounted.display_name,
+        }
+    )
 
 
 def _append_issue(

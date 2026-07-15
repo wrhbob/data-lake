@@ -181,9 +181,6 @@
     {code:"640000",label:"宁夏回族自治区",py:"ningxia"},
     {code:"650000",label:"新疆维吾尔自治区",py:"xinjiang"},
     {code:"660000",label:"新疆生产建设兵团",py:"bingtuan"},
-    {code:"710000",label:"台湾省",py:"taiwan"},
-    {code:"810000",label:"香港特别行政区",py:"xianggang"},
-    {code:"820000",label:"澳门特别行政区",py:"aomen"},
   ]);
 
   // 适应地区下拉选项 HTML (带拼音 data 属性, 供搜索过滤)

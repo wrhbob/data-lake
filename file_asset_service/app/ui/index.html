@@ -7,7 +7,7 @@
     <link rel="icon" href="data:," />
     <script>
       window.__uiAssetBase = window.location.protocol === "file:" ? "./" : "/ui-assets/";
-      window.__uiAssetVersion = "20260714-filter-tidy";
+      window.__uiAssetVersion = "20260715-trading-publish-sort-v18";
       document.write(`<link rel="stylesheet" href="${window.__uiAssetBase}styles.css?v=${window.__uiAssetVersion}" />`);
     </script>
     <script defer src="https://unpkg.com/lucide@latest"></script>
@@ -77,6 +77,8 @@
           <span>覆盖矩阵</span>
         </button>
       </section>
+
+      <section id="costInfoOverview" class="cost-info-overview" aria-label="信息价数据概览"></section>
 
       <section id="filterPanel" class="filter-panel" aria-label="多维检索漏斗"></section>
 
@@ -196,6 +198,8 @@
         </footer>
       </form>
     </section>
+
+    <section id="coverageBackfillModal" class="modal-backdrop" aria-label="官方源回填" aria-hidden="true" hidden></section>
 
     <section id="viewer" class="viewer" aria-label="档案详情工作台" aria-hidden="true">
       <header class="viewer-toolbar">

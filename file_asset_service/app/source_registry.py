@@ -212,7 +212,10 @@ def ingest_cost_info_registry_item(
     stable = config.get("stable") if isinstance(config.get("stable"), dict) else {}
     parser_version = _active_parser_version(config)
     period_fields = _period_fields(item.title, config, parser_version)
-    period_start = period_fields.period_start
+    # A source-specific parser may retain an issue-based original period while
+    # also supplying a reliable month projection (for example 贵州第5期 = 5月).
+    # Prefer that explicit projection over the generic period parser result.
+    period_start = item.metadata.get("period_start") or period_fields.period_start
     region_code = source.region_code or stable.get("region_code")
     coverage_region_code = item.metadata.get("coverage_region_code") or stable.get("coverage_region_code") or region_code
     price_coordinates = config.get("price_coordinates") if isinstance(config.get("price_coordinates"), dict) else {}

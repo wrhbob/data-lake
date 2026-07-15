@@ -96,8 +96,6 @@ def main() -> None:
         load_dotenv(os.path.join(_root, ".env"), override=False)
     except Exception:
         pass
-    os.environ.setdefault("FILE_ASSET_DATABASE_URL", "postgresql+psycopg://file_asset:file_asset@127.0.0.1:15432/file_asset")
-    os.environ.setdefault("FILE_ASSET_S3_ENDPOINT_URL", "http://djtsoft.x3322.net:9000")
     init_db(); store = get_object_store(); factory = get_session_factory()
     with factory() as session:
         ds = ensure_data_source(session); session.commit(); print()

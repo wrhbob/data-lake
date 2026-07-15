@@ -1,8 +1,0 @@
-# Local-dev override: the host's 9000/9001 are already used by another project's
-# MinIO (costpilot-minio). Remap this project's MinIO to 19000 (API) / 19001 (console)
-# so the two stacks do not collide. Auto-loaded by `docker compose`.
-services:
-  minio:
-    ports: !override
-      - "19000:9000"
-      - "19001:9001"

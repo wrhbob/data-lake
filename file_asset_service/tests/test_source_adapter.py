@@ -373,6 +373,30 @@ def test_run_incremental_channel_crawl_stops_on_existing_and_reports_cursor():
     assert report["channels"][1]["crawl_lag_days"] == 1
 
 
+def test_history_channel_crawl_skips_known_items_without_stopping_the_date_window():
+    ingested = []
+
+    report = run_incremental_channel_crawl(
+        source_id="source-1",
+        channels=[{"channel_id": "tender_notice", "notice_type_raw": "招标公告", "notice_family": "tender"}],
+        discover_page=lambda _channel, _page, _page_size: [
+            Summary("KNOWN001", "已入湖公告", "2026-07-15"),
+            Summary("OLDER001", "窗口内较早公告", "2026-07-12"),
+        ],
+        business_key_for=lambda summary: f"bk:{summary.source_item_key}",
+        archive_exists=lambda key: key == "bk:KNOWN001",
+        ingest=lambda summary: ingested.append(summary.source_item_key),
+        max_pages=1,
+        page_size=50,
+        stop_on_existing=False,
+    )
+
+    assert ingested == ["OLDER001"]
+    assert report["ingested_count"] == 1
+    assert report["skipped_existing_count"] == 1
+    assert report["channels"][0]["stopped_on_existing"] is False
+
+
 def test_count_opaque_attachments_and_lag_are_domain_neutral():
     @dataclass(frozen=True)
     class Attachment:

@@ -12,7 +12,7 @@ from app.archive_rules import metadata_cell, now_iso
 from app.archive_service import attach_file, attach_pending_file, create_archive_from_ingest_event
 from app.assets import register_asset
 from app.collection import create_collection_task
-from app.models import Archive, ArchiveFile, DataSource
+from app.models import Archive, ArchiveFile, DataSource, utcnow
 from app.storage import ObjectStore
 
 FETCH_STATUS_FETCHED = "FETCHED"
@@ -59,6 +59,10 @@ class TradingDiscoveredItem:
     channel_id: str
     notice_family: str
     notice_type_raw: str
+    # A province-wide source may emit records from several administrative
+    # regions.  Preserve the item-level code instead of forcing every archive
+    # to inherit the source's provincial code.
+    region_code: str | None = None
     project_code_raw: str | None = None
     tender_code_raw: str | None = None
     section_no_raw: str | None = None
@@ -174,7 +178,7 @@ def ingest_trading_registry_item(
     stable = config.get("stable") if isinstance(config.get("stable"), dict) else {}
     parser_version = _active_parser_version(config)
     source_priority = str(stable.get("source_priority") or "official")
-    region_code = source.region_code or stable.get("region_code")
+    region_code = item.region_code or source.region_code or stable.get("region_code")
 
     task = create_collection_task(
         session,
@@ -211,6 +215,7 @@ def ingest_trading_registry_item(
     )
 
     archive: Archive | None = None
+    mounted_file_roles: set[tuple[str, str]] = set()
     sort_index = 0
     for index, attachment in enumerate(fetched_attachments, start=1):
         sort_index = index
@@ -250,11 +255,22 @@ def ingest_trading_registry_item(
                 actor_id=actor_id,
             )
         else:
+            file_role = attachment.file_role
+            # ``None`` intentionally keeps archive-service role inference
+            # (for example, .cjz becomes priced_source).  It remains a stable
+            # deduplication key for repeated source attachments.
+            mount_key = (result.file_id, file_role or "__inferred__")
+            # Official notices occasionally repeat the same downloadable
+            # object in their attachment HTML.  One archive may only mount a
+            # given raw file once for each role; the duplicate still has a
+            # durable ingestion event but must not create a second mount.
+            if mount_key in mounted_file_roles:
+                continue
             attach_file(
                 session,
                 archive.archive_id,
                 result.file_id,
-                file_role=attachment.file_role,
+                file_role=file_role,
                 display_name=attachment.file_name,
                 source_url=attachment.url,
                 is_primary=False,
@@ -263,6 +279,7 @@ def ingest_trading_registry_item(
                 actor_type="system",
                 actor_id=actor_id,
             )
+            mounted_file_roles.add(mount_key)
 
     if archive is None:
         raise ValueError("TRADING_ARCHIVE_NOT_CREATED")
@@ -282,6 +299,15 @@ def ingest_trading_registry_item(
             actor_type="system",
             actor_id=actor_id,
         )
+    # Asset registration has already updated the file counters on this
+    # item-level task.  It is a completed ingestion record, not a second queue
+    # entry for the task-loop worker to pick up later.
+    task.status = "done"
+    task.finished_at = utcnow()
+    task.discovered_count = 1
+    task.error_code = None
+    task.error_message = None
+    session.commit()
     return archive
 
 
@@ -360,6 +386,13 @@ def fetch_pending_trading_archive_file(
         "fetched_at": now_iso(),
         "content_type": content_type,
     }
+    # As above, the task created for an off-peak file is an auditable lineage
+    # record and has completed synchronously inside this function.
+    task.status = "done"
+    task.finished_at = utcnow()
+    task.discovered_count = 1
+    task.error_code = None
+    task.error_message = None
     session.commit()
     session.refresh(mounted)
     return mounted

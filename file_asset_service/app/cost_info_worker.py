@@ -12,15 +12,23 @@ from sqlalchemy.orm import Session
 
 from app.adapters import get_adapter
 from app.adapters.base_cost_info_adapter import AdapterResult, DiscoveredIssue
+from app.crawl_campaign import (
+    CAMPAIGN_TASK_TYPE,
+    campaign_context,
+    mark_campaign_task_failure,
+    mark_item,
+    record_discovered_items,
+    refresh_campaign,
+)
 from app.crawler_platform.cost_info_http_client import make_http_client
 from app.crawler_platform.red_line_checker import check_file_processing_red_lines
 from app.crawler_platform.run_report import WorkerReport, finalize_worker_report
 from app.database import get_session_factory, init_db
 from app.info_price_coverage import ACTIVE_ARCHIVE_STATUSES, _archive_period
-from app.models import Archive, CollectionTask, DataSource
+from app.models import Archive, CollectionTask, DataSource, SourceCrawlState
 from app.storage import ObjectStore, get_object_store
 
-TASK_TYPES = ("crawl_incremental", "crawl_issue")
+TASK_TYPES = ("crawl_incremental", "crawl_issue", CAMPAIGN_TASK_TYPE)
 DATA_DOMAIN = "cost_info"
 EARLY_STOP_DUPLICATE_THRESHOLD = 3
 
@@ -116,7 +124,7 @@ def _select_pending_tasks(
             CollectionTask.data_domain == DATA_DOMAIN,
             DataSource.status == "active",
         )
-        .order_by(CollectionTask.scheduled_at.asc(), CollectionTask.created_at.asc())
+        .order_by(CollectionTask.priority.asc(), CollectionTask.scheduled_at.asc(), CollectionTask.created_at.asc())
     )
     if source_id:
         statement = statement.where(CollectionTask.source_id == source_id)
@@ -172,6 +180,11 @@ def _lease_pending_tasks(
         task.lease_expires_at = lease_until
         task.heartbeat_at = now
         task.updated_at = now
+        if task.task_type == "crawl_incremental":
+            state = db.get(SourceCrawlState, task.source_id)
+            if state is not None:
+                state.last_started_at = now
+                state.updated_at = now
     db.commit()
     return selected
 
@@ -193,18 +206,37 @@ def _run_one_task(
     adapter_kind = source_adapter_kind(source)
     adapter = get_adapter(adapter_kind)
     client = make_http_client(source)
-    issues = adapter.discover(source, task, client)
+    issues = _discover_issues(adapter, source, task, client)
 
     result = AdapterResult(discovered_count=len(issues))
     consecutive_duplicates = 0
     policy = source.schedule_policy or {}
+    campaign_items = {}
+    is_campaign_task = campaign_context(task) is not None
+    if is_campaign_task and not dry_run:
+        campaign_items = record_discovered_items(
+            db,
+            task=task,
+            source=source,
+            issues=issues,
+            now=utcnow(),
+        )
 
     for issue in issues:
+        campaign_item = campaign_items.get(issue.source_item_key)
+        # Historical range/item limits are materialised by the inventory step.
+        # An issue absent from that inventory is deliberately not downloaded.
+        if is_campaign_task and not dry_run and campaign_item is None:
+            result.skipped_count += 1
+            continue
         business_key = _build_business_key(source, issue, adapter)
         if _archive_exists(business_key, db, source):
             result.duplicate_count += 1
             consecutive_duplicates += 1
+            mark_item(db, item=campaign_item, status="duplicate", now=utcnow())
             if (
+                not is_campaign_task
+                and
                 policy.get("early_stop_duplicate", True)
                 and consecutive_duplicates >= EARLY_STOP_DUPLICATE_THRESHOLD
             ):
@@ -213,6 +245,7 @@ def _run_one_task(
             continue
 
         consecutive_duplicates = 0
+        mark_item(db, item=campaign_item, status="downloading", now=utcnow())
         if dry_run:
             result.skipped_count += 1
             continue
@@ -227,10 +260,44 @@ def _run_one_task(
                     "error": str(exc)[:400],
                 }
             )
+            mark_item(db, item=campaign_item, status="failed", now=utcnow(), error=str(exc))
             continue
         result.ingested_count += 1
+        mark_item(db, item=campaign_item, status="done", now=utcnow())
+
+    if is_campaign_task and not dry_run:
+        context = campaign_context(task) or {}
+        campaign_id = str(context.get("campaign_id") or "")
+        from app.models import CrawlCampaign
+
+        campaign = db.get(CrawlCampaign, campaign_id)
+        if campaign is not None:
+            refresh_campaign(db, campaign=campaign, now=utcnow())
 
     return result
+
+
+def _discover_issues(adapter, source: DataSource, task: CollectionTask, client) -> list[DiscoveredIssue]:
+    """Discover with campaign-safe limits while preserving normal incremental caps.
+
+    A source may cap incremental work with ``max_items_per_run``. Applying that
+    cap to a historical campaign silently turns a full crawl into a top-N crawl,
+    so a campaign receives large operational list limits. Adapter-specific
+    pagination still stops at the source's real last page (or a hard safety
+    ceiling), rather than trusting an incremental top-N setting.
+    """
+
+    if campaign_context(task) is None:
+        return adapter.discover(source, task, client)
+    original_policy = source.schedule_policy
+    policy = dict(original_policy or {})
+    policy["max_items_per_run"] = 100_000
+    policy["max_pages_per_run"] = 10_000
+    source.schedule_policy = policy
+    try:
+        return adapter.discover(source, task, client)
+    finally:
+        source.schedule_policy = original_policy
 
 
 def _complete_task(task: CollectionTask, result: AdapterResult, db: Session, now: datetime) -> None:
@@ -251,6 +318,19 @@ def _complete_task(task: CollectionTask, result: AdapterResult, db: Session, now
         "cursor_publish_date": result.cursor_publish_date,
         "early_stopped_on_duplicate": result.early_stopped_on_duplicate,
     }
+    if task.task_type == "crawl_incremental":
+        state = db.get(SourceCrawlState, task.source_id)
+        if state is not None:
+            state.last_succeeded_at = now
+            state.last_seen_item_key = result.cursor_source_item_key
+            state.last_seen_publish_date = result.cursor_publish_date
+            state.cursor = dict(task.cursor_after)
+            if result.ingested_count:
+                state.last_new_item_at = now
+                state.consecutive_empty_runs = 0
+            else:
+                state.consecutive_empty_runs += 1
+            state.updated_at = now
     db.commit()
 
 
@@ -441,6 +521,8 @@ def run_worker(
             adapter = source_adapter_kind(source)
         except Exception as exc:
             status, manual_recovery = _handle_task_failure(task, source, exc, db, started_at)
+            mark_campaign_task_failure(db, task=task, now=started_at, terminal=status != "retry")
+            db.commit()
             if status == "retry":
                 report.retry_count += 1
             else:
@@ -483,6 +565,8 @@ def run_worker(
             result = _run_one_task(task, source, db, dry_run=dry_run, storage=object_store)
         except Exception as exc:
             status, manual_recovery = _handle_task_failure(task, source, exc, db, started_at)
+            mark_campaign_task_failure(db, task=task, now=started_at, terminal=status != "retry")
+            db.commit()
             if status == "retry":
                 report.retry_count += 1
             else:

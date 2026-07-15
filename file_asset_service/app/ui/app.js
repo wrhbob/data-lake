@@ -33,10 +33,9 @@ const domainConfigs = {
   trading: {
     title: "招投标公告档案台",
     resultUnit: "条公告档案",
-    searchPlaceholder: "搜索公告标题、交易中心、项目代码原文、来源条目",
+    searchPlaceholder: "搜索公告标题、项目代码原文、来源条目",
     filters: [
       { key: "region_code", label: "地区", kind: "region", metadataKeys: ["province_raw", "city_raw"] },
-      { key: "exchange_name", label: "交易中心", kind: "metadataEnum", metadataKey: "exchange_name", autoHideSingleValue: true },
       { key: "publish_year", label: "年份", kind: "year", fields: ["publish_date"], metadataKeys: ["publish_date_raw"] },
       { key: "publish_month", label: "月份", kind: "month", fields: ["publish_date"], metadataKeys: ["publish_date_raw"] },
       { key: "publish_day", label: "日期", kind: "day", fields: ["publish_date"], metadataKeys: ["publish_date_raw"], dependsOn: ["publish_month"] },
@@ -231,10 +230,21 @@ const state = {
   viewMode: "archives",
   archives: [],
   archiveTotalCount: 0,
+  archiveHydrating: false,
+  archiveHydrationError: "",
+  archiveLoadToken: 0,
   costInfoSources: [],
   coverageRows: [],
+  coverageLoadToken: 0,
   storageAudit: { loading: false, error: "", data: null },
   crawlBusy: false,
+  coverageBackfill: {
+    open: false,
+    row: null,
+    sourceId: "",
+    submitting: false,
+    error: "",
+  },
   selectedArchive: null,
   selectedFileId: null,
   mirrorExporting: false,
@@ -264,6 +274,7 @@ const state = {
 
 const costInfoDimensionIndexCache = { archives: null, index: null };
 const ARCHIVE_PAGE_SIZE = 500;
+const ARCHIVE_INITIAL_PAGE_SIZE = 100;
 const COVERAGE_HISTORY_YEAR_COUNT = 7;
 const DEFAULT_COVERAGE_END_YEAR = 2026;
 
@@ -484,9 +495,6 @@ const regionTree = [
     { value: "653100", label: "喀什地区" }, { value: "653200", label: "和田地区" }, { value: "654000", label: "伊犁哈萨克自治州" },
     { value: "654200", label: "塔城地区" }, { value: "654300", label: "阿勒泰地区" },
   ] },
-  { value: "71", label: "台湾", cities: [{ value: "710100", label: "台北市" }] },
-  { value: "81", label: "香港", cities: [{ value: "810100", label: "香港特别行政区" }] },
-  { value: "82", label: "澳门", cities: [{ value: "820100", label: "澳门特别行政区" }] },
 ];
 
 const $ = (selector) => document.querySelector(selector);
@@ -1012,6 +1020,18 @@ function costInfoPeriodInfos(item, filter = {}) {
     if (monthly) addInfo({ kind: "monthly", ...monthly });
   });
 
+  if (configuredKind === "issue_based") {
+    const projectedMonth = yearMonthParts(metadata(item, "period_start"));
+    if (projectedMonth) {
+      addInfo({ kind: "monthly", ...projectedMonth });
+    } else {
+      const month = Number(metadata(item, "period_month"));
+      if (periodYear && month >= 1 && month <= 12) {
+        addInfo({ kind: "monthly", year: periodYear, month: String(month).padStart(2, "0") });
+      }
+    }
+  }
+
   if (configuredKind === "issue_based" && periodYear && periodIssueNo && Number(periodIssueNo)) {
     const issueNo = Number(periodIssueNo);
     addInfo({
@@ -1480,6 +1500,235 @@ function previewUrl(file) {
   return `/api/file-assets/${encodeURIComponent(file.file_id)}/preview`;
 }
 
+let activePdfViewer = null;
+let pdfViewerLoadToken = 0;
+let pdfViewerModulePromise = null;
+const LARGE_PDF_FAST_PREVIEW_THRESHOLD = 64 * 1024 * 1024;
+const pdfLinearizationCache = new Map();
+
+function destroyActivePdfViewer() {
+  pdfViewerLoadToken += 1;
+  activePdfViewer?.controller?.destroy?.();
+  activePdfViewer = null;
+}
+
+function renderPdfJsViewer(file) {
+  const viewerCanvas = $("#viewerCanvas");
+  if (activePdfViewer?.fileId === file.file_id && viewerCanvas.querySelector?.('[data-pdf-viewer="pdfjs"]')) return;
+
+  destroyActivePdfViewer();
+  const loadToken = pdfViewerLoadToken;
+  const selectedFileId = file.file_id;
+  viewerCanvas.innerHTML = `
+    <div class="empty-state pdfjs-bootstrap-state" role="status">
+      <strong>正在启动 PDF.js</strong>
+      <span>准备 Range 按需预览：${escapeHtml(file.file_name)}</span>
+    </div>
+  `;
+  resetViewerScroll();
+
+  if (!pdfViewerModulePromise) {
+    const assetBase = window.__uiAssetBase || "/ui-assets/";
+    const assetVersion = window.__uiAssetVersion || "pdfjs";
+    pdfViewerModulePromise = import(`${assetBase}pdf-viewer.js?v=${encodeURIComponent(assetVersion)}`);
+  }
+  pdfViewerModulePromise
+    .then(({ mountPdfViewer }) => {
+      if (loadToken !== pdfViewerLoadToken || selectedFile(state.selectedArchive)?.file_id !== selectedFileId) return;
+      const controller = mountPdfViewer(viewerCanvas, {
+        url: previewUrl(file),
+        fileName: file.file_name,
+        fileSize: file.file_size,
+      });
+      activePdfViewer = { fileId: selectedFileId, controller };
+    })
+    .catch((error) => {
+      if (loadToken !== pdfViewerLoadToken || selectedFile(state.selectedArchive)?.file_id !== selectedFileId) return;
+      viewerCanvas.innerHTML = `
+        <article class="web-page source-only">
+          <h2>${escapeHtml(file.file_name)}</h2>
+          <p>PDF.js 加载失败：${escapeHtml(error?.message || "请下载原件查看")}</p>
+        </article>
+      `;
+      resetViewerScroll();
+    });
+}
+
+async function isPdfLinearized(file) {
+  if (!file?.file_id) return false;
+  if (pdfLinearizationCache.has(file.file_id)) return pdfLinearizationCache.get(file.file_id);
+
+  const probe = fetch(previewUrl(file), { headers: { Range: "bytes=0-4095" } })
+    .then(async (response) => {
+      if (!response.ok) return false;
+      const header = new TextDecoder("latin1").decode(await response.arrayBuffer());
+      return /\/Linearized\b/.test(header);
+    })
+    .catch(() => false);
+  pdfLinearizationCache.set(file.file_id, probe);
+  return probe;
+}
+
+function findBytePair(bytes, first, second, fromIndex = 0) {
+  for (let index = Math.max(0, fromIndex); index < bytes.length - 1; index += 1) {
+    if (bytes[index] === first && bytes[index + 1] === second) return index;
+  }
+  return -1;
+}
+
+function appendBytes(left, right) {
+  const joined = new Uint8Array(left.length + right.length);
+  joined.set(left);
+  joined.set(right, left.length);
+  return joined;
+}
+
+async function fetchFirstPdfJpeg(url, signal) {
+  const chunkSize = 1024 * 1024;
+  const maxBytes = 8 * chunkSize;
+  let bytes = new Uint8Array(0);
+  let jpegStart = -1;
+
+  for (let start = 0; start < maxBytes; start += chunkSize) {
+    const response = await fetch(url, {
+      headers: { Range: `bytes=${start}-${start + chunkSize - 1}` },
+      signal,
+    });
+    if (response.status !== 206) return null;
+    const chunk = new Uint8Array(await response.arrayBuffer());
+    bytes = appendBytes(bytes, chunk);
+    if (jpegStart < 0) jpegStart = findBytePair(bytes, 0xff, 0xd8);
+    if (jpegStart >= 0) {
+      const jpegEnd = findBytePair(bytes, 0xff, 0xd9, jpegStart + 2);
+      if (jpegEnd >= 0) return new Blob([bytes.slice(jpegStart, jpegEnd + 2)], { type: "image/jpeg" });
+    }
+    if (chunk.length < chunkSize) break;
+  }
+  return null;
+}
+
+function renderNativePdfFastViewer(file) {
+  const viewerCanvas = $("#viewerCanvas");
+  destroyActivePdfViewer();
+  viewerCanvas.innerHTML = `
+    <article class="pdf-native-fast" data-pdf-viewer="native-fast" aria-label="超大 PDF 极速预览器">
+      <header class="pdfjs-toolbar pdf-native-fast-toolbar">
+        <div class="pdf-native-fast-state">
+          <span class="pdfjs-range-dot" aria-hidden="true"></span>
+          <strong>首屏极速预览</strong>
+          <span>先读取第一页，完整文档随后加载</span>
+        </div>
+        <div class="pdfjs-toolbar-group pdf-native-actions">
+          <button type="button" class="pdfjs-zoom-label pdf-native-open-full" data-show-full>打开完整文档</button>
+          <button type="button" class="pdfjs-zoom-label pdf-native-switch" data-use-pdfjs>切换 PDF.js</button>
+        </div>
+      </header>
+      <div class="pdf-native-stage" data-native-stage>
+        <div class="pdf-native-poster" data-native-poster>
+          <div class="pdfjs-loading" data-native-poster-loading role="status">
+            <span class="pdfjs-spinner" aria-hidden="true"></span>
+            <strong>正在提取第一页</strong>
+            <span>只读取少量原件数据</span>
+          </div>
+          <img data-native-poster-image alt="${escapeHtml(file.file_name)} 第一页" hidden />
+          <span class="pdf-native-poster-badge" hidden data-native-poster-badge>首屏快速预览 · 完整文档后台加载中</span>
+        </div>
+        <iframe
+          class="pdf-native-frame"
+          src="about:blank"
+          title="${escapeHtml(file.file_name)}"
+        ></iframe>
+      </div>
+    </article>
+  `;
+  resetViewerScroll();
+
+  const stage = viewerCanvas.querySelector("[data-native-stage]");
+  const frame = viewerCanvas.querySelector(".pdf-native-frame");
+  const poster = viewerCanvas.querySelector("[data-native-poster]");
+  const posterLoading = viewerCanvas.querySelector("[data-native-poster-loading]");
+  const posterImage = viewerCanvas.querySelector("[data-native-poster-image]");
+  const posterBadge = viewerCanvas.querySelector("[data-native-poster-badge]");
+  const showFullButton = viewerCanvas.querySelector("[data-show-full]");
+  const switchButton = viewerCanvas.querySelector("[data-use-pdfjs]");
+  const events = new AbortController();
+  let posterObjectUrl = "";
+
+  function startFullDocument() {
+    if (frame?.getAttribute("src") === "about:blank") frame.src = previewUrl(file);
+  }
+
+  function showFullDocument() {
+    startFullDocument();
+    stage?.classList.add("show-full");
+  }
+
+  showFullButton?.addEventListener("click", showFullDocument, { signal: events.signal });
+  switchButton?.addEventListener("click", () => renderPdfJsViewer(file), { signal: events.signal });
+
+  fetchFirstPdfJpeg(previewUrl(file), events.signal)
+    .then((jpeg) => {
+      if (events.signal.aborted) return;
+      if (!jpeg) {
+        showFullDocument();
+        return;
+      }
+      posterObjectUrl = URL.createObjectURL(jpeg);
+      posterImage.addEventListener(
+        "load",
+        () => {
+          posterLoading.hidden = true;
+          posterImage.hidden = false;
+          posterBadge.hidden = false;
+          poster?.classList.add("is-ready");
+          startFullDocument();
+        },
+        { once: true, signal: events.signal }
+      );
+      posterImage.src = posterObjectUrl;
+    })
+    .catch(() => {
+      if (!events.signal.aborted) showFullDocument();
+    });
+
+  activePdfViewer = {
+    fileId: file.file_id,
+    controller: {
+      destroy() {
+        events.abort();
+        if (posterObjectUrl) URL.revokeObjectURL(posterObjectUrl);
+        if (frame) frame.src = "about:blank";
+      },
+    },
+  };
+}
+
+function renderAdaptivePdfViewer(file) {
+  const fileSize = Number(file?.file_size) || 0;
+  if (fileSize < LARGE_PDF_FAST_PREVIEW_THRESHOLD) {
+    renderPdfJsViewer(file);
+    return;
+  }
+
+  const viewerCanvas = $("#viewerCanvas");
+  destroyActivePdfViewer();
+  const loadToken = pdfViewerLoadToken;
+  const selectedFileId = file.file_id;
+  viewerCanvas.innerHTML = `
+    <div class="empty-state pdfjs-bootstrap-state" role="status">
+      <strong>正在选择最快预览方式</strong>
+      <span>正在检测超大 PDF 是否支持快速 Web 查看</span>
+    </div>
+  `;
+  resetViewerScroll();
+
+  isPdfLinearized(file).then((linearized) => {
+    if (loadToken !== pdfViewerLoadToken || selectedFile(state.selectedArchive)?.file_id !== selectedFileId) return;
+    if (linearized) renderPdfJsViewer(file);
+    else renderNativePdfFastViewer(file);
+  });
+}
+
 function zipPreviewUrl(file) {
   if (!file?.file_id) return "";
   return `/api/file-assets/${encodeURIComponent(file.file_id)}/zip-preview`;
@@ -1507,9 +1756,33 @@ function hasPricedSource(item) {
   return Number(item.priced_source_count || 0) > 0 || archiveFiles(item).some((file) => file.file_role === "priced_source");
 }
 
+function selectedCostInfoYearPeriodOrder(item) {
+  const selectedYear = String(state.filters.period_year || "all");
+  if (state.domain !== "cost_info" || selectedYear === "all") return null;
+  const sequences = costInfoPeriodInfos(item, regionFilterForCostInfo())
+    .filter((info) => info.year === selectedYear)
+    .map((info) => Number(info.kind === "monthly" ? info.month : info.issueNo))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return sequences.length ? Math.min(...sequences) : Number.POSITIVE_INFINITY;
+}
+
+function publicationDateSortValue(item) {
+  const parts = dateParts(item.publish_date || metadata(item, "publish_date_raw"));
+  if (!parts) return Number.NEGATIVE_INFINITY;
+  return Number(`${parts.year}${parts.month}${parts.day}`);
+}
+
+function newestPublicationFirst(left, right) {
+  const publicationDifference = publicationDateSortValue(right) - publicationDateSortValue(left);
+  if (publicationDifference) return publicationDifference;
+  const createdDifference = String(right.created_at || "").localeCompare(String(left.created_at || ""));
+  if (createdDifference) return createdDifference;
+  return String(right.archive_id || "").localeCompare(String(left.archive_id || ""));
+}
+
 function filteredArchives() {
   const query = state.search.trim().toLowerCase();
-  return state.archives.filter((item) => {
+  const rows = state.archives.filter((item) => {
     if (state.status !== "all" && item.status !== state.status) return false;
     if (!activeVisibleFilters().every((filter) => matchesFilter(item, filter))) return false;
     if (!query) return true;
@@ -1530,6 +1803,14 @@ function filteredArchives() {
       .toLowerCase();
     return haystack.includes(query);
   });
+  if (state.domain === "trading") {
+    // The API applies the same ordering. Keep the browser-side list stable
+    // while paged hydration is still receiving older API pages.
+    rows.sort(newestPublicationFirst);
+  } else if (state.domain === "cost_info" && state.filters.period_year && state.filters.period_year !== "all") {
+    rows.sort((left, right) => selectedCostInfoYearPeriodOrder(left) - selectedCostInfoYearPeriodOrder(right));
+  }
+  return rows;
 }
 
 function costInfoArchiveHasIssuePeriod(item) {
@@ -1632,6 +1913,7 @@ async function submitManualUpload(entries, values) {
     formData.append("batch_id", batchId);
     formData.append("source_id", source.source_id);
     formData.append("source_item_key", manualUploadSourceItemKey(perFile));
+    formData.append("derive_tasks", "false");
     formData.append(
       "source_metadata",
       JSON.stringify({
@@ -1756,9 +2038,22 @@ async function deleteManualArchive(item) {
   return response.json();
 }
 
+async function withdrawArchive(item) {
+  if (!item?.archive_id) throw new Error("缺少档案记录，无法撤下。");
+  return requestJson(`/api/archives/${encodeURIComponent(item.archive_id)}/withdraw`, {
+    method: "POST",
+  });
+}
+
 async function loadArchives() {
+  const loadToken = state.archiveLoadToken + 1;
+  state.archiveLoadToken = loadToken;
   state.loading = true;
   state.error = "";
+  state.archiveHydrating = false;
+  state.archiveHydrationError = "";
+  state.archives = [];
+  state.archiveTotalCount = 0;
   renderApiState();
   try {
     const baseParams = {
@@ -1767,32 +2062,64 @@ async function loadArchives() {
       channel_type: state.filters.channel_type,
       search: state.search.trim(),
     };
-    const archives = [];
-    let totalCount = null;
-    let offset = 0;
-    while (true) {
-      const response = await fetch(apiUrl("/api/archives", { ...baseParams, limit: ARCHIVE_PAGE_SIZE, offset }));
-      if (!response.ok) throw new Error(await response.text());
-      const rows = await response.json();
-      const totalHeader = response.headers?.get?.("x-total-count");
-      if (totalCount === null && totalHeader !== null && totalHeader !== undefined && totalHeader !== "") {
-        const parsed = Number(totalHeader);
-        if (Number.isFinite(parsed)) totalCount = parsed;
-      }
-      archives.push(...rows);
-      if (!rows.length) break;
-      if (Number.isFinite(totalCount) && archives.length >= totalCount) break;
-      if (!Number.isFinite(totalCount) && rows.length < ARCHIVE_PAGE_SIZE) break;
-      offset += rows.length;
+    const response = await fetch(apiUrl("/api/archives", { ...baseParams, limit: ARCHIVE_INITIAL_PAGE_SIZE, offset: 0 }));
+    if (!response.ok) throw new Error(await response.text());
+    const rows = await response.json();
+    if (loadToken !== state.archiveLoadToken) return;
+    const totalHeader = response.headers?.get?.("x-total-count");
+    const totalCount = totalHeader === null || totalHeader === undefined || totalHeader === "" ? NaN : Number(totalHeader);
+    const hasTotalCount = Number.isFinite(totalCount);
+    const needsHydration = hasTotalCount
+      ? rows.length < totalCount
+      : rows.length === ARCHIVE_INITIAL_PAGE_SIZE;
+
+    state.archives = rows;
+    state.archiveTotalCount = hasTotalCount ? totalCount : rows.length;
+    state.loading = false;
+    state.archiveHydrating = needsHydration;
+    renderAll();
+
+    if (needsHydration) {
+      void hydrateArchives({ baseParams, offset: rows.length, totalCount: hasTotalCount ? totalCount : null, loadToken });
     }
-    state.archives = archives;
-    state.archiveTotalCount = Number.isFinite(totalCount) ? totalCount : archives.length;
   } catch (error) {
+    if (loadToken !== state.archiveLoadToken) return;
     state.archives = [];
     state.archiveTotalCount = 0;
     state.error = error.message || "档案列表加载失败";
   } finally {
+    if (loadToken !== state.archiveLoadToken) return;
     state.loading = false;
+    renderAll();
+  }
+}
+
+async function hydrateArchives({ baseParams, offset, totalCount, loadToken }) {
+  let nextOffset = offset;
+  try {
+    while (true) {
+      const response = await fetch(apiUrl("/api/archives", { ...baseParams, limit: ARCHIVE_PAGE_SIZE, offset: nextOffset }));
+      if (!response.ok) throw new Error(await response.text());
+      const rows = await response.json();
+      if (loadToken !== state.archiveLoadToken) return;
+      if (!rows.length) break;
+
+      // 每次替换数组，确保地区/期次维度缓存会按新数据重新计算。
+      state.archives = [...state.archives, ...rows];
+      nextOffset += rows.length;
+      renderApiState();
+
+      if (Number.isFinite(totalCount) && state.archives.length >= totalCount) break;
+      if (!Number.isFinite(totalCount) && rows.length < ARCHIVE_PAGE_SIZE) break;
+    }
+    if (loadToken !== state.archiveLoadToken) return;
+    state.archiveTotalCount = Number.isFinite(totalCount) ? totalCount : state.archives.length;
+    state.archiveHydrating = false;
+    renderAll();
+  } catch (error) {
+    if (loadToken !== state.archiveLoadToken) return;
+    state.archiveHydrating = false;
+    state.archiveHydrationError = error.message || "完整档案列表补全失败";
     renderAll();
   }
 }
@@ -1873,16 +2200,25 @@ function coverageMatrixUrl() {
 }
 
 async function loadCoverageMatrix() {
+  const loadToken = state.coverageLoadToken + 1;
+  state.coverageLoadToken = loadToken;
   state.loading = true;
   state.error = "";
-  renderApiState();
+  // 过滤条件已经变化时，不能把上一地区的数据挂在新标题下等待请求完成。
+  // 保留明确的加载态，避免“北京标题 + 成都表格”这类短暂错配。
+  state.coverageRows = [];
+  renderAll();
   try {
     const response = await fetchWithRetry(coverageMatrixUrl(), { timeout: 30000, retries: 3 });
-    state.coverageRows = await response.json();
+    const rows = await response.json();
+    if (loadToken !== state.coverageLoadToken || state.viewMode !== "coverage") return;
+    state.coverageRows = rows;
   } catch (error) {
+    if (loadToken !== state.coverageLoadToken || state.viewMode !== "coverage") return;
     state.coverageRows = [];
     state.error = error.name === "AbortError" ? "覆盖矩阵加载超时，请刷新重试" : (error.message || "覆盖矩阵加载失败");
   } finally {
+    if (loadToken !== state.coverageLoadToken || state.viewMode !== "coverage") return;
     state.loading = false;
     renderAll();
   }
@@ -1938,6 +2274,260 @@ async function runIncrementalCrawlAll() {
   }
 }
 
+function coverageSourceUrl(source) {
+  return String(
+    source?.url || source?.base_url || source?.config?.stable?.entry_url || source?.config?.audit?.evidence_url || ""
+  ).trim();
+}
+
+function safeExternalUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    return ["http:", "https:"].includes(parsed.protocol) ? parsed.href : "";
+  } catch {
+    return "";
+  }
+}
+
+function isCoverageDirectorySource(source) {
+  return source?.config?.source_shape?.acquisition === "coverage_directory_only";
+}
+
+function coverageSourceCandidates(row) {
+  const sourceIds = new Set(Array.isArray(row?.source_ids) ? row.source_ids : []);
+  const rowRegionCode = String(row?.coverage_region_code || "");
+  const candidates = (state.costInfoSources || [])
+    .filter((source) => sourceIds.has(source.source_id) && source.status === "active")
+    .filter((source) => !isCoverageDirectorySource(source))
+    .filter((source) => Boolean(coverageSourceUrl(source)))
+    .sort((left, right) => {
+      const leftExact = costInfoSourceRegionCode(left) === rowRegionCode ? 0 : 1;
+      const rightExact = costInfoSourceRegionCode(right) === rowRegionCode ? 0 : 1;
+      if (leftExact !== rightExact) return leftExact - rightExact;
+      const leftOfficial = left?.config?.stable?.publisher_type ? 0 : 1;
+      const rightOfficial = right?.config?.stable?.publisher_type ? 0 : 1;
+      if (leftOfficial !== rightOfficial) return leftOfficial - rightOfficial;
+      return String(left.name || "").localeCompare(String(right.name || ""), "zh-CN");
+    });
+
+  const seenUrls = new Set();
+  return candidates.filter((source) => {
+    const key = safeExternalUrl(coverageSourceUrl(source)).replace(/\/$/, "") || source.source_id;
+    if (seenUrls.has(key)) return false;
+    seenUrls.add(key);
+    return true;
+  });
+}
+
+function coverageBackfillIsAvailable(row) {
+  if (!row || row.business_coverage_status === "covered") return false;
+  if (isFutureCoveragePeriod(row.period)) return false;
+  return coverageSourceCandidates(row).length > 0;
+}
+
+function closeCoverageBackfillDialog() {
+  state.coverageBackfill = {
+    open: false,
+    row: null,
+    sourceId: "",
+    submitting: false,
+    error: "",
+  };
+  renderCoverageBackfillModal();
+}
+
+function openCoverageBackfillDialog(regionCode, period) {
+  const row = state.coverageRows.find(
+    (item) => String(item.coverage_region_code || "") === String(regionCode || "") && item.period === period
+  );
+  if (!row) {
+    showToast("未找到对应的覆盖期次，请刷新后重试。", "error");
+    return;
+  }
+  if (!coverageBackfillIsAvailable(row)) {
+    showToast("该期没有可直接下载的官方源；请补充官网源或通过“新增档案”上传原件。", "warning");
+    return;
+  }
+  const sources = coverageSourceCandidates(row);
+  state.coverageBackfill = {
+    open: true,
+    row,
+    sourceId: sources[0]?.source_id || "",
+    submitting: false,
+    error: "",
+  };
+  renderCoverageBackfillModal();
+}
+
+function selectCoverageBackfillSource(sourceId) {
+  const row = state.coverageBackfill.row;
+  if (!row || !coverageSourceCandidates(row).some((source) => source.source_id === sourceId)) return;
+  state.coverageBackfill.sourceId = sourceId;
+  state.coverageBackfill.error = "";
+  renderCoverageBackfillModal();
+}
+
+function renderCoverageBackfillModal() {
+  const modal = $("#coverageBackfillModal");
+  if (!modal) return;
+  const dialog = state.coverageBackfill;
+  modal.hidden = !dialog.open;
+  modal.setAttribute("aria-hidden", String(!dialog.open));
+  if (!dialog.open || !dialog.row) {
+    modal.innerHTML = "";
+    return;
+  }
+
+  const row = dialog.row;
+  const sources = coverageSourceCandidates(row);
+  const selected = sources.find((source) => source.source_id === dialog.sourceId) || sources[0];
+  if (selected && dialog.sourceId !== selected.source_id) dialog.sourceId = selected.source_id;
+  const region = row.coverage_region_name || regionLabel(row.coverage_region_code) || row.coverage_region_code;
+  const sourceOptions = sources
+    .map((source) => {
+      const selectedClass = source.source_id === dialog.sourceId ? " is-selected" : "";
+      const isSelected = source.source_id === dialog.sourceId;
+      const url = safeExternalUrl(coverageSourceUrl(source));
+      return `
+        <div class="coverage-source-choice${selectedClass}">
+          <button
+            type="button"
+            class="coverage-source-select"
+            data-action="select-coverage-backfill-source"
+            data-source-id="${escapeHtml(source.source_id)}"
+            aria-pressed="${isSelected}"
+          >
+            <span>
+              <strong>${escapeHtml(source.name || "官方信息价源")}</strong>
+              <small>${escapeHtml(url || coverageSourceUrl(source))}</small>
+            </span>
+            <span class="coverage-source-selected">${isSelected ? "已选" : "选择"}</span>
+          </button>
+          ${url ? `<a class="coverage-source-link" href="${escapeHtml(url)}" target="_blank" rel="noreferrer"><i data-lucide="external-link"></i><span>查看官网</span></a>` : ""}
+        </div>
+      `;
+    })
+    .join("");
+
+  modal.innerHTML = `
+    <section class="coverage-backfill-dialog" role="dialog" aria-modal="true" aria-labelledby="coverageBackfillTitle">
+      <header class="manual-upload-header">
+        <div>
+          <p class="eyebrow">Official Source Download</p>
+          <h2 id="coverageBackfillTitle">下载到档案列表</h2>
+        </div>
+        <button class="icon-button" type="button" title="关闭" data-action="close-coverage-backfill" ${dialog.submitting ? "disabled" : ""}>
+          <i data-lucide="x"></i>
+        </button>
+      </header>
+      <div class="coverage-backfill-body">
+        <div class="coverage-backfill-target">
+          <strong>${escapeHtml(region)}</strong>
+          <span>${escapeHtml(row.period)} · ${escapeHtml(businessCoverageLabels[row.business_coverage_status] || row.business_coverage_status || "待回填")}</span>
+        </div>
+        <p class="coverage-backfill-note">指定一个已登记的官方源后，系统会自动创建下载任务、抓取原件、按 SHA-256 去重，并将新档案带回档案列表。</p>
+        <div class="coverage-source-list" role="list" aria-label="可用官方源">
+          ${sourceOptions || '<p class="coverage-backfill-empty">没有可下载的官方源。</p>'}
+        </div>
+        ${row.coverage_note ? `<p class="coverage-backfill-evidence">${escapeHtml(row.coverage_note)}</p>` : ""}
+        <div class="form-error" aria-live="polite">${escapeHtml(dialog.error || "")}</div>
+      </div>
+      <footer class="manual-upload-actions">
+        <button class="secondary-button" type="button" data-action="close-coverage-backfill" ${dialog.submitting ? "disabled" : ""}>取消</button>
+        <button class="primary-button" type="button" data-action="submit-coverage-backfill" ${!selected || dialog.submitting ? "disabled" : ""}>
+          <i data-lucide="${dialog.submitting ? "loader-circle" : "download-cloud"}"></i>
+          <span>${dialog.submitting ? "下载入湖中…" : "下载到档案列表"}</span>
+        </button>
+      </footer>
+    </section>
+  `;
+  refreshIcons();
+}
+
+function workerSummaryValue(summary, key) {
+  return Number(summary?.[key] || 0);
+}
+
+async function submitCoverageBackfill() {
+  const dialog = state.coverageBackfill;
+  const row = dialog.row;
+  if (!dialog.open || !row || dialog.submitting) return;
+  const source = coverageSourceCandidates(row).find((item) => item.source_id === dialog.sourceId);
+  if (!source) {
+    dialog.error = "请选择一个可下载的官方源。";
+    renderCoverageBackfillModal();
+    return;
+  }
+
+  dialog.submitting = true;
+  dialog.error = "";
+  renderCoverageBackfillModal();
+  try {
+    const backfill = await postJson("/api/crawler/coverage-backfill", {
+      region_code: row.coverage_region_code,
+      start_period: row.period,
+      end_period: row.period,
+      source_id: source.source_id,
+      dry_run: false,
+    });
+    const tasks = (backfill.tasks || []).filter((task) => task.source_id && task.batch_id);
+    if (!tasks.length) {
+      const reason = backfill.skipped?.[0]?.reason;
+      dialog.submitting = false;
+      dialog.error = reason === "pending_or_running_exists"
+        ? "该期已有下载任务正在执行，请稍后刷新档案列表。"
+        : "未创建下载任务；该期可能已覆盖或该官方源暂不可用。";
+      renderCoverageBackfillModal();
+      await loadCoverageMatrix();
+      return;
+    }
+
+    const workers = [];
+    for (const task of tasks) {
+      workers.push(
+        await postJson("/api/crawler/worker/run", {
+          dry_run: false,
+          source_id: task.source_id,
+          batch_id: task.batch_id,
+          limit: 1,
+          trigger: "coverage_matrix_direct_download",
+        })
+      );
+    }
+    const summaries = workers.map((worker) => worker.summary || worker);
+    const archiveCount = summaries.reduce((count, summary) => count + workerSummaryValue(summary, "archive_created_count"), 0);
+    const duplicateCount = summaries.reduce((count, summary) => count + workerSummaryValue(summary, "duplicate_count"), 0);
+    const failedCount = summaries.reduce((count, summary) => count + workerSummaryValue(summary, "failed_count"), 0);
+
+    closeCoverageBackfillDialog();
+    if (archiveCount > 0) {
+      const [year, month] = String(row.period).split("-");
+      state.viewMode = "archives";
+      state.filters = {
+        ...state.filters,
+        region_code: row.coverage_region_code || "all",
+        period_year: year || "all",
+        period_month: month || "all",
+      };
+      renderDomain();
+      await loadArchives();
+      showToast(`已下载并入库 ${archiveCount} 份档案。`, "success");
+    } else {
+      await loadCoverageMatrix();
+      const result = failedCount
+        ? `下载完成，但有 ${failedCount} 个任务异常。`
+        : duplicateCount
+          ? "官网文件已在档案列表中，已按指纹跳过重复下载。"
+          : "已检查官网，暂未发现该期可下载的新原件。";
+      showToast(result, failedCount ? "error" : duplicateCount ? "warning" : "success");
+    }
+  } catch (error) {
+    dialog.submitting = false;
+    dialog.error = error.message || "官网下载失败，请稍后重试。";
+    renderCoverageBackfillModal();
+  }
+}
+
 async function loadStorageAudit() {
   if (state.domain === "quota") return; // quota 使用专属统计，不加载全域 NAS 原件条
   state.storageAudit = { ...state.storageAudit, loading: true, error: "" };
@@ -1952,11 +2542,25 @@ async function loadStorageAudit() {
   renderStorageAudit();
 }
 
+function scheduleInitialStorageAudit() {
+  // 首屏先让档案列表返回；NAS 全量审计在稍后启动，避免与首次列表查询争用连接和带宽。
+  window.setTimeout(() => {
+    if (state.domain !== "quota") loadStorageAudit();
+  }, 2000);
+}
+
 async function loadCurrentView() {
   if (state.domain === "quota") return; // quota 走 /api/data-lake/quota，禁止回退旧 /api/archives
-  await loadCostInfoSourceDimensions();
-  if (state.viewMode === "coverage") return loadCoverageMatrix();
-  return loadArchives();
+  const sourceDimensions = loadCostInfoSourceDimensions();
+  if (state.viewMode === "coverage") {
+    const coverage = loadCoverageMatrix();
+    await sourceDimensions;
+    if (state.viewMode === "coverage") renderAll();
+    return coverage;
+  }
+  const archives = loadArchives();
+  await sourceDimensions;
+  return archives;
 }
 
 async function loadArchiveDetail(id) {
@@ -2579,12 +3183,137 @@ async function handleDeleteArchive(id) {
   }
 }
 
+async function handleWithdrawArchive(id) {
+  const archive = archiveById(id);
+  if (!archive) {
+    showToast("未找到要撤下的档案。", "error");
+    return;
+  }
+  const confirmed = window.confirm
+    ? window.confirm(`确认删除“${archive.title}”？\n\n档案将从列表撤下，但不会删除 NAS 原件，可通过审计记录恢复。`)
+    : true;
+  if (!confirmed) return;
+  state.loading = true;
+  renderApiState();
+  try {
+    await withdrawArchive(archive);
+    await loadCurrentView();
+    showToast("档案已撤下，NAS 原件仍保留。", "success");
+  } catch (error) {
+    state.loading = false;
+    state.error = error.message || "撤下失败";
+    showToast(`删除失败：${state.error}`, "error");
+    renderApiState();
+  }
+}
+
 function renderApiState() {
   const apiState = $("#apiState");
   if (!apiState) return;
-  apiState.className = `api-state ${state.error ? "error" : state.loading ? "loading" : "ok"}`;
-  apiState.textContent = state.error ? "接口异常" : state.loading ? "加载中" : "Archive API";
-  apiState.title = state.error;
+  const isHydrating = state.archiveHydrating && state.archiveTotalCount > state.archives.length;
+  const progress = `${state.archives.length}/${state.archiveTotalCount}`;
+  apiState.className = `api-state ${state.error || state.archiveHydrationError ? "error" : state.loading || isHydrating ? "loading" : "ok"}`;
+  apiState.textContent = state.error
+    ? "接口异常"
+    : state.archiveHydrationError
+      ? "补全失败"
+      : state.loading
+        ? "加载中"
+        : isHydrating
+          ? `档案补全 ${progress}`
+          : "Archive API";
+  apiState.title = state.error || state.archiveHydrationError || (isHydrating ? `已显示首批数据，正在后台补全 ${progress}` : "");
+}
+
+function latestCostInfoPeriodLabel(archives) {
+  let latest = null;
+  (archives || []).forEach((item) => {
+    costInfoPeriodInfos(item, regionFilterForCostInfo()).forEach((info) => {
+      const year = Number(info.year || 0);
+      const sequence = info.kind === "monthly" ? Number(info.month || 0) : Number(info.issueNo || 0);
+      const score = year * 1000 + Math.min(sequence, 999);
+      if (!year || (latest && score <= latest.score)) return;
+      latest = {
+        score,
+        label:
+          info.kind === "monthly"
+            ? `${info.year}年${Number(info.month)}月`
+            : info.issueNo
+              ? `${info.year}年第${info.issueNo}期`
+              : `${info.year}年`,
+      };
+    });
+  });
+  return latest?.label || "暂无";
+}
+
+function costInfoOverviewModel() {
+  const intro = {
+    eyebrow: state.viewMode === "coverage" ? "Coverage Intelligence" : "Information Price Lake",
+    title: state.viewMode === "coverage" ? "地区与期次覆盖一屏掌握" : "信息价原件与期次统一管理",
+    description: "数据来自 NAS 上唯一的共享 PostgreSQL，原件集中留存在 NAS 数据湖。",
+  };
+  if (state.viewMode === "coverage") {
+    const rows = filteredCoverageRows();
+    const stats = coverageRegionStats(rows);
+    const regions = new Set(rows.map((row) => row.coverage_region_code).filter(Boolean));
+    const effectiveTotal = Math.max(0, stats.total - stats.future);
+    return {
+      ...intro,
+      metrics: [
+        { icon: "circle-check-big", label: "已覆盖", value: String(stats.covered), note: `共 ${effectiveTotal} 个有效单元` },
+        { icon: "clock-3", label: "待核", value: String(stats.pending), note: "等待发布或回填" },
+        { icon: "circle-alert", label: "缺失", value: String(stats.missing), note: "需要采集或补录" },
+        { icon: "map-pinned", label: "覆盖地区", value: String(regions.size), note: "当前筛选范围" },
+      ],
+    };
+  }
+
+  const archives = state.archives || [];
+  const regionCodes = new Set(
+    archives
+      .map((item) => item.region_code || metadata(item, "coverage_region_code"))
+      .filter(Boolean)
+  );
+  const manualCount = archives.filter((item) => item.channel_type === "manual_upload").length;
+  return {
+    ...intro,
+    metrics: [
+      { icon: "archive", label: "档案总量", value: String(state.archiveTotalCount || archives.length), note: "份 Layer 0 原件" },
+      { icon: "map-pinned", label: "覆盖地区", value: String(regionCodes.size), note: "按行政区划归集" },
+      { icon: "calendar-days", label: "最新期次", value: latestCostInfoPeriodLabel(archives), note: "按档案期次识别" },
+      { icon: "upload-cloud", label: "人工补录", value: String(manualCount), note: "爬虫受阻来源" },
+    ],
+  };
+}
+
+function renderCostInfoOverview() {
+  const container = $("#costInfoOverview");
+  if (!container) return;
+  const visible = state.domain === "cost_info";
+  container.hidden = !visible;
+  if (!visible) return;
+  const model = costInfoOverviewModel();
+  container.innerHTML = `
+    <div class="cost-info-overview-copy">
+      <p>${escapeHtml(model.eyebrow)}</p>
+      <strong>${escapeHtml(model.title)}</strong>
+      <span>${escapeHtml(model.description)}</span>
+    </div>
+    <div class="cost-info-metrics">
+      ${model.metrics
+        .map(
+          (metric) => `
+            <article class="cost-info-metric">
+              <div class="cost-info-metric-label"><i data-lucide="${escapeHtml(metric.icon)}"></i><span>${escapeHtml(metric.label)}</span></div>
+              <strong>${escapeHtml(metric.value)}</strong>
+              <small>${escapeHtml(metric.note)}</small>
+            </article>
+          `
+        )
+        .join("")}
+    </div>
+  `;
 }
 
 function renderDomain() {
@@ -2609,6 +3338,7 @@ function renderDomain() {
     button.classList.toggle("active", button.dataset.viewMode === state.viewMode);
     button.disabled = button.dataset.viewMode === "coverage" && state.domain !== "cost_info";
   });
+  renderCostInfoOverview();
   renderFilters();
   renderHead();
   renderViewShell();
@@ -2779,6 +3509,7 @@ function renderStorageAuditBar() {
   const missing = Number(audit.missing_count || 0);
   const mismatch = Number(audit.size_mismatch_count || 0);
   const errors = Number(audit.error_count || 0);
+  const orphanReferences = Number(audit.orphan_reference_count || 0);
   const firstIssue = (audit.issues || [])[0];
   const issueText = firstIssue
     ? `${firstIssue.region_code ? `${firstIssue.region_code} ` : ""}${firstIssue.file_name || firstIssue.object_key || firstIssue.file_id}`
@@ -2792,6 +3523,7 @@ function renderStorageAuditBar() {
       <span>可用率 ${escapeHtml(formatAuditPercent(audit.availability_rate))}</span>
       <span>缺失 ${escapeHtml(missing)}</span>
       <span>大小异常 ${escapeHtml(mismatch)}</span>
+      <span>孤儿引用 ${escapeHtml(orphanReferences)}</span>
       <span>错误 ${escapeHtml(errors)}</span>
       ${issueText ? `<span class="storage-audit-issue">${escapeHtml(issueText)}</span>` : ""}
     </div>
@@ -2806,8 +3538,15 @@ function renderStorageAudit() {
 
 function renderRows() {
   const rows = filteredArchives();
+  const isHydrating = state.archiveHydrating && state.archiveTotalCount > state.archives.length;
+  const hasActiveListFilter = Boolean(state.search.trim()) || state.status !== "all" || activeFilters().some((filter) => filterValue(filter) !== "all");
+  const total = state.archiveTotalCount || state.archives.length;
   $("#resultCount").textContent = String(rows.length);
-  $("#resultSummary").textContent = rows.length === 1 ? activeConfig().resultUnit : activeConfig().resultUnit;
+  $("#resultSummary").textContent = isHydrating
+    ? `${activeConfig().resultUnit}（已加载 ${state.archives.length}/${state.archiveTotalCount}）`
+    : hasActiveListFilter
+      ? `${activeConfig().resultUnit}（当前筛选，共 ${total} 份）`
+      : activeConfig().resultUnit;
   $("#emptyState").hidden = rows.length > 0 || state.loading;
   $("#emptyHint").textContent = state.error ? "接口暂不可用，请稍后刷新。" : (activeConfig().emptyHint || "调整筛选条件或等待采集落档。");
   $("#emptyUploadButton").hidden = Boolean(state.error) || state.domain !== "cost_info" || rows.length > 0 || state.loading || !selectedManualUploadRegionCode();
@@ -3149,6 +3888,23 @@ function renderCoveragePeriodCell(row, month) {
     `business-${row.business_coverage_status}`,
     `source-${row.source_completeness_status}`,
   ].join(" ");
+  if (coverageBackfillIsAvailable(row)) {
+    const actionLabel = row.business_coverage_status === "pending_verify" ? "待核·回填" : "回填";
+    const busy = state.coverageBackfill.submitting ? "disabled" : "";
+    return `
+      <td>
+        <button
+          class="${escapeHtml(className)} coverage-backfill-button"
+          type="button"
+          data-action="open-coverage-backfill"
+          data-region-code="${escapeHtml(row.coverage_region_code)}"
+          data-period="${escapeHtml(row.period)}"
+          title="${escapeHtml(`${title}；选择官网后直接下载并入库`)}"
+          ${busy}
+        >${escapeHtml(actionLabel)}</button>
+      </td>
+    `;
+  }
   return `<td><span class="${escapeHtml(className)}" title="${escapeHtml(title)}">${escapeHtml(label)}</span></td>`;
 }
 
@@ -3158,7 +3914,9 @@ function renderCoverageMatrix() {
   $("#resultCount").textContent = String(rows.length);
   $("#resultSummary").textContent = countedRows.length === rows.length ? "个覆盖单元" : `个覆盖单元，当前地市 ${countedRows.length}`;
   $("#coverageEmptyState").hidden = rows.length > 0 || state.loading;
-  $("#coverageMatrixRows").innerHTML = renderCoverageMatrixTable(rows);
+  $("#coverageMatrixRows").innerHTML = state.loading
+    ? `<div class="empty-state coverage-loading-state" role="status"><strong>正在加载覆盖矩阵</strong><span>正在汇总当前地区与期次的覆盖信息…</span></div>`
+    : renderCoverageMatrixTable(rows);
   refreshIcons();
 }
 
@@ -3259,6 +4017,14 @@ function renderActions(item) {
         </button>
       `
       : "";
+  const withdrawAction =
+    item.channel_type !== "manual_upload"
+      ? `
+        <button class="icon-button danger-action" type="button" title="删除（撤下档案，不删除 NAS 原件）" data-action="withdraw-archive" data-id="${escapeHtml(item.archive_id)}">
+          <i data-lucide="trash-2"></i>
+        </button>
+      `
+      : "";
   const download = href
     ? `
       <a class="icon-button" href="${escapeHtml(href)}" title="下载原件" download>
@@ -3280,6 +4046,7 @@ function renderActions(item) {
         <i data-lucide="paperclip"></i>
       </button>
       ${manualActions}
+      ${withdrawAction}
     </div>
   `;
 }
@@ -3288,11 +4055,13 @@ function renderAll() {
   if (state.domain === "quota") return; // quota 独立渲染，避免写入被隐藏的旧 DOM
   renderApiState();
   renderTotalBadge();
+  renderCostInfoOverview();
   renderFilters();
   renderViewShell();
   renderStorageAudit();
   if (state.viewMode === "coverage") renderCoverageMatrix();
   else renderRows();
+  renderCoverageBackfillModal();
 }
 
 function openViewer() {
@@ -3304,6 +4073,7 @@ function openViewer() {
 
 function closeViewer() {
   const viewer = $("#viewer");
+  destroyActivePdfViewer();
   viewer.classList.remove("open");
   viewer.setAttribute("aria-hidden", "true");
   state.viewerInfoOpen = false;
@@ -3429,11 +4199,13 @@ function resetViewerScroll() {
 
 function renderViewerCanvas(item, file) {
   if (!file) {
+    destroyActivePdfViewer();
     $("#viewerCanvas").innerHTML = `<div class="empty-state"><strong>无预览文件</strong><span>该档案尚未挂载原件。</span></div>`;
     resetViewerScroll();
     return;
   }
   if (file.file_role === "priced_source") {
+    destroyActivePdfViewer();
     $("#viewerCanvas").innerHTML = `
       <article class="web-page source-only">
         <span class="web-origin">${escapeHtml(file.source_url || item.source_url || "")}</span>
@@ -3447,12 +4219,10 @@ function renderViewerCanvas(item, file) {
   }
   const ext = file.file_ext || "pdf";
   if (ext === "pdf") {
-    $("#viewerCanvas").innerHTML = `
-      <embed class="pdf-embed" src="${escapeHtml(previewUrl(file))}" type="${escapeHtml(file.mime_type || "application/pdf")}" />
-    `;
-    resetViewerScroll();
+    renderAdaptivePdfViewer(file);
     return;
   }
+  destroyActivePdfViewer();
   if (["xls", "xlsx"].includes(ext)) {
     const selectedFileId = file.file_id;
     $("#viewerCanvas").innerHTML = `<div class="empty-state"><strong>正在加载预览</strong><span>${escapeHtml(file.file_name)}</span></div>`;
@@ -3699,6 +4469,10 @@ function setActiveFilter(button) {
 
 function setDomain(domain) {
   if (!domainConfigs[domain] || domain === state.domain) return;
+  state.archiveLoadToken += 1;
+  state.coverageLoadToken += 1;
+  state.archiveHydrating = false;
+  state.archiveHydrationError = "";
   state.domain = domain;
   if (domain !== "cost_info") state.viewMode = "archives";
   state.status = "all";
@@ -3720,6 +4494,13 @@ function setViewMode(mode) {
   if (!["archives", "coverage"].includes(mode)) return;
   if (mode === "coverage" && state.domain !== "cost_info") return;
   if (state.viewMode === mode) return;
+  if (mode === "coverage") {
+    state.archiveLoadToken += 1;
+    state.archiveHydrating = false;
+    state.archiveHydrationError = "";
+  } else {
+    state.coverageLoadToken += 1;
+  }
   state.viewMode = mode;
   state.filterAdvancedOpen = false;
   renderDomain();
@@ -3846,10 +4627,17 @@ function handleClick(event) {
     renderFilters();
   }
   if (action.dataset.action === "crawl-scheduler-all") runIncrementalCrawlAll();
+  if (action.dataset.action === "open-coverage-backfill") {
+    openCoverageBackfillDialog(action.dataset.regionCode, action.dataset.period);
+  }
+  if (action.dataset.action === "close-coverage-backfill") closeCoverageBackfillDialog();
+  if (action.dataset.action === "select-coverage-backfill-source") selectCoverageBackfillSource(action.dataset.sourceId);
+  if (action.dataset.action === "submit-coverage-backfill") submitCoverageBackfill();
   if (action.dataset.action === "open-upload") openManualUploadDialog();
   if (action.dataset.action === "edit-archive") openArchiveEditDialog(action.dataset.id);
   if (action.dataset.action === "supplement-archive") openManualSupplementDialog(action.dataset.id);
   if (action.dataset.action === "delete-archive") handleDeleteArchive(action.dataset.id);
+  if (action.dataset.action === "withdraw-archive") handleWithdrawArchive(action.dataset.id);
   if (action.dataset.action === "remove-upload-file") {
     const idx = Number(action.dataset.uploadIdx);
     if (Array.isArray(state.manualUpload.files) && idx >= 0 && idx < state.manualUpload.files.length) {
@@ -3890,13 +4678,14 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (state.manualUpload.open) closeManualUploadDialog();
+  else if (state.coverageBackfill.open) closeCoverageBackfillDialog();
   else closeViewer();
 });
 window.addEventListener("load", () => {
   renderDomain();
   refreshIcons();
   loadCurrentView();
-  loadStorageAudit();
+  scheduleInitialStorageAudit();
 });
 
 $("#globalSearch").addEventListener("input", (event) => {
@@ -3938,4 +4727,3 @@ if (uploadModal) {
     if (state.manualUpload.open) e.preventDefault();
   });
 }
-

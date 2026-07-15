@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy.orm import object_session
 
 from app.adapters.base_cost_info_adapter import DiscoveredIssue
+from app.adapters.history_scope import HISTORY_PAGE_CEILING, is_history_backfill
 from app.archive_rules import build_cost_info_business_key
 from app.hefei_cost_info import ingest_hefei_cost_info_issue, list_hefei_cost_info_issues
 
@@ -16,7 +17,8 @@ class HefeiPdfAdapter:
 
     def discover(self, source, task, client) -> list[DiscoveredIssue]:
         parser = _active_parser(source)
-        rows = list_hefei_cost_info_issues(client, parser=parser, max_pages_per_year=1)
+        max_pages_per_year = HISTORY_PAGE_CEILING if is_history_backfill(task) else 1
+        rows = list_hefei_cost_info_issues(client, parser=parser, max_pages_per_year=max_pages_per_year)
         rows = _limit_rows(rows, source)
         self._rows_by_key = {_row_source_item_key(row): row for row in rows}
         self._client = client

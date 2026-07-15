@@ -134,7 +134,7 @@ def build_coverage_matrix(
     province_code: str | None = None,
 ) -> list[CoverageMatrixRow]:
     sources = _cost_info_sources(session)
-    archives = _active_cost_info_archives(session)
+    archives = _active_cost_info_archives(session, province_code=province_code)
     source_by_id = {source.source_id: source for source in sources}
     targets = _coverage_targets(sources, province_code=province_code)
     periods = _matrix_period_filter(
@@ -353,17 +353,19 @@ def _province_code_for(region_code: str | None) -> str | None:
     return f"{region_code[:2]}0000"
 
 
-def _active_cost_info_archives(session: Session) -> list[Archive]:
-    return list(
-        session.scalars(
-            select(Archive)
-            .options(selectinload(Archive.files).selectinload(ArchiveFile.file_asset))
-            .where(Archive.domain_type == "cost_info")
-            .where(Archive.status.in_(ACTIVE_ARCHIVE_STATUSES))
-            .where(Archive.is_current.is_(True))
-            .where(Archive.is_withdrawn.is_(False))
-        ).all()
+def _active_cost_info_archives(session: Session, *, province_code: str | None = None) -> list[Archive]:
+    statement = (
+        select(Archive)
+        .options(selectinload(Archive.files).selectinload(ArchiveFile.file_asset))
+        .where(Archive.domain_type == "cost_info")
+        .where(Archive.status.in_(ACTIVE_ARCHIVE_STATUSES))
+        .where(Archive.is_current.is_(True))
+        .where(Archive.is_withdrawn.is_(False))
     )
+    if province_code and len(province_code) >= 2:
+        # 覆盖目标已经按省份筛选；不必再预加载其他省份的档案和 NAS 文件关系。
+        statement = statement.where(Archive.region_code.like(f"{province_code[:2]}%"))
+    return list(session.scalars(statement).all())
 
 
 def _cost_info_sources(session: Session) -> list[DataSource]:
@@ -464,7 +466,7 @@ def _coverage_targets(sources: list[DataSource], *, province_code: str | None) -
                     "coverage_region_code": region_code,
                     "coverage_region_name": target.get("region_name"),
                     "coverage_region_name_explicit": explicit_region_name,
-                    "target_level": _normalize_target_level(target.get("target_level")),
+                    "target_level": _normalize_target_level(target.get("target_level"), region_code=region_code),
                     "requires_city_source": bool(target.get("requires_city_source")),
                     "source_completeness_status": target.get("source_completeness_status") or "pending_source_audit",
                     "source_audit_status": target.get("source_audit_status"),
@@ -489,7 +491,7 @@ def _coverage_targets(sources: list[DataSource], *, province_code: str | None) -
             if target.get("source_completeness_status") == "source_blocked":
                 entry["source_completeness_status"] = "source_blocked"
             if not entry.get("target_level") and target.get("target_level"):
-                entry["target_level"] = _normalize_target_level(target.get("target_level"))
+                entry["target_level"] = _normalize_target_level(target.get("target_level"), region_code=region_code)
             if not entry.get("source_audit_status") and target.get("source_audit_status"):
                 entry["source_audit_status"] = target.get("source_audit_status")
             if not entry.get("source_audit_note") and target.get("source_audit_note"):
@@ -510,11 +512,18 @@ def _coverage_targets(sources: list[DataSource], *, province_code: str | None) -
     return list(targets.values())
 
 
-def _normalize_target_level(value: object) -> str | None:
+MUNICIPALITY_PROVINCE_CODES = {"110000", "120000", "310000", "500000"}
+
+
+def _normalize_target_level(value: object, *, region_code: str | None = None) -> str | None:
     text = str(value or "").strip().lower()
     if not text:
         return None
     if text in {"city", "prefecture", "prefecture_city", "municipality"}:
+        return "city"
+    # 北京、天津、上海、重庆的省级官方刊物就是本市信息价。覆盖矩阵按“地市”
+    # 展示时，不能因为配置沿用了 province 而将它们全部筛掉。
+    if text == "province" and str(region_code or "") in MUNICIPALITY_PROVINCE_CODES:
         return "city"
     if text in {"subregion", "county", "district", "county_district"}:
         return "subregion"

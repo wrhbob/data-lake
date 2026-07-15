@@ -34,7 +34,7 @@ class FakeGuizhouCostInfoClient:
         raise AssertionError(f"unexpected download: {url}")
 
 
-def test_guizhou_source_config_marks_association_issue_based_guidance_source():
+def test_guizhou_source_config_marks_association_issue_based_guidance_source_with_month_projection():
     config = guizhou_cost_info_source_config()
     parser = config["parser"]["parsers"][GUIZHOU_COST_INFO_PARSER_VERSION]
     target = config["coverage_expectation"]["target_regions"][0]
@@ -70,6 +70,8 @@ def test_guizhou_list_discovery_keeps_main_issue_and_filters_mixed_rows():
     assert rows[0]["period"] == "2026年第5期"
     assert rows[0]["period_year"] == 2026
     assert rows[0]["period_issue_no"] == 5
+    assert rows[0]["period_start"] == "2026-05"
+    assert rows[0]["period_month"] == 5
     assert rows[0]["publish_date"] == "2026-06-10"
     assert rows[0]["detail_url"] == "http://www.gzszj.com/Home/PoliciesDetail/1792"
     assert rows[0]["attachments"] == [
@@ -110,10 +112,10 @@ def test_guizhou_issue_ingests_layer0_archive_with_issue_period_and_no_processin
     assert stored.price_kind == "guidance"
     assert cell_value(stored.metadata_payload["period"]) == "2026年第5期"
     assert cell_value(stored.metadata_payload["period_raw"]) == "2026年第5期"
-    assert cell_value(stored.metadata_payload["period_start"]) is None
+    assert cell_value(stored.metadata_payload["period_start"]) == "2026-05"
     assert cell_value(stored.metadata_payload["period_year"]) == 2026
     assert cell_value(stored.metadata_payload["period_issue_no"]) == 5
-    assert "period_month" not in stored.metadata_payload
+    assert cell_value(stored.metadata_payload["period_month"]) == 5
     assert cell_value(stored.metadata_payload["publisher_type"]) == "industry_association"
     assert cell_value(stored.metadata_payload["publisher_scope"]) == "province"
     assert cell_value(stored.metadata_payload["source_attachment_mode"]) == "pdf_only"

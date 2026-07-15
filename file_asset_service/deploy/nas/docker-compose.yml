@@ -1,21 +1,4 @@
 services:
-  postgres:
-    image: postgres:16
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${FILE_ASSET_POSTGRES_DB:-file_asset}
-      POSTGRES_USER: ${FILE_ASSET_POSTGRES_USER:-file_asset}
-      POSTGRES_PASSWORD: ${FILE_ASSET_POSTGRES_PASSWORD:?set FILE_ASSET_POSTGRES_PASSWORD}
-    ports:
-      - "${FILE_ASSET_POSTGRES_BIND:-0.0.0.0:15432}:5432"
-    volumes:
-      - file_asset_postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
   minio:
     image: minio/minio:latest
     restart: unless-stopped
@@ -35,5 +18,4 @@ services:
       retries: 10
 
 volumes:
-  file_asset_postgres:
   file_asset_minio:

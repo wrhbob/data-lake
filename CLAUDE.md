@@ -49,7 +49,7 @@ corrections.jsonl                  →   (无直接表对 — 审计/修正轨�
 
 定额数据湖交接项目 (data_lake_handoff)。将各省建设工程定额 PDF（扫描版）入湖 → 解析为结构化定额库 → 支撑"清单自动套定额"。
 
-技术栈: Python 3.11, FastAPI, SQLAlchemy 2.0, SQLite(dev)/PostgreSQL(prod), PaddleOCR PP-StructureV3
+技术栈: Python 3.11, FastAPI, SQLAlchemy 2.0, 共享 NAS PostgreSQL（运行时；SQLite 仅限测试）, PaddleOCR PP-StructureV3
 
 ## 核心设计原则（来自全链路规格）
 
@@ -169,4 +169,3 @@ pip install -e ".[dev]"
 python serve.py                          # 启动开发服务器
 python -m pytest tests/ -x -v            # 运行测试
 ```
-

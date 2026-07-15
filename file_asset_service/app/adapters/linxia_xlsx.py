@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy.orm import object_session
 
 from app.adapters.base_cost_info_adapter import DiscoveredIssue
+from app.adapters.history_scope import history_page_limit, is_history_backfill
 from app.archive_rules import build_cost_info_business_key
 from app.linxia_cost_info import ingest_linxia_cost_info_issue, list_linxia_cost_info_issues
 
@@ -17,7 +18,10 @@ class LinxiaXlsxAdapter:
     def discover(self, source, task, client) -> list[DiscoveredIssue]:
         parser = _active_parser(source)
         max_items = int((source.schedule_policy or {}).get("max_items_per_run") or 5)
-        rows = list_linxia_cost_info_issues(client, parser=parser, max_items=max_items)
+        if is_history_backfill(task):
+            rows = _list_all_pages(client, parser=parser, page_limit=history_page_limit(source, task, parser))
+        else:
+            rows = list_linxia_cost_info_issues(client, parser=parser, max_items=max_items)
         rows = _limit_rows(rows, source)
         self._rows_by_key = {_row_source_item_key(row): row for row in rows}
         self._client = client
@@ -69,6 +73,26 @@ def _session_for(source, task):
 def _limit_rows(rows: list[dict], source) -> list[dict]:
     max_items = int((source.schedule_policy or {}).get("max_items_per_run") or len(rows) or 0)
     return rows[:max_items] if max_items else rows
+
+
+def _list_all_pages(client, *, parser: dict, page_limit: int) -> list[dict]:
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for page in range(1, page_limit + 1):
+        page_rows = list_linxia_cost_info_issues(client, parser=parser, max_items=None, page_no=page)
+        if not page_rows:
+            break
+        added = 0
+        for row in page_rows:
+            key = _row_source_item_key(row)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+            added += 1
+        if added == 0:
+            break
+    return rows
 
 
 def _issue_from_row(row: dict) -> DiscoveredIssue:

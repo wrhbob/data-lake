@@ -187,6 +187,101 @@ class CollectionTask(Base):
     ingest_events: Mapped[list["IngestEvent"]] = relationship(back_populates="collection_task")
 
 
+class SourceCrawlState(Base):
+    """Mutable scheduler state kept separate from a source's static policy.
+
+    ``DataSource.schedule_policy`` is configuration that may be imported again
+    from the source registry.  Keeping next-run/cursor information here means a
+    configuration refresh can never accidentally reset a production crawl loop.
+    """
+
+    __tablename__ = "source_crawl_state"
+
+    source_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("data_source.source_id"), primary_key=True
+    )
+    data_domain: Mapped[str] = mapped_column(String(64), nullable=False, default="cost_info", index=True)
+    next_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_succeeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_new_item_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen_item_key: Mapped[str | None] = mapped_column(Text)
+    last_seen_publish_date: Mapped[str | None] = mapped_column(String(32))
+    consecutive_empty_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cursor: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class CrawlCampaign(Base):
+    """An auditable, source-scoped historical collection run."""
+
+    __tablename__ = "crawl_campaign"
+    __table_args__ = (
+        CheckConstraint(
+            "mode in ('history_backfill', 'reconcile')",
+            name="ck_crawl_campaign_mode",
+        ),
+        CheckConstraint(
+            "status in ('pending', 'running', 'completed', 'completed_with_errors', 'failed', 'cancelled')",
+            name="ck_crawl_campaign_status",
+        ),
+    )
+
+    campaign_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    source_id: Mapped[str] = mapped_column(String(36), ForeignKey("data_source.source_id"), nullable=False, index=True)
+    data_domain: Mapped[str] = mapped_column(String(64), nullable=False, default="cost_info", index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    mode: Mapped[str] = mapped_column(String(32), nullable=False, default="history_backfill", index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    start_period: Mapped[str | None] = mapped_column(String(7), index=True)
+    end_period: Mapped[str | None] = mapped_column(String(7), index=True)
+    as_of_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    parser_version: Mapped[str | None] = mapped_column(String(128))
+    config_digest: Mapped[str | None] = mapped_column(String(80))
+    item_limit: Mapped[int | None] = mapped_column(Integer)
+    discovered_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duplicate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    config: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_by: Mapped[str | None] = mapped_column(String(128))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class CrawlItem(Base):
+    """Durable inventory of announcements encountered by a campaign."""
+
+    __tablename__ = "crawl_item"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "source_item_key", name="uq_crawl_item_campaign_source_key"),
+        Index("ix_crawl_item_campaign_status", "campaign_id", "status"),
+    )
+
+    item_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    campaign_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("crawl_campaign.campaign_id"), nullable=False, index=True
+    )
+    source_id: Mapped[str] = mapped_column(String(36), ForeignKey("data_source.source_id"), nullable=False, index=True)
+    source_item_key: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    detail_url: Mapped[str | None] = mapped_column(Text)
+    publish_date: Mapped[str | None] = mapped_column(String(32), index=True)
+    period_start: Mapped[str | None] = mapped_column(String(7), index=True)
+    attachment_fingerprint: Mapped[str | None] = mapped_column(String(80), index=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="discovered", index=True)
+    task_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("collection_task.task_id"), index=True)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Blob(Base):
     __tablename__ = "blob"
     __table_args__ = (

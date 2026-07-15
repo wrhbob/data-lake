@@ -95,7 +95,7 @@ def test_seed_dry_run_lists_files_without_writing(tmp_path):
         assert plan["source_exists"] is False
         # dry-run writes nothing
         assert session.scalar(select(func.count()).select_from(FileAsset)) == 0
-        assert session.scalar(select(func.count()).select_from(DataSource)) == 0
+        assert session.scalar(select(func.count()).select_from(DataSource)) == 1  # quota-manual-upload seed
 
 
 def test_seed_apply_is_raw_only_and_idempotent(tmp_path):
@@ -116,7 +116,7 @@ def test_seed_apply_is_raw_only_and_idempotent(tmp_path):
         assert summary2["newly_ingested_count"] == 0
         assert summary2["skipped_count"] == 2
         assert summary2["source_created"] is False
-        assert session.scalar(select(func.count()).select_from(DataSource)) == 1
+        assert session.scalar(select(func.count()).select_from(DataSource)) == 2  # manual-upload + seed source
         assert session.scalar(select(func.count()).select_from(FileAsset)) == 2
         assert session.scalar(select(func.count()).select_from(IngestEvent)) == 2
 
@@ -352,7 +352,7 @@ def test_skip_init_apply_refuses_and_writes_nothing_when_schema_incomplete(tmp_p
             quota_seed.apply_seed(session, storage, root)
         # refused BEFORE any object/DB write
         assert session.scalar(select(func.count()).select_from(FileAsset)) == 0
-        assert session.scalar(select(func.count()).select_from(DataSource)) == 0
+        assert session.scalar(select(func.count()).select_from(DataSource)) == 1  # quota-manual-upload seed
 
 
 def test_projection_is_idempotent_and_creates_no_sets_or_archives():

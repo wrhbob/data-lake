@@ -35,8 +35,5 @@
   {"code":"630000","label":"青海省","pinyin":"qinghai"},
   {"code":"640000","label":"宁夏回族自治区","pinyin":"ningxia"},
   {"code":"650000","label":"新疆维吾尔自治区","pinyin":"xinjiang"},
-  {"code":"660000","label":"新疆生产建设兵团","pinyin":"bingtuan"},
-  {"code":"710000","label":"台湾省","pinyin":"taiwan"},
-  {"code":"810000","label":"香港特别行政区","pinyin":"xianggang"},
-  {"code":"820000","label":"澳门特别行政区","pinyin":"aomen"}
+  {"code":"660000","label":"新疆生产建设兵团","pinyin":"bingtuan"}
 ]

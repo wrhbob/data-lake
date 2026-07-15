@@ -2,7 +2,7 @@ from sqlalchemy import inspect
 
 from app.archive_service import get_archive_detail
 from app.collection import create_data_source
-from app.models import Archive, ArchiveEvent, ArchiveFile, CrawlLineage, FileAsset, FileProcessing, IngestEvent, Outbox
+from app.models import Archive, ArchiveEvent, ArchiveFile, CollectionTask, CrawlLineage, FileAsset, FileProcessing, IngestEvent, Outbox
 from app.storage import FakeObjectStore
 from app.trading_registry import (
     FETCH_STATUS_FETCHED,
@@ -192,6 +192,54 @@ def test_trading_registry_records_pending_fetch_attachment_in_archive_manifest(d
     assert detail_by_name["招标文件.CQZF"]["fetch_status"] == FETCH_STATUS_FETCHED
     assert db_session.query(FileAsset).filter_by(file_name="施工图纸.zip").one_or_none() is None
     assert db_session.query(FileProcessing).count() == 0
+
+
+def test_trading_registry_deduplicates_repeated_attachment_blob_and_role(db_session):
+    source = create_trading_source(db_session)
+
+    archive = ingest_trading_registry_item(
+        db_session,
+        FakeObjectStore(),
+        source_id=source.source_id,
+        item=TradingDiscoveredItem(
+            source_item_key="notice-repeat-drawing-001",
+            title="重复附件公告",
+            publish_date="2026-07-15",
+            detail_url="https://trade.example.gov.cn/tender/repeat-001",
+            channel_id="tender_notice",
+            notice_family="tender",
+            notice_type_raw="招标公告",
+            attachments=[
+                TradingAttachment(
+                    file_name="notice-repeat-drawing-001.html",
+                    content="<html>公告正文</html>".encode(),
+                    url="https://trade.example.gov.cn/tender/repeat-001",
+                    content_type="text/html",
+                    file_role="web_snapshot",
+                ),
+                TradingAttachment(
+                    file_name="图纸A.rar",
+                    content=b"same opaque drawing",
+                    url="https://trade.example.gov.cn/tender/repeat-001/a.rar",
+                    content_type="application/x-rar-compressed",
+                    file_role="drawing",
+                ),
+                TradingAttachment(
+                    file_name="图纸B.rar",
+                    content=b"same opaque drawing",
+                    url="https://trade.example.gov.cn/tender/repeat-001/b.rar",
+                    content_type="application/x-rar-compressed",
+                    file_role="drawing",
+                ),
+            ],
+        ),
+    )
+
+    files = db_session.query(ArchiveFile).filter_by(archive_id=archive.archive_id).all()
+    task = db_session.query(CollectionTask).filter_by(source_id=source.source_id).one()
+    assert len(files) == 2
+    assert [mounted.file_role for mounted in files].count("drawing") == 1
+    assert task.status == "done"
 
 
 def test_fetch_pending_trading_archive_file_fills_blob_without_parsing(db_session):

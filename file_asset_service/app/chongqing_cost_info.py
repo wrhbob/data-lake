@@ -55,9 +55,12 @@ def _browser_cookies(
     ``chromium.launch``). Replaces the old mac/linux-only
     ``~/.codex/skills/playwright/scripts/playwright_cli.sh`` subprocess.
     """
-    from playwright.sync_api import sync_playwright
+    if playwright_starter is None:
+        from playwright.sync_api import sync_playwright
 
-    starter = playwright_starter if playwright_starter is not None else sync_playwright
+        starter = sync_playwright
+    else:
+        starter = playwright_starter
     with starter() as playwright:
         browser = playwright.chromium.launch(headless=True)
         try:

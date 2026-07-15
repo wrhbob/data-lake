@@ -1,0 +1,28 @@
+{
+  "generated_at": "2026-07-14T15:59:12.353557+00:00",
+  "mode": "read_only_dry_run",
+  "database_mutations": 0,
+  "summary": {
+    "active_cost_info_archive_count": 963,
+    "file_asset_count": 2138,
+    "orphan_reference_count": 0,
+    "orphan_archive_count": 0,
+    "recoverable_orphan_reference_count": 0,
+    "safe_duplicate_group_count": 0,
+    "duplicate_archive_excess_count": 0,
+    "action_counts": {}
+  },
+  "focus_beijing_2025_12": [
+    {
+      "archive_id": "b6798064-e906-4418-8455-1351a2947d07",
+      "source_id": "9655cd28-0761-4a81-b3b4-75dc6b029cfc",
+      "collection_method": "auto",
+      "valid_file_count": 1,
+      "orphan_file_count": 0,
+      "action": "keep_canonical",
+      "canonical_archive_id": null
+    }
+  ],
+  "duplicate_groups": [],
+  "actions": []
+}

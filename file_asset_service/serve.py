@@ -1,14 +1,14 @@
 """Persistent launcher for the file-asset console (Windows).
 
 Modes (run with the project venv python):
-  python serve.py                load .env, wait for PostgreSQL, run uvicorn
+  python serve.py                load .env, validate NAS services, run uvicorn
   python serve.py --install-task create the onlogon scheduled task and start it
   python serve.py --uninstall-task delete the scheduled task
 
 Why this exists: config.py reads os.getenv (not dotenv), so .env must be loaded
-into the environment before uvicorn imports the app. This launcher also waits
-for PostgreSQL to be ready (so it survives the boot/logon race with Docker) and
-tees stdout/stderr to console_service.log so the headless task leaves a trace.
+into the environment before uvicorn imports the app. This launcher validates
+the shared NAS PostgreSQL connection before starting and tees stdout/stderr to
+console_service.log so the headless task leaves a trace.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent  # file_asset_service
@@ -81,23 +80,34 @@ def _install_tee() -> None:
     sys.stderr = _Tee(sys.stderr, log)  # type: ignore[assignment]
 
 
-def _wait_for_db(max_tries: int = 48, delay: float = 5.0) -> None:
+def _check_database() -> None:
+    """Require the configured NAS PostgreSQL to be reachable before startup.
+
+    A failed connection is a configuration/network failure, not an invitation to
+    start a local database or keep retrying in the background.  Exiting here
+    keeps office and home deployments on the single shared NAS catalog.
+    """
     os.chdir(HERE)
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
+    from app.config import RuntimeConfigurationError, get_settings
     from app.database import init_db
 
-    last: object = None
-    for attempt in range(1, max_tries + 1):
-        try:
-            init_db()
-            print(f"[serve] database ready (attempt {attempt}/{max_tries})", flush=True)
-            return
-        except Exception as exc:  # noqa: BLE001
-            last = exc
-            print(f"[serve] waiting for database ({attempt}/{max_tries}): {exc}", flush=True)
-            time.sleep(delay)
-    raise SystemExit(f"[serve] database not ready after {max_tries} attempts: {last}")
+    try:
+        get_settings()
+    except RuntimeConfigurationError as exc:
+        raise SystemExit(f"[serve] configuration error: {exc}") from exc
+
+    try:
+        init_db()
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"[serve] database unavailable: {exc}") from exc
+    # The launcher has completed the migration before Uvicorn imports the app.
+    # Avoid performing the same schema work a second time in the app lifespan:
+    # a long-running crawler may hold regular data locks while the console is
+    # being restarted.
+    os.environ["FILE_ASSET_SCHEMA_READY"] = "1"
+    print("[serve] shared NAS database ready", flush=True)
 
 
 def _run_server() -> None:
@@ -135,39 +145,20 @@ def uninstall_task() -> None:
     print(f"[serve] task '{TASK_NAME}' removed.")
 
 
-def install_docker_autostart() -> None:
-    """Create an onlogon task that launches Docker Desktop, so the postgres/minio
-    containers (restart=always) come back at login and the console can reach PG."""
-    exe = Path(r"C:\Program Files\Docker\Docker\Docker Desktop.exe")
-    if not exe.exists():
-        print(f"[serve] Docker Desktop.exe not found at {exe} — skipping docker-autostart")
-        return
-    name = "docker-autostart"
-    cmd = [
-        "schtasks", "/create",
-        "/tn", name,
-        "/tr", f'"{exe}"',
-        "/sc", "onlogon",
-        "/rl", "HIGHEST",
-        "/f",
-    ]
-    subprocess.run(cmd, check=True)
-    print(f"[serve] created task '{name}' (launches Docker Desktop at every login)")
-
-
 def main() -> None:
     if "--install-task" in sys.argv:
         install_task()
         return
     if "--install-docker-autostart" in sys.argv:
-        install_docker_autostart()
-        return
+        raise SystemExit(
+            "[serve] --install-docker-autostart was removed: PostgreSQL runs only on the NAS."
+        )
     if "--uninstall-task" in sys.argv:
         uninstall_task()
         return
     _load_env()
     _install_tee()
-    _wait_for_db()
+    _check_database()
     _run_server()
 
 

@@ -41,8 +41,6 @@ def ensure(s):
     d=DataSource(source_id=f"ds_{RC}_{int(_now().timestamp())}",source_scope="platform_public",tenant_code=None,asset_tenant_code=TC,managed_by="platform",source_type=ST,connector_type="manual_upload",name=SN,base_url="http://zjj.xam.gov.cn/",region_code=RC,data_domain=DT,format="pdf",downloadable=True,bucket="cost-raw",frequency="bimonthly",status="active",created_by="admin:xingan_register",config={"stable":{"site_id":f"cost_info.manual.{RC}","domain_type":DT,"region_code":CRC,"coverage_region_code":CRC,"publisher_scope":"city","publisher_region_code":CRC,"publisher_name":"兴安盟住房和城乡建设局"},"ops":{"source_audit_status":"人工补录"}})
     s.add(d);s.flush();print(f"[OK] DS: {d.source_id}");return d
 def main():
-    os.environ.setdefault("FILE_ASSET_DATABASE_URL","postgresql+psycopg://file_asset:file_asset@127.0.0.1:15432/file_asset")
-    for k,v in[("FILE_ASSET_S3_ENDPOINT_URL","http://djtsoft.x3322.net:9000"),("FILE_ASSET_S3_ACCESS_KEY_ID","admin"),("FILE_ASSET_S3_SECRET_ACCESS_KEY","Admin@123456")]:os.environ.setdefault(k,v)
     init_db();store=get_object_store();factory=get_session_factory()
     with factory() as s:
         ds=ensure(s);s.commit();print()

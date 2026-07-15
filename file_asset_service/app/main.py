@@ -10,8 +10,8 @@ from typing import Annotated
 from urllib.parse import quote
 from zipfile import BadZipFile, ZipFile
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -27,15 +27,21 @@ from app.archive_service import (
     get_archive_detail,
     list_archives,
     patch_archive,
+    withdraw_archive,
 )
 from app.basic_auth import BasicAuthMiddleware
 from app.assets import register_asset
 from app.collection import create_collection_task, create_data_source, list_collection_tasks, list_data_sources
 from app.config import get_settings
 from app.coverage_backfill import run_coverage_backfill
+from app.crawl_campaign import campaign_to_dict, create_campaign, list_campaigns
+from app.crawler_loop import run_loop_once
 from app.cost_info_scheduler import run_scheduler
 from app.cost_info_worker import run_worker
 from app.crawler_dashboard import list_crawler_sources, list_crawler_tasks, list_parse_manifest_issues, summarize_parse_manifest
+from app.trading_config_factories import restore_all_source_configs
+from app.trading_source_registry import list_trading_sources
+from app.trading_task_loop import run_trading_loop_once, run_trading_scheduler, run_trading_worker
 from app.database import get_db_session, init_db
 from app.file_mirror import FileMirror, FileMirrorRootUnconfigured, get_file_mirror
 from app.file_preview import DOCX_EXTENSIONS, DOWNLOAD_ONLY_EXTENSIONS, EXCEL_EXTENSIONS, HTML_EXTENSIONS, PDF_EXTENSIONS
@@ -65,7 +71,9 @@ from app.schemas import (
     ArchiveSummaryResponse,
     CollectionTaskCreate,
     CollectionTaskResponse,
+    CrawlerCampaignCreateRequest,
     CrawlerCoverageBackfillRequest,
+    CrawlerLoopRunRequest,
     CrawlerSchedulerRunRequest,
     CrawlerWorkerRunRequest,
     DataSourceCreate,
@@ -73,6 +81,9 @@ from app.schemas import (
     IngestEventResponse,
     IngestResponse,
     ProcessingRunResponse,
+    TradingLoopRunRequest,
+    TradingSchedulerRunRequest,
+    TradingWorkerRunRequest,
 )
 from app.storage import ObjectStore, get_object_store
 from app.storage_audit import audit_file_asset_objects
@@ -90,6 +101,39 @@ def _read_file_asset_bytes(storage: ObjectStore, asset: FileAsset) -> bytes:
         return storage.get_object(asset.bucket, asset.object_key)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="FILE_ASSET_OBJECT_NOT_FOUND") from exc
+
+
+def _parse_http_byte_range(range_header: str | None, total_size: int) -> tuple[int, int] | None:
+    if range_header is None:
+        return None
+    unit, separator, range_spec = range_header.strip().partition("=")
+    if separator != "=" or unit.lower() != "bytes" or "," in range_spec:
+        raise ValueError("unsupported byte range")
+    start_text, separator, end_text = range_spec.partition("-")
+    if separator != "-":
+        raise ValueError("invalid byte range")
+    start_text = start_text.strip()
+    end_text = end_text.strip()
+    if total_size <= 0 or (not start_text and not end_text):
+        raise ValueError("empty byte range")
+
+    if not start_text:
+        if not end_text.isdigit():
+            raise ValueError("invalid suffix byte range")
+        suffix_length = int(end_text)
+        if suffix_length <= 0:
+            raise ValueError("invalid suffix byte range")
+        return max(total_size - suffix_length, 0), total_size - 1
+
+    if not start_text.isdigit() or (end_text and not end_text.isdigit()):
+        raise ValueError("invalid byte range bounds")
+    start = int(start_text)
+    if start >= total_size:
+        raise ValueError("unsatisfiable byte range")
+    end = total_size - 1 if not end_text else min(int(end_text), total_size - 1)
+    if end < start:
+        raise ValueError("reversed byte range")
+    return start, end
 
 
 def _zip_entry_count(content: bytes) -> int:
@@ -117,7 +161,7 @@ def _zip_preview_allowed(session: Session, asset: FileAsset) -> bool:
 def create_app(*, init_schema: bool = True) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        if init_schema:
+        if init_schema and os.getenv("FILE_ASSET_SCHEMA_READY") != "1":
             init_db()
         yield
 
@@ -438,6 +482,142 @@ def create_app(*, init_schema: bool = True) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/api/crawler/campaigns")
+    def create_crawler_campaign_endpoint(
+        payload: CrawlerCampaignCreateRequest,
+        session: Session = Depends(get_db_session),
+    ) -> dict[str, object]:
+        try:
+            campaign = create_campaign(
+                session,
+                source_id=payload.source_id,
+                name=payload.name,
+                start_period=payload.start_period,
+                end_period=payload.end_period,
+                item_limit=payload.item_limit,
+                mode=payload.mode,
+                created_by="api:crawler_campaign",
+            )
+            return campaign_to_dict(campaign)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/crawler/campaigns")
+    def list_crawler_campaigns_endpoint(
+        source_id: str | None = None,
+        limit: int = 100,
+        session: Session = Depends(get_db_session),
+    ) -> list[dict]:
+        return list_campaigns(session, source_id=source_id, limit=limit)
+
+    @app.post("/api/crawler/loop/run")
+    def run_crawler_loop_endpoint(
+        payload: CrawlerLoopRunRequest,
+        session: Session = Depends(get_db_session),
+        storage: ObjectStore = Depends(get_object_store),
+    ) -> dict:
+        try:
+            return run_loop_once(
+                session,
+                worker_limit=max(1, min(payload.worker_limit, 50)),
+                max_worker_cycles=max(1, min(payload.max_worker_cycles, 100)),
+                force=payload.force,
+                dry_run=payload.dry_run,
+                trigger=payload.trigger,
+                worker_id=payload.worker_id,
+                lease_seconds=payload.lease_seconds,
+                storage=storage,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/trading/sources", response_model=list[DataSourceResponse])
+    def list_trading_sources_endpoint(
+        session: Session = Depends(get_db_session),
+    ) -> list[dict[str, object]]:
+        return [serialize_data_source(source) for source in list_trading_sources(session)]
+
+    @app.post("/api/trading/sources/register")
+    def register_trading_sources_endpoint(
+        session: Session = Depends(get_db_session),
+    ) -> dict[str, object]:
+        return {"registered": [result.to_dict() for result in restore_all_source_configs(session)]}
+
+    @app.post("/api/trading/scheduler/run")
+    def run_trading_scheduler_endpoint(
+        payload: TradingSchedulerRunRequest,
+        session: Session = Depends(get_db_session),
+    ) -> dict[str, object]:
+        try:
+            return run_trading_scheduler(
+                session,
+                trigger=payload.trigger,
+                source_id=payload.source_id,
+                site_id=payload.site_id,
+                dry_run=payload.dry_run,
+                force=payload.force,
+                verify=payload.verify,
+                channel_ids=payload.channel_ids,
+                max_pages=payload.max_pages,
+                page_size=payload.page_size,
+                max_items_per_channel=payload.max_items_per_channel,
+                start_date=payload.start_date,
+                end_date=payload.end_date,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/trading/worker/run")
+    def run_trading_worker_endpoint(
+        payload: TradingWorkerRunRequest,
+        session: Session = Depends(get_db_session),
+        storage: ObjectStore = Depends(get_object_store),
+    ) -> dict[str, object]:
+        try:
+            return run_trading_worker(
+                session,
+                limit=max(1, min(payload.limit, 50)),
+                source_id=payload.source_id,
+                site_id=payload.site_id,
+                dry_run=payload.dry_run,
+                trigger=payload.trigger,
+                worker_id=payload.worker_id,
+                lease_seconds=payload.lease_seconds,
+                storage=storage,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/trading/loop/run")
+    def run_trading_loop_endpoint(
+        payload: TradingLoopRunRequest,
+        session: Session = Depends(get_db_session),
+        storage: ObjectStore = Depends(get_object_store),
+    ) -> dict[str, object]:
+        try:
+            return run_trading_loop_once(
+                session,
+                worker_limit=max(1, min(payload.worker_limit, 50)),
+                max_worker_cycles=max(1, min(payload.max_worker_cycles, 100)),
+                force=payload.force,
+                dry_run=payload.dry_run,
+                trigger=payload.trigger,
+                worker_id=payload.worker_id,
+                lease_seconds=payload.lease_seconds,
+                storage=storage,
+                source_id=payload.source_id,
+                site_id=payload.site_id,
+                verify=payload.verify,
+                channel_ids=payload.channel_ids,
+                max_pages=payload.max_pages,
+                page_size=payload.page_size,
+                max_items_per_channel=payload.max_items_per_channel,
+                start_date=payload.start_date,
+                end_date=payload.end_date,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/file-assets")
     def list_file_assets_endpoint(
         tenant_code: str | None = None,
@@ -508,7 +688,12 @@ def create_app(*, init_schema: bool = True) -> FastAPI:
             limit=max(1, min(limit, 10000)) if limit is not None else None,
             issue_limit=max(0, min(issue_limit, 500)),
         )
-        failed_count = int(audit["missing_count"]) + int(audit["size_mismatch_count"]) + int(audit["error_count"])
+        failed_count = (
+            int(audit["missing_count"])
+            + int(audit["size_mismatch_count"])
+            + int(audit["error_count"])
+            + int(audit["orphan_reference_count"])
+        )
         checked_count = int(audit["checked_count"])
         audit["health_status"] = "healthy" if checked_count and failed_count == 0 else "degraded" if failed_count else "empty"
         audit["availability_rate"] = (int(audit["ok_count"]) / checked_count) if checked_count else None
@@ -581,25 +766,57 @@ def create_app(*, init_schema: bool = True) -> FastAPI:
     @app.get("/api/file-assets/{file_id}/preview")
     def preview_file_asset_endpoint(
         file_id: str,
+        request: Request,
         session: Session = Depends(get_db_session),
         storage: ObjectStore = Depends(get_object_store),
     ) -> Response:
         asset = session.get(FileAsset, file_id)
         if asset is None:
             raise HTTPException(status_code=404, detail="FILE_ASSET_NOT_FOUND")
-        try:
-            content = storage.get_object(asset.bucket, asset.object_key)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="FILE_ASSET_OBJECT_NOT_FOUND") from exc
 
         file_ext = (asset.file_ext or Path(asset.file_name).suffix).replace(".", "").lower()
         filename = quote(asset.file_name)
         if file_ext in PDF_EXTENSIONS:
-            return Response(
-                content=content,
+            total_size = int(asset.file_size)
+            try:
+                byte_range = _parse_http_byte_range(request.headers.get("range"), total_size)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=416,
+                    detail="PREVIEW_RANGE_NOT_SATISFIABLE",
+                    headers={
+                        "Accept-Ranges": "bytes",
+                        "Content-Range": f"bytes */{total_size}",
+                    },
+                ) from exc
+            try:
+                stream = storage.open_object(asset.bucket, asset.object_key, byte_range)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="FILE_ASSET_OBJECT_NOT_FOUND") from exc
+
+            headers = {
+                "Accept-Ranges": "bytes",
+                "Content-Disposition": f"inline; filename*=utf-8''{filename}",
+            }
+            status_code = 200
+            content_length = total_size
+            if byte_range is not None:
+                start, end = byte_range
+                status_code = 206
+                content_length = end - start + 1
+                headers["Content-Range"] = f"bytes {start}-{end}/{total_size}"
+            headers["Content-Length"] = str(content_length)
+            return StreamingResponse(
+                stream.iter_chunks(),
+                status_code=status_code,
                 media_type=asset.mime_type or "application/pdf",
-                headers={"Content-Disposition": f"inline; filename*=utf-8''{filename}"},
+                headers=headers,
             )
+
+        try:
+            content = storage.get_object(asset.bucket, asset.object_key)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="FILE_ASSET_OBJECT_NOT_FOUND") from exc
         if file_ext in EXCEL_EXTENSIONS:
             # Preview renders bytes for a human only; it deliberately does not persist extraction output.
             return HTMLResponse(
@@ -906,6 +1123,26 @@ def create_app(*, init_schema: bool = True) -> FastAPI:
         try:
             delete_archive(session, archive_id, actor_type="user", actor_id="ui:manual-delete")
             return {"archive_id": archive_id, "deleted": True}
+        except ValueError as exc:
+            raise archive_http_error(exc) from exc
+
+    @app.post("/api/archives/{archive_id}/withdraw")
+    def withdraw_archive_endpoint(
+        archive_id: str,
+        session: Session = Depends(get_db_session),
+    ) -> dict[str, object]:
+        try:
+            archive = withdraw_archive(
+                session,
+                archive_id,
+                actor_type="user",
+                actor_id="ui:soft-delete",
+            )
+            return {
+                "archive_id": archive.archive_id,
+                "withdrawn": archive.is_withdrawn,
+                "storage_deleted": False,
+            }
         except ValueError as exc:
             raise archive_http_error(exc) from exc
 

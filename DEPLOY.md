@@ -79,7 +79,7 @@ FILE_ASSET_WORKER_ID=<本机唯一标识>
 ## 4. 启动
 
 激活 venv 后，进入 `file_asset_service` 目录用 `serve.py` 启动
-（`serve.py` 会自动加载根目录 `.env`、等待数据库就绪、再拉起 uvicorn）：
+（`serve.py` 会自动加载根目录 `.env`、验证 NAS PostgreSQL 可达后再拉起 uvicorn）：
 
 ```powershell
 cd file_asset_service
@@ -92,8 +92,8 @@ python serve.py
 - 爬虫台：`http://127.0.0.1:8010/crawler`
 - 健康检查：`http://127.0.0.1:8010/healthz`（免登录）
 
-> ⚠️ **不要**裸跑 `uvicorn ...`。必须用 `serve.py`，否则 `.env` 不会加载，
-> 会回落到本地 `127.0.0.1:9000` + SQLite，数据不进 NAS。
+> ⚠️ **不要**裸跑 `uvicorn ...`。必须用 `serve.py`，使根目录 `.env` 在启动前加载。
+> 缺少 NAS PostgreSQL / MinIO 配置、或数据库不可连接时，服务会直接报错并停止；不会回落到本地数据库或对象存储。
 
 ## 5.（可选）开机自启
 
@@ -113,7 +113,7 @@ python serve.py --uninstall-task    # 移除
 
 > 增量 vs 补爬：增量只抓“最新一期”；历史空缺（如某地 2024 整年）必须用补爬显式指定期次。
 
-### 6.2 定时自动化（Windows 任务计划）
+### 6.2 Task + Loop 定时自动化（Windows 任务计划）
 
 一次性 crawl cycle（调度 + 下载排空）脚本：`python -m app.crawl_cycle`
 
@@ -124,23 +124,56 @@ python -m app.crawl_cycle
 python -m app.crawl_cycle --force
 ```
 
-> 必须在 `file_asset_service` 目录下运行（`app` 包可导入），脚本会自动加载仓库根 `.env`。
+> `crawl_cycle` 仍可用于人工一次性增量。生产定时推荐使用 task + loop：循环程序只把到期站点入队，再排空数据库 worker 队列；站点的 `next_scan_at` 独立保存，不会因重新导入站点配置而丢失。
 
-注册为每天 08:00 自动跑（增量）：
+注册为每 2 小时运行一次 loop（增量月度发布窗口由每个站点策略决定）：
 
 ```powershell
 $py = "C:\Users\Administrator\AppData\Local\Programs\Python\Python314\python.exe"   # 换成你的 python
 $svc = "D:\大匠通\新指标云\data_lake_handoff\data_lake_handoff\file_asset_service"    # 换成你的路径
-schtasks /create /tn "cost-info-crawl-daily" `
-  /tr "cmd /c cd /d `"$svc`" && `"$py`" -m app.crawl_cycle" `
-  /sc daily /st 08:00 /rl HIGHEST /f
+schtasks /create /tn "cost-info-crawler-loop" `
+  /tr "cmd /c cd /d `"$svc`" && `"$py`" -m app.crawler_loop run --once" `
+  /sc hourly /mo 2 /st 00:10 /rl HIGHEST /f
 # 立即测试一次
-schtasks /run /tn "cost-info-crawl-daily"
+schtasks /run /tn "cost-info-crawler-loop"
 # 移除
-schtasks /delete /tn "cost-info-crawl-daily" /f
+schtasks /delete /tn "cost-info-crawler-loop" /f
 ```
 
-> 注意：只有 `active + 已启用定时 + 已配采集适配器` 的源才会被抓取；其余种子源需先接入解析器。
+月度站点可在 `schedule_policy` 中配置实际发布窗口，例如：
+
+```json
+{
+  "enabled": true,
+  "frequency": "monthly",
+  "timezone": "Asia/Shanghai",
+  "scan_days": [1, 3, 5, 7, 10, 15],
+  "scan_times": ["08:00", "14:00"]
+}
+```
+
+### 6.3 首次全量采集活动
+
+首次历史回填必须先创建活动；活动会生成一个来源任务，并在任务内循环处理发现的公告，同时把每条公告写入可审计的 `crawl_item` 清单。不要用 `--force` 代替历史回填。
+
+```powershell
+python -m app.crawl_campaign create `
+  --source-id <source-id> `
+  --name "四川德阳 2023-01 至 2026-07 首次回填" `
+  --start-period 2023-01 `
+  --end-period 2026-07
+
+# 所有已验证、已启用且有适配器的站点：先预览，再创建一站点一活动
+python -m app.crawl_campaign create-all --name-prefix "full-backfill-20260715" --dry-run
+python -m app.crawl_campaign create-all --name-prefix "full-backfill-20260715"
+
+# 查看活动进度（发现、完成、重复、失败）
+python -m app.crawl_campaign list --source-id <source-id>
+```
+
+API 也可使用 `POST /api/crawler/campaigns` 创建活动、`GET /api/crawler/campaigns` 查询进度，`POST /api/crawler/loop/run` 可手动执行一个 loop round。
+
+> 注意：只有 `active + 已启用定时 + 已配采集适配器` 的源才会进入增量循环。`create-all` 会按稳定站点 ID 去重，防止重复来源产生两条档案谱系；全量活动还要求该站点的解析器分页范围已覆盖目标历史期次。先以小范围期次验证后再放开全量。
 
 ---
 
@@ -158,7 +191,8 @@ file_asset_service\.venv\Scripts\Activate.ps1; pip install -r requirements.txt
 ## 常见问题
 
 - **页面数字为空 / 看不到档案**：多半是 `.env` 没连上共享 PG/MinIO，或裸跑了 uvicorn。检查 `FILE_ASSET_DATABASE_URL`、`FILE_ASSET_S3_ENDPOINT_URL` 是否指向共享服务。
-- **`[serve] waiting for database ...` 一直重试**：本机连不到 PG，检查网络/端口/密码。
+- **`[serve] configuration error`**：缺少 NAS 的连接串或对象存储凭据，检查根目录 `.env`。
+- **`[serve] database unavailable`**：本机连不到 NAS PostgreSQL；检查网络、VPN、端口、数据库服务状态和密码。修复后重新启动服务。
 - **端口被占用**：改 `.env` 的 `FILE_ASSET_PORT`，或结束占用 `8010` 的进程。
 - **日志**：`file_asset_service/console_service.log`。
 

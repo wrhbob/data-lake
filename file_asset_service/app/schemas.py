@@ -168,6 +168,58 @@ class CrawlerCoverageBackfillRequest(BaseModel):
     include_covered: bool = False
 
 
+class CrawlerCampaignCreateRequest(BaseModel):
+    source_id: str
+    name: str
+    start_period: str | None = None
+    end_period: str | None = None
+    item_limit: int | None = None
+    mode: str = "history_backfill"
+
+
+class CrawlerLoopRunRequest(BaseModel):
+    dry_run: bool = True
+    force: bool = False
+    worker_limit: int = 20
+    max_worker_cycles: int = 20
+    worker_id: str | None = None
+    lease_seconds: int = 14400
+    trigger: str = "api_crawler_loop"
+
+
+class TradingSchedulerRunRequest(BaseModel):
+    dry_run: bool = True
+    force: bool = False
+    verify: bool = False
+    source_id: str | None = None
+    site_id: str | None = None
+    channel_ids: list[str] | None = None
+    max_pages: int | None = None
+    page_size: int | None = None
+    max_items_per_channel: int | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    trigger: str = "manual"
+
+
+class TradingWorkerRunRequest(BaseModel):
+    dry_run: bool = True
+    limit: int = 10
+    source_id: str | None = None
+    site_id: str | None = None
+    worker_id: str | None = None
+    lease_seconds: int = 14400
+    trigger: str = "manual"
+
+
+class TradingLoopRunRequest(TradingSchedulerRunRequest):
+    worker_limit: int = 10
+    max_worker_cycles: int = 10
+    worker_id: str | None = None
+    lease_seconds: int = 14400
+    trigger: str = "api_trading_loop"
+
+
 class ArchiveCreate(BaseModel):
     domain_type: str
     channel_type: str

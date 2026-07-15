@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy.orm import object_session
 
 from app.adapters.base_cost_info_adapter import DiscoveredIssue
+from app.adapters.history_scope import is_history_backfill
 from app.archive_rules import build_cost_info_business_key
 from app.ningbo_cost_info import ingest_ningbo_cost_info_issue, list_ningbo_cost_info_issues
 
@@ -17,7 +18,11 @@ class NingboPdfAdapter:
     def discover(self, source, task, client) -> list[DiscoveredIssue]:
         parser = _active_parser(source)
         active_client = _NingboClientAdapter(client)
-        rows = list_ningbo_cost_info_issues(active_client, parser=parser, max_pages=1)
+        rows = list_ningbo_cost_info_issues(
+            active_client,
+            parser=parser,
+            max_pages=None if is_history_backfill(task) else 1,
+        )
         rows = _limit_rows(rows, source)
         self._rows_by_key = {_row_source_item_key(row): row for row in rows}
         self._client = active_client

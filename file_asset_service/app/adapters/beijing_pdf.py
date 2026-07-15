@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.adapters.base_cost_info_adapter import DiscoveredIssue
+from app.adapters.history_scope import history_page_limit, is_history_backfill
 from app.beijing_cost_info import (
     _business_key_for_row,
     _row_attachments,
@@ -25,6 +26,11 @@ class BeijingPdfAdapter:
 
     def discover(self, source, task, client) -> list[DiscoveredIssue]:
         parser = _parser_for_task(_active_parser(source), task)
+        if is_history_backfill(task):
+            parser = _with_history_pagination(
+                parser,
+                max_pages=history_page_limit(source, task, parser, default=8),
+            )
         rows = list_beijing_cost_info_issues(client, parser=parser)
         rows = _filter_rows_for_task(rows, task, parser)
         if not _requested_periods(task):
@@ -73,10 +79,19 @@ def _parser_for_task(parser: dict, task) -> dict:
         return parser
     earliest_requested = min(requested)
     min_period = str(parser.get("min_period") or "")
-    if min_period and min_period <= earliest_requested:
-        return parser
     adjusted = dict(parser)
-    adjusted["min_period"] = earliest_requested
+    if not min_period or min_period > earliest_requested:
+        adjusted["min_period"] = earliest_requested
+    adjusted["_requested_periods"] = sorted(requested)
+    return _with_history_pagination(adjusted)
+
+
+def _with_history_pagination(parser: dict, *, max_pages: int | None = None) -> dict:
+    adjusted = dict(parser)
+    pagination = adjusted.get("pagination") if isinstance(adjusted.get("pagination"), dict) else {}
+    configured_limit = max_pages or pagination.get("max_pages") or 8
+    adjusted["_history_pagination"] = True
+    adjusted["_history_page_limit"] = max(1, min(int(configured_limit), 100))
     return adjusted
 
 

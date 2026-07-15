@@ -4,7 +4,7 @@ import os
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
-from sqlalchemy import inspect, select, text
+from sqlalchemy import inspect, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.archive_rules import ARCHIVE_FILE_ROLES
@@ -44,6 +44,10 @@ class QuotaMigrationBlocked(RuntimeError):
 _engine: Engine | None = None
 _session_factory: sessionmaker[Session] | None = None
 
+# 本系统当前仅覆盖中国大陆和新疆生产建设兵团。保留既有记录以便历史
+# 档案可追溯，但不再将港澳台作为可选行政区划或覆盖矩阵目标。
+EXCLUDED_ADMINISTRATIVE_DIVISION_CODES = frozenset({"710000", "810000", "820000"})
+
 
 def get_engine(database_url: str | None = None) -> Engine:
     global _engine
@@ -63,6 +67,25 @@ def get_session_factory() -> sessionmaker[Session]:
 
 def init_db() -> None:
     engine = get_engine()
+    # Several crawler-loop processes can be started together.  Schema repair is
+    # intentionally idempotent, but some backfill UPDATEs acquire relation locks
+    # in a different order and can deadlock when run concurrently.  Serialize
+    # only the startup migration section on PostgreSQL; task workers themselves
+    # remain fully concurrent afterwards.
+    if engine.dialect.name == "postgresql":
+        with engine.connect() as lock_connection:
+            lock_connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": 805_150_001})
+            lock_connection.commit()
+            try:
+                _init_db_unlocked(engine)
+            finally:
+                lock_connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": 805_150_001})
+                lock_connection.commit()
+        return
+    _init_db_unlocked(engine)
+
+
+def _init_db_unlocked(engine: Engine) -> None:
     Base.metadata.create_all(engine)
     migrate_blob_columns(engine)
     migrate_ingest_event_t2_columns(engine)
@@ -84,6 +107,9 @@ def migrate_administrative_division_table(engine: Engine) -> None:
 
     Creates the table and seeds from a versioned JSON file.
     Idempotent: re-runs don't create duplicate rows or overwrite manual edits.
+    Legacy Hong Kong, Macao and Taiwan records are retained but disabled so
+    existing archive references stay traceable while the regions disappear
+    from the system's selectable mainland scope.
     """
     AdministrativeDivision.__table__.create(engine, checkfirst=True)
 
@@ -127,7 +153,13 @@ def migrate_administrative_division_table(engine: Engine) -> None:
             )
             existing_codes.add(code)
             added += 1
-        if added:
+        disabled = session.execute(
+            update(AdministrativeDivision)
+            .where(AdministrativeDivision.code.in_(EXCLUDED_ADMINISTRATIVE_DIVISION_CODES))
+            .where(AdministrativeDivision.enabled.is_(True))
+            .values(enabled=False)
+        ).rowcount
+        if added or disabled:
             session.commit()
 
 def migrate_blob_columns(engine: Engine) -> None:
@@ -605,6 +637,10 @@ def migrate_quota_tables(engine: Engine) -> None:
         _migrate_archive_file_quota_columns(engine)
 
     _seed_quota_dictionary(engine)
+    # Legacy installations may predate the crawler/data-source schema. The
+    # quota manual-upload seed depends on this table, so create it additively
+    # before attempting the idempotent seed.
+    DataSource.__table__.create(engine, checkfirst=True)
     _seed_quota_manual_upload_source(engine)
 
 

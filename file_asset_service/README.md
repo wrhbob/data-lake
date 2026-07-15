@@ -19,16 +19,25 @@ python3 -m venv /tmp/file-asset-service-venv
 /tmp/file-asset-service-venv/bin/python -m pytest -q
 ```
 
-## Local Runtime
+## Runtime topology
+
+The NAS hosts the only shared PostgreSQL instance and the data lake object
+storage. Office and home computers run application code only; they must use
+explicit NAS credentials and never start a local database.
 
 ```bash
-docker compose up -d postgres minio
-FILE_ASSET_DATABASE_URL=postgresql+psycopg://file_asset:file_asset@127.0.0.1:15432/file_asset \
-FILE_ASSET_S3_ENDPOINT_URL=http://127.0.0.1:9000 \
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8100
+cp ../.env.example ../.env
+# Fill in the NAS PostgreSQL and object-storage credentials in ../.env.
+python serve.py
 ```
 
-Open MinIO console at `http://127.0.0.1:9001` with `minioadmin` / `minioadmin`.
+`serve.py` exits before startup when the database URL or object-storage
+credentials are missing, or when the database URL is not PostgreSQL. To run
+only the application container after creating `../.env`, use:
+
+```bash
+docker compose up --build console
+```
 
 ## API Smoke
 

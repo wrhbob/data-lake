@@ -93,6 +93,14 @@ def _schedule_policy(config: dict) -> dict | None:
     }
     if queue.get("max_items_per_run") is not None:
         policy["max_items_per_run"] = int(queue["max_items_per_run"])
+    # The task loop understands these optional monthly release-window hints.
+    # They are copied from static source config, never from mutable loop state.
+    if schedule.get("scan_days") is not None:
+        raw_days = schedule["scan_days"]
+        policy["scan_days"] = list(raw_days) if isinstance(raw_days, (list, tuple)) else [raw_days]
+    if schedule.get("scan_times") is not None:
+        raw_times = schedule["scan_times"]
+        policy["scan_times"] = list(raw_times) if isinstance(raw_times, (list, tuple)) else [raw_times]
     return policy
 
 
