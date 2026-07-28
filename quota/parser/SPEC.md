@@ -709,32 +709,53 @@ quota-parser-worker
 
 ```text
 ┌─────────────────────────────┬──────────────────────────────────┐
-│ 任务正常完成（成功 / 失败） │ 立即 shutil.rmtree(<workspace>) │
-│ （产物均已上传 MinIO + DB）  │ — 产物路径已不可丢失             │
+│ 任务成功（产物已上传 MinIO） │ cleanup_workspace(work_root,     │
+│                              │ success=True) 立即 rmtree       │
+│                              │ — 产物路径已不可丢失             │
 ├─────────────────────────────┼──────────────────────────────────┤
-│ 任务异常中断（Worker 崩溃   │ workspace 暂留，下次 Worker 启动 │
-│ / OOM / kill -9 / 宿主机    │ 时扫 mtime > 7 天的目录清理；   │
-│ 掉电）                      │ 也可由外部 cron 兜底清理         │
+│ 任务失败（业务异常）        │ cleanup_workspace(work_root,     │
+│                              │ success=False) 写 .failed_at    │
+│                              │ 时间戳；保留 N 天供 debug       │
+├─────────────────────────────┼──────────────────────────────────┤
+│ 任务异常中断（Worker 崩溃   │ workspace 残留，cleanup_expired │
+│ / OOM / kill -9 / 宿主机    │ _jobs() 按 .failed_at 扫描并    │
+│ 掉电）— 未执行 cleanup 调用 │ 清理过期（默认 > 7 天）目录；    │
+│                              │ 也可由外部 cron 兜底清理         │
 └─────────────────────────────┴──────────────────────────────────┘
 ```
 
 详细规则：
 
-1. **正常路径**：任务结束后（不论 `candidate_ready` / `qa_warning` / 业务层 `failed`），
-   Worker 确认产物（XLSX / qa_report / Manifest）已上传 MinIO 且 `parse_run` 表已
-   写入 MinIO key 后，立即 `shutil.rmtree(<work_root>/jobs/<parse_run_id>/)`。
+1. **成功路径**：任务结束后（`candidate_ready` / `final_ready`），Worker 确认产物
+   （XLSX / qa_report / Manifest）已上传 MinIO 且 `FileProcessing` 表已写入 MinIO
+   key 后，调 `cleanup_workspace(work_root, success=True)` 立即
+   `shutil.rmtree(<work_root>/<task_id>/)`。
 
-2. **异常路径**：Worker 被 SIGKILL / OOM / 宿主机掉电时没有机会执行清理，
-   workspace 残留。**7 天**不是"正常任务保留时长"，而是"兜底清理阈值"——
-   下次 Worker 启动时（或外部 cron）扫描 `work_root/jobs/`，对 `mtime > 7 天`
-   的目录直接 `rmtree`。
+2. **失败路径（业务异常）**：阶段 A / B 抛 `QuotaParserError` 子类时，Worker 调
+   `cleanup_workspace(work_root, success=False)` 写 `<work_root>/<task_id>/.failed_at`
+   文件（内容 = `time.time()`），workspace 保留 `get_failure_retention_days()` 天
+   （默认 7）供 debug；重复调用刷新时间戳 = 再续 N 天。
 
-3. **不清理的产物**：已被上传 MinIO + DB 登记的 `candidate.xlsx` / `final.xlsx` /
+3. **异常中断路径**：Worker 被 SIGKILL / OOM / 宿主机掉电时没机会执行 cleanup，
+   workspace 残留且**没有 `.failed_at` 标记**——`cleanup_expired_jobs()` 默认跳过
+   无标记目录（避免误删正在跑的 task）。**兜底**：运维每周手动跑
+   `python -m quota_parser.cleanup_expired_jobs` 或外部 cron 对**有标记的**失败
+   workspace 做兜底清理。
+
+4. **不清理的产物**：已被上传 MinIO + DB 登记的 `candidate.xlsx` / `final.xlsx` /
    `qa_report.json` / `qa_report.md` / `manifest.json` / `issues.md` /
    `result.json` 不受 workspace 清理影响，它们在 MinIO 上有独立生命周期。
 
-4. **配置项**：`QUOTA_PARSER_WORK_ROOT_RETENTION_DAYS`（默认 7）允许运维调整
-   兜底阈值；调小（3）能更快释放磁盘，调大（14）适合长期排查。
+5. **配置项**：
+   - `QUOTA_PARSER_WORK_ROOT`（默认 `tempfile.gettempdir()/quota-parser-jobs`）：
+     worker 任务根目录。v0.3 起 default 改为平台无关，**不再硬编码 `D:/quota-parser-jobs`**。
+   - `QUOTA_PARSER_FAILURE_RETENTION_DAYS`（默认 7）：失败任务保留天数；
+     调小（3）能更快释放磁盘，调大（14）适合长期排查。
+
+6. **API 入口**：
+   - `cleanup_workspace(work_root, *, success: bool) -> None` —— Worker 任务结束后必调
+   - `cleanup_expired_jobs(work_root, *, retention_days: int | None = None) -> dict`
+     —— 运维 / cron 调用，返回 `{scanned, expired_removed, active_skipped, retention_days}`
 
 ## 17. 安全与审计
 
@@ -796,3 +817,53 @@ quota-parser-worker
 ---
 
 **锁版本**：v0.2。后续破坏性变更（增加强制 Sheet、调整 finalize 顺序等）必须走新 SPEC。
+
+---
+
+## 21. v0.3 变更（冻结，2026-07-28）
+
+v0.3 **不**是解析逻辑的破坏性变更（Profile / finalize 5 步不动），而是 worker 集成层的稳定性 / 跨平台 / 资源治理变更。`PARSER_VERSION`（Manifest 中的解析器版本号）保持 `0.2.0`，仅 `__version__`（包元数据）升到 `0.3.0`。
+
+### 21.1 WORK_ROOT 跨平台化
+
+| 项 | v0.2 | v0.3 |
+|---|---|---|
+| `get_work_root()` default | `Path("D:/quota-parser-jobs").resolve()`（Windows 硬编码） | `Path(tempfile.gettempdir()) / "quota-parser-jobs"`（平台无关） |
+| Linux 跑 worker | ❌ 直接挂 | ✅ 默认 `/tmp/quota-parser-jobs/` |
+| Windows 跑 worker | ✅ | ✅ 默认 `C:\Users\<user>\AppData\Local\Temp\quota-parser-jobs\` |
+| env override `QUOTA_PARSER_WORK_ROOT` | 支持但 default 是硬编码 | 支持且 default 平台无关 |
+
+### 21.2 cleanup_workspace 实现
+
+| 项 | v0.2 | v0.3 |
+|---|---|---|
+| API | 仅占位（在 `serve_worker()` 里 print "v0.2 占位"） | `cleanup_workspace(work_root, *, success: bool) -> None` + `cleanup_expired_jobs(work_root, *, retention_days: int \| None = None) -> dict` |
+| 成功清理 | 未实现 | 立即 `shutil.rmtree` |
+| 失败保留 | 未实现 | 写 `<work_root>/.failed_at`（= `time.time()`），cron 按时间戳清理 |
+| 异常中断兜底 | 未实现 | `cleanup_expired_jobs` 默认跳过无 `.failed_at` 目录（保护正在跑的 task）；运维手动 / cron 对**有标记**的失败目录兜底 |
+| retention 配置 | 占位 | `QUOTA_PARSER_FAILURE_RETENTION_DAYS`（默认 7） |
+
+详见 §16.2（本 SPEC 已同步更新）。
+
+### 21.3 模块暴露
+
+`quota_parser/__init__.py` 新增公开 API：
+
+```python
+from quota_parser import cleanup_workspace, cleanup_expired_jobs
+```
+
+`__version__ = "0.3.0"`（包元数据；与 Manifest 中 `PARSER_VERSION = "0.2.0"` 区分）。
+
+### 21.4 与 web-frontend SPEC / README 的对齐
+
+| 文档 | 状态 |
+|---|---|
+| `quota/web-frontend/SPEC.md` v0.3 | ✅ 已冻结：删除 `cancelled` 终态 / `POST /parse/cancel` 端点；按钮 10 → 9 |
+| `quota/README.md` §12.G | ✅ 已冻结：worker 集成层 5 个架构决策（FileProcessing / 独立进程 / 专属 endpoint / 仿 cost_info_worker / 复用 cost-extract） |
+
+### 21.5 不在本节的内容
+
+- worker 真实轮询实现（`serve_worker()` 当前仍是占位；v0.3 P1 实现）
+- file-asset conda env 补装 `pandas / bs4 / lxml / requests`（运维动作；非 SPEC 变更）
+- `file_asset_service/app/quota_parser/` adapter 层（web 端，落在 web-frontend SPEC 范围）

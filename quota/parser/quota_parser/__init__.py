@@ -16,9 +16,10 @@
     - 只 import 上述函数,不复制业务逻辑（行为零变更）。
     - 一切失败以异常抛出;Worker 层负责状态机映射。
 """
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from .pipeline import run_quota_pipeline, finalize_reviewed_xlsx, serve_worker
+from .cleanup import cleanup_workspace, cleanup_expired_jobs
 from .result import StageAResult, StageBResult
 from .exceptions import (
     QuotaParserError,
@@ -35,6 +36,8 @@ __all__ = [
     "run_quota_pipeline",
     "finalize_reviewed_xlsx",
     "serve_worker",
+    "cleanup_workspace",
+    "cleanup_expired_jobs",
     "StageAResult",
     "StageBResult",
     "QuotaParserError",

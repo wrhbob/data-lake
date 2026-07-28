@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 # 默认 OCR 服务（局域网 MinerU）
@@ -12,9 +13,16 @@ ENV_OCR_URL = "QUOTA_PARSER_OCR_URL"
 ENV_WORK_ROOT = "QUOTA_PARSER_WORK_ROOT"
 ENV_POLL_INTERVAL = "QUOTA_PARSER_POLL_INTERVAL"
 ENV_DATABASE_URL = "QUOTA_PARSER_DATABASE_URL"
+ENV_FAILURE_RETENTION_DAYS = "QUOTA_PARSER_FAILURE_RETENTION_DAYS"
 
 # 版本
 PARSER_VERSION = "0.2.0"
+
+# Worker 任务工作目录默认名（在系统临时目录下）
+DEFAULT_WORK_ROOT_NAME = "quota-parser-jobs"
+
+# 失败任务保留天数（成功后立即清理；失败保留 N 天供 debug）
+DEFAULT_FAILURE_RETENTION_DAYS = 7
 
 
 def get_ocr_api_url() -> str:
@@ -22,11 +30,27 @@ def get_ocr_api_url() -> str:
 
 
 def get_work_root() -> Path:
-    """Worker 任务工作目录根。"""
+    """Worker 任务工作目录根。
+
+    优先级：env QUOTA_PARSER_WORK_ROOT > 系统临时目录/<DEFAULT_WORK_ROOT_NAME>。
+    v0.3 起 default 改为平台无关（Linux 用 /tmp，Windows 用 %TEMP%），不再硬编码 D:/。
+    """
     root = os.environ.get(ENV_WORK_ROOT)
     if root:
         return Path(root).resolve()
-    return Path("D:/quota-parser-jobs").resolve()
+    return Path(tempfile.gettempdir()).resolve() / DEFAULT_WORK_ROOT_NAME
+
+
+def get_failure_retention_days() -> int:
+    """失败任务保留天数（成功任务立即清理）。"""
+    raw = os.environ.get(ENV_FAILURE_RETENTION_DAYS)
+    if raw is None:
+        return DEFAULT_FAILURE_RETENTION_DAYS
+    try:
+        days = int(raw)
+        return days if days >= 0 else DEFAULT_FAILURE_RETENTION_DAYS
+    except ValueError:
+        return DEFAULT_FAILURE_RETENTION_DAYS
 
 
 def get_poll_interval() -> float:
