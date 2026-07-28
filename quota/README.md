@@ -11,7 +11,7 @@
 | `quota/README.md`（本文） | 工作计划与跨文档视角（已落地决策） | v0.3 |
 | `quota/parser/SPEC.md` | 解析脚本契约（实现规范） | v0.2, Implementation Locked |
 | `quota/parser/tests/PARITY_REPORT.md` | v0.2 ↔ v0.1 baseline 行为对齐验证报告 | v0.2 完成，143,940 单元格 0 不匹配 |
-| `quota/web-frontend/SPEC.md` | 网站前端契约（UI + HTTP API + 数据契约） | v0.2, Draft |
+| `quota/web-frontend/SPEC.md` | 网站前端契约（UI + HTTP API + 数据契约） | v0.3, Draft |
 
 最新决策以两份 SPEC 为准；本文档在 SPEC 未覆盖的层面提供工作计划视角。SPEC 之间的字段对齐见 `quota/web-frontend/SPEC.md` §11。
 
@@ -228,7 +228,7 @@ Worker 只在任务执行期间使用本地临时目录，例如：
 解析完成后，最终 XLSX 及其相关产物不能只停留在 Worker 本地目录，必须注册回网站并在定额档案详情页展示：
 
 - 原始 PDF；
-- 解析状态（由 `archive.status` 驱动：`registered` / `parsing` / `parsed` / `qa_passed` / `usable` / `cancelled`）；
+- 解析状态（由 `archive.status` 驱动：`registered` / `parsing` / `parsed` / `qa_passed` / `usable`——5 状态枚举：`未解析 / 解析中 / 待审核 / 已完成 / 解析失败`，详见 web-frontend SPEC §3.1.2）；
 - candidate XLSX（下载按钮，仅 `parsed` 及之后状态可下载）；
 - reviewed XLSX 上传入口（仅 `parsed` 状态可用）；
 - final XLSX（下载按钮，仅 `qa_passed` 及之后状态可下载）；
@@ -256,9 +256,9 @@ registered  →  parsing  →  parsed  →  qa_passed  →  usable
    └──── 用户点   └──── Worker  └──── 用户    └──── 可在定额页面
         「开始解析」  跑阶段 A   下载 candidate   套用，作为源
                      + autofinalize  上传 reviewed
-                                  │
-                              cancelled（v0.2 终态；用户取消解析）
 ```
+
+> **v0.3 决策**：开始解析后不允许停止。若需中止，按"重新解析"回到 §5.1，Worker 会清理 MinIO 上旧的 candidate / reviewed / final。原先 `cancelled` 终态、`POST /parse/cancel` 端点（v0.2 占位 501）全部删除。详见 web-frontend SPEC §3.1.1。
 
 每个状态的 UI 可用操作见 `quota/web-frontend/SPEC.md` §6.1 / §7.1。
 
@@ -273,7 +273,7 @@ registered  →  parsing  →  parsed  →  qa_passed  →  usable
 - `file_asset_service/app/runner.py`：增加调用 Worker/解析引擎的分支；
 - `file_asset_service/app/models.py`：在 `Archive` 表上增加 `parse_*` 字段（见 web-frontend SPEC §6.1），**不新增独立 `parse_run` 表**；
 - `file_asset_service/app/assets.py`：将 candidate / final XLSX、QA 报告、Manifest 注册为派生 FileAsset（key 见 §6）；
-- `file_asset_service/app/quota_api.py`：增加 8 个端点（`POST /parse` / `GET /candidate.xlsx` / `POST /reviewed` / `GET /final.xlsx` / `GET /manifest` / `GET /qa-report` / `POST /parse/cancel`（v0.1 占位 501），并扩展现有 `GET /archives/{id}` 返回 `parse` 子对象）；
+- `file_asset_service/app/quota_api.py`：增加 7 个端点（`POST /parse` / `GET /candidate.xlsx` / `POST /reviewed` / `GET /final.xlsx` / `GET /manifest` / `GET /qa-report`，并扩展现有 `GET /archives/{id}` 返回 `parse` 子对象）——v0.3 删除 `POST /parse/cancel`（开始解析后不允许停止）；
 - `file_asset_service/app/mock_parse_runner.py`：mock Worker（`QUOTA_PARSE_MOCK=1` 启用）；
 - `file_asset_service/app/ui/quota-parse.js`、`quota-parse-api.js`、`quota-parse-mock.js`：新增 3 个前端模块（解析 tab + 档案详情解析区块）；
 - `file_asset_service/app/ui/quota-ui.js`：新增「解析任务」tab，档案详情内增加解析区块；
@@ -466,10 +466,10 @@ from quota_parser import (
 
 **v0.2 进展：** 解析脚本已封装为可被 Worker 调用的 Python 包（`quota_parser`），行为与 v0.1 baseline 完全一致（143,940 单元格 0 不匹配）。Worker 与 FastAPI 后端的接口契约见 web-frontend SPEC；`serve_worker()` 真实轮询逻辑在 P1 阶段实现。
 
-**v0.3 进展：** 网站前端 SPEC 升到 v0.2（UI 状态表增加 `cancelled`、Mock 异步硬约束、422 模态框状态明确、新增 `POST /parse/cancel` 占位端点）；README 同步去掉 `issues.md` 引用与早期方案对比段。
+**v0.3 进展：** 网站前端 SPEC 升到 v0.3（删除 `cancelled` 终态与 `POST /parse/cancel` 端点——开始解析后不允许停止；状态枚举从 8 档收敛到 5 档 `未解析/解析中/待审核/已完成/解析失败`；按钮从 10 砍到 9）；README 同步去掉 `issues.md` 引用与早期方案对比段。
 
 **配套 SPEC 文档：**
 - `quota/parser/SPEC.md` v0.2（解析脚本契约，已锁版）
 - `quota/parser/tests/PARITY_REPORT.md` v0.2（行为对齐验证报告）
-- `quota/web-frontend/SPEC.md` v0.2（网站前端契约，§11 字段对齐表）
+- `quota/web-frontend/SPEC.md` v0.3（网站前端契约，§11 字段对齐表）
 - `quota/README.md`（本文，工作计划视角）

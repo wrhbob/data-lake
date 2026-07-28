@@ -1,4 +1,4 @@
-# quota-parser 配套网站前端 SPEC（v0.2）
+# quota-parser 配套网站前端 SPEC（v0.3）
 
 > 配套文档：[`quota/parser/SPEC.md`](../parser/SPEC.md)（v0.2，Implementation Locked）。
 > 本 SPEC 描述**网站侧**：UI 行为、前端消费的 HTTP API 契约、以及 Worker 尚未上线前的 Mock 策略。
@@ -9,7 +9,7 @@
 
 ## 0. 文档元信息
 
-- **状态**：Draft v0.2（已与 parser/SPEC.md v0.2 + AI 评审意见对齐）
+- **状态**：Draft v0.3（v0.2 基础上砍 cancelled 与 #2 按钮；5 状态收敛；新增 §7.4 档案列表操作列集成解析入口）
 - **配套**：[`quota/parser/SPEC.md`](../parser/SPEC.md) v0.2
 - **范围**：清单定额档案台（`quota-ui.js`）内新增的「解析任务」tab + 档案详情内的「解析」区块。
 - **读者**：前端实现者、parser 维护者（用于跨文档核对）。
@@ -85,6 +85,66 @@
 | `failed_permanent` | 红色 banner「解析失败，请联系运维」+ 「重新解析」按钮 |
 | `failed_user`（最常见：reviewed.xlsx 不合法） | 红色 banner + 来自 `InvalidXlsxStructureError` 的内联原因 |
 
+### 3.1 按钮清单（跨状态参考表）
+
+> 来源：UI 设计对话（2026-07-28）。本节是 §7.1「按状态渲染」的速查母表；§7.1 给具体渲染细节，本节给"全按钮 × 全状态"总览。两节须一起审阅。
+
+#### 3.1.1 主操作流（9 个按钮，按动线顺序；v0.3 移除 #2 取消）
+
+> **v0.3 决策**：删除原 #2「取消解析」按钮与 §5.8 端点。设计意图：开始解析后不允许停止——若需中止，按"重新解析"走 §5.1，Worker 会清理 MinIO 上旧的 candidate / reviewed / final（避免半成品状态污染 MinIO 与 Worker 调度打架）。
+
+| # | 按钮 | 触发端点 | 用户场景 | 备注 |
+|---|---|---|---|---|
+| 1 | **开始解析** | `POST /api/data-lake/quota/archives/{archive_id}/parse` | 档案详情页对已登记 PDF 发起第一轮解析 | registered 状态可见；与「重新解析」**共用同一端点**（§3.1.3） |
+| 2 | **下载 PDF 原件** | `GET /api/data-lake/archives/{id}/files/{file_id}`（**复用现有端点**） | 任何时候要拿原件查看 | 任何状态可点；档案列表的「预览」图标复用此语义 |
+| 3 | **下载 candidate XLSX** | `GET /api/data-lake/quota/archives/{archive_id}/candidate.xlsx` | parsed 后下载到本地用 Excel 改 | 待审核 及之后 |
+| 4 | **上传 reviewed XLSX** | `POST /api/data-lake/quota/archives/{archive_id}/reviewed` | parsed 后把改好的 XLSX 传回去 | 仅待审核 / 解析失败；模态框交互见 §7.3 |
+| 5 | **下载 final XLSX** | `GET /api/data-lake/quota/archives/{archive_id}/final.xlsx` | 已完成后拿最终结果 | 已完成 状态可见 |
+| 6 | **查看 Manifest** | `GET /api/data-lake/quota/archives/{archive_id}/manifest` | 排错 / 核对 profile + parser_version | 待审核 及之后；弹窗头部强提示 `parser_version` |
+| 7 | **查看 QA 报告** | `GET /api/data-lake/quota/archives/{archive_id}/qa-report` | 看阶段 A / B 自动 QA 输出 | 已完成 及之后（及解析失败） |
+| 8 | **重新解析** | **复用** `POST /api/data-lake/quota/archives/{archive_id}/parse`（同 #1） | 用新 profile 或重跑 | 待审核 / 已完成 / 解析失败 任意状态；UI 层按 `archive.status` 切换 label/icon |
+| 9 | **删除解析结果** | `POST /api/data-lake/quota/archives/{archive_id}/parse/delete`（**待确认**——见 §12） | 清掉 MinIO 产物 + Archive `parse_*` 字段 | 待审核 及之后任意状态；危险操作须二次确认 |
+
+#### 3.1.2 状态 × 按钮可见性矩阵（5 状态 × 9 按钮）
+
+> **v0.3 决策**：状态从 8 档收敛到 **5 档**（`cancelled` 删除；`failed_user` + `failed_permanent` 合并为"解析失败"；`qa_passed` + `usable` 合并为"已完成"）。
+
+| UI 状态 | `archive.status` 覆盖 | #1<br>开始 | #2<br>下载 PDF | #3<br>下载 candidate | #4<br>上传 reviewed | #5<br>下载 final | #6<br>看 Manifest | #7<br>看 QA | #8<br>重新解析 | #9<br>删除结果 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **未解析** | `registered` | ✅ | ✅ | — | — | — | — | — | — | — |
+| **解析中** | `parsing` + `transient` | — | ✅ | — | — | — | — | — | — | — |
+| **待审核** | `parsed` | — | ✅ | ✅ | ✅ | — | ✅ | — | ✅ | ✅ |
+| **已完成** | `qa_passed` + `usable` | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **解析失败** | `failed_user` + `failed_permanent` | — | ✅ | ✅ | ✅ 重做 | — | ✅ | ✅ | ✅ 换 profile | ✅ |
+
+> `transient` 复用「解析中」渲染（黄色 banner「重试中（N/M）」叠加在状态徽章上），不单列。
+
+#### 3.1.3 共用端点与 UI label 切换
+
+- **#1 与 #8 共用同一后端端点** `POST /archives/{archive_id}/parse`：UI 层根据 `archive.status` 切换 button label 与 icon——`registered → 「开始解析」`，`parsed/qa_passed/usable/failed_* → 「重新解析」`。后端契约干净，UI 决策点单一。
+- **后端语义差异**：第一次调用 `archive.status = registered → parsing`；后续调用从任何 `{parsed, qa_passed, usable, failed_*}` 回到 `parsing`，**Worker 会清理 MinIO 上旧的 candidate / reviewed / final**（避免多版本残留）。
+
+#### 3.1.4 危险操作隔离
+
+按钮 #10「删除解析结果」必须满足：
+
+1. **二次确认 modal**：必填「输入档案标题确认」防误删。
+2. **位置不与「重新解析」相邻**：CLAUDE.md 入湖纪律已强调两类删除要分开（删除解析结果 ≠ 删除原始档案）；视觉上保持至少 1 个普通按钮的间距。
+3. **明确语义区分**：modal 标题必须是「删除解析结果」（不是「删除档案」或「删除 XLSX」），避免与原始档案的删除混淆。
+4. **审计**：调用时记录到 `audit_log`（`action='quota_parse_result_deleted'`, `target_id=archive_id`）。
+
+#### 3.1.5 UI 必要展示元素（非按钮，但与按钮同处一区块）
+
+| 元素 | 数据源 | 何时显示 |
+|---|---|---|
+| Profile 名（`sichuan` / `chongqing`） | `parse.profile` | parsed 及之后 |
+| `parser_version` | `parse.parser_version` | parsed 及之后，**强提示**（README §7 "排错用"） |
+| Task ID | `parse.task_id` | parsing 起任何状态 |
+| 状态进度条 + 文字 | `archive.status` + `parse.status` | 始终 |
+| 异常 banner（3 类） | `parse.error_code` | `transient` / `failed_permanent` / `failed_user` |
+| 行数差异 warning | `qa_report.json` | qa_passed 时若 reviewed 行数差过大 |
+| 处理耗时 | `parse.started_at` / `finished_at` | 任意终态 |
+
 ---
 
 ## 4. 文件结构（新增 / 改动）
@@ -110,6 +170,17 @@ file_asset_service/app/
 ```
 
 > 前端 SPEC 只对前端目录负责。后端目录的改动列在这里，是为了 parser 维护者能一并审阅 API 契约；后端实现属于另一个工作流。
+
+### 4.1 前端代码放在 `file_asset_service/app/ui/` 的理由（v0.2 决策）
+
+3 个新前端模块（`quota-parse.js` / `quota-parse-api.js` / `quota-parse-mock.js`）**不**放到 `quota/web-frontend/src/`，而是与现有 `quota-ui.js` / `quota-compose.js` / `quota-api.js` 并列放进 `file_asset_service/app/ui/`：
+
+1. **零迁移成本**：现有 FastAPI 主程序 `main.py` L177 已把 `file_asset_service/app/ui/` 整体挂载到 `/ui-assets`（`app.mount("/ui-assets", StaticFiles(directory=ui_dir))`）；新模块放同目录，`index.html` 加 3 行 `<script>` 即可。
+2. **与现有惯例一致**：3 个现有 quota-* 模块都在这里；新加文件顺着命名空间排最自然。
+3. **避免主程序变更**：`main.py` L177 的 StaticFiles 挂载是单一信任锚；为 3 个新文件扩展挂载点收益不抵改动。
+4. **未来可平滑迁出**：若要把"quota 全部前端"自治到 `quota/web-frontend/src/`（与 `quota/parser/` 对称），届时把 6 个 quota-* 文件（含 3 个老的）一并迁出，扩展 `main.py` 加一条 `app.mount("/quota-assets", ...)` 即可——v0.2 不做这次重构。
+
+**SPEC 文档**仍保留在 `quota/web-frontend/SPEC.md`（与 `quota/parser/SPEC.md` 平行），只搬代码，不搬文档。
 
 ---
 
@@ -185,16 +256,7 @@ file_asset_service/app/
 
 对照：parser/SPEC.md §12。
 
-### 5.8 `POST /archives/{archive_id}/parse/cancel`（**v0.1 仅占位**）
-
-取消正在进行的解析（阶段 A 中）。**v0.1 不实现**，端点存在但仅返回 `501 NOT_IMPLEMENTED`，让前端可以提前写好取消按钮（UI 始终显示、调用即被服务端拒），v0.2 替换为真实实现。
-
-- **请求体**：无。
-- **错误**：
-  - `501 NOT_IMPLEMENTED`（v0.1 固定返回）
-  - `404 ARCHIVE_NOT_FOUND`
-
-> 实施顺序：v0.1 上线时前端按钮**始终可点**（按设计意图展现），点击后服务端返回 501，前端弹 toast「取消功能 v0.2 上线」并保持原状态；v0.2 改为真实取消：服务端把 `archive.status` 推到 `cancelled` 终态、清理 MinIO 半成品、释放 Worker 槽位。
+> **v0.3 决策**：删除原 §5.8 取消解析端点。设计意图：开始解析后不允许停止（避免半成品状态污染 MinIO、避免与 Worker 调度逻辑打架）。如需中止，按"重新解析"走 §5.1——Worker 会清理 MinIO 上旧的 candidate / reviewed / final（见 §3.1.3）。
 
 ---
 
@@ -278,16 +340,15 @@ UI 状态映射表：
 | `archive.status` | `parse.status` 显示 | UI 可用操作 |
 |---|---|---|
 | `registered` | `pending`（暂无数据） | 「开始解析」 |
-| `parsing` | `running` | 转圈 + 「取消」（v0.2：真实现；v0.1：调 §5.8 → 501） |
+| `parsing` | `running` | 转圈 + 状态徽章（无取消按钮；详见 §3.1.1 v0.3 决策） |
 | `parsed` | `candidate_ready` | 下载 / 上传 |
 | `qa_passed` | `final_ready` | 下载 |
 | `usable` | `final_ready` | 下载 + 绿色 badge |
-| `cancelled`（v0.2 引入） | `cancelled` | 「重新解析」（终态，不再轮询） |
 | `parsing` + `error_code=transient` | `running` | 黄色「重试中（N/M）」 |
 | `parsing` + `error_code=failed_permanent` | `failed` | 红色 banner + 「重新解析」 |
 | `parsed` + `error_code=failed_user` | `failed` | 红色 banner + 内联原因 |
 
-`cancelled` 终态：服务端取消成功后 `archive.status` 落到此值，`MinIO` 半成品被清理；前端停止轮询、按「重新解析」回到 `registered` → `parsing` 流程。
+> **v0.3**：取消 `cancelled` 终态（详见 §3.1.1 决策）。异常落点收口到 `failed_permanent` / `failed_user` / `transient` 三类。
 
 Manifest 视图（§7.1 内「查看 Manifest」链接打开的弹窗）需展示三行头部元数据：
 
@@ -357,7 +418,7 @@ Task ID:     qp_20260727_xxxx
   - archive.status == registered：
       大按钮「开始解析」（调 §5.1）
   - archive.status == parsing：
-      转圈 + 「Worker 正在解析…」+ 「取消」（调 §5.8；v0.1：服务端返回 501，前端弹 toast「取消功能 v0.2 上线」并保持原状态）
+      转圈 + 「Worker 正在解析…」
       若 parse.error_code == transient：黄色 banner「重试中（N/M）」
   - archive.status == parsed：
       两个按钮：「下载 candidate」 | 「上传 reviewed」
@@ -371,11 +432,11 @@ Task ID:     qp_20260727_xxxx
       「查看 Manifest」/「查看 QA 报告」链接
   - archive.status == usable：
       同 qa_passed + 绿色「Usable」徽章
-  - archive.status == cancelled（v0.2）：
-      灰色 banner「已取消」+「重新解析」按钮（回到 §5.1）
   - 任何状态若 parse.error_code != null：
       区块顶部红色 banner，显示 parse.error_message
 ```
+
+> **v0.3**：删除 `cancelled` 分支（开始解析后不允许停止，详见 §3.1.1）。
 
 若 `parse.status` 为 `pending` 且 `archive.status == registered`（初始态）——区块隐藏「开始解析」按钮之外的所有内容，按钮始终保留。
 
@@ -420,6 +481,85 @@ Task ID:     qp_20260727_xxxx
 | 「取消」/关闭按钮（`×`） | **保持可点**——用户随时可关闭模态框退出 |
 
 > 设计意图：422 通常是结构性问题（Sheet 改名、列数错），用户改完想再传；若强制关闭会丢失后端反馈，重开又看不到刚才那条 reason。
+
+### 7.4 档案列表 — 操作列集成解析入口（v0.3 新增）
+
+清单定额档案台的档案列表，每行操作列直接承载解析相关快捷操作——用户不必进入档案详情即可触发解析、上传 reviewed、下载 final、查看 Manifest/QA、删除结果。配合 §7.1 档案详情"解析区块"形成"行级快入口 + 详情全功能"双层入口。
+
+#### 7.4.1 状态徽章（5 状态枚举）
+
+在档案列表的「状态」列显示。状态值由 `archive.status` + `parse.error_code` 推导：
+
+| UI 徽章 | `archive.status` 覆盖 | 颜色 | 备注 |
+|---|---|---|---|
+| **未解析** | `registered` | 灰色 | 初始态 |
+| **解析中** | `parsing` + `transient`（`parse.error_code='transient'`） | 蓝色，配转圈图标 | 转圈 + 文字"解析中" |
+| **待审核** | `parsed` | 橙色 | 文字"待审核" |
+| **已完成** | `qa_passed` + `usable` | 绿色 | `usable` 状态额外显示绿色"Usable"小徽章 |
+| **解析失败** | `failed_user` + `failed_permanent` | 红色 | 红色 banner 不显示在列表（避免污染行视觉），点档案详情看原因 |
+
+> 徽章用现有 `.status-badge` 类（index.html L244）；新增 5 个状态样式（`.status-badge--pending / --parsing / --review / --done / --failed`）。
+
+#### 7.4.2 操作列布局（智能图标 + ⋯ 下拉）
+
+每行渲染 **2 个图标按钮 + 1 个 ⋯ 下拉按钮**。2 个图标按状态智能选取（按 §3.1.2 矩阵的"最关键动作"）；其余可用动作进 ⋯ 下拉。
+
+| UI 状态 | 智能图标 1 | 智能图标 2 | ⋯ 下拉内容 |
+|---|---|---|---|
+| **未解析** | 👁 预览 | ▶ 开始解析 | （空） |
+| **解析中** | 👁 预览 | ⏳ 转圈占位图标（无动作） | 看 Manifest |
+| **待审核** | ⬇ 下载 candidate | ↑ 上传 reviewed | 看 Manifest、重新解析、删除结果 |
+| **已完成** | ⬇ 下载 final | 👁 预览 | 看 Manifest、看 QA、重新解析、删除结果 |
+| **解析失败** | ↻ 重新解析 | 👁 预览 | 看 Manifest、看 QA、删除结果 |
+
+**智能图标规则**：
+- 任何状态下必出"👁 预览"——除非已被另一关键动作挤占图标位（待审核状态用 ⬆ 上传 reviewed 替代预览，因为审核是这个状态下最关键的待办动作）
+- "已完成"状态出 👁 预览而非"看 Manifest"——预览是用户最常见的"看一眼"
+- "解析失败"状态出 ↻ 重新解析——恢复是首要动作
+
+**⋆ 下拉触发**：
+- 用现有 `<button class="icon-button">` + lucide `more-horizontal` 图标
+- 下拉菜单浮在按钮下方左对齐，浅灰背景 + 阴影
+- 点击下拉外部自动关闭（监听 document click）
+- 下拉底部独立分隔条 + 红色文字 + 删除图标——危险操作隔离（按 §3.1.4）
+
+#### 7.4.3 删除结果二次确认 modal
+
+按 §3.1.4：标题固定「删除解析结果」、必填档案标题确认、取消/关闭按钮始终可点、审计日志 `action='quota_parse_result_deleted'`。模态框可复用现有 `quotaUploadModal` 模板样式。
+
+#### 7.4.4 列表行点击行为
+
+- 点击行任意非图标按钮区域：跳转到档案详情 viewer（现有行为）
+- 点击图标按钮：阻止冒泡 + 执行图标对应动作（不走详情）
+- ⋯ 下拉菜单项点击：阻止冒泡 + 执行对应动作 + 关闭下拉
+
+#### 7.4.5 状态轮询
+
+- 列表中 `archive.status ∈ {parsing}` 的行：前端每 3 s 轮询该档案详情（与 §5.2 一致）——**整张列表不轮询**，仅对解析中行做客户端级轮询（每行维护自己的轮询句柄）
+- 转解析状态由用户点 ▶「开始解析」触发（不走轮询）
+- 状态从 `parsing → parsed/qa_passed/failed_*`：前端立刻停止该行的轮询；徽章与图标自动重渲染
+
+#### 7.4.6 排序与列结构
+
+`LIST_COLUMNS`（quota-ui.js L55）从 5 列扩到 **7 列**：
+
+```
+档案标题 | 资料分类 | 文件数 | 状态 | 操作
+```
+
+**操作列**承载 §7.4.2 的智能图标 + ⋯ 下拉。**状态列**承载 §7.4.1 的徽章。
+
+默认排序：`edition_year desc, created_at desc`（新版年度定额优先）。
+
+#### 7.4.7 空态
+
+- 筛选后无档案：「该条件下暂无定额档案」+「清除筛选」链接（省份 → 全部；年份行折叠）
+- 解析中档案无进度条——按决策"OCR 无法显示有几页"，仅转圈 + 状态徽章
+
+#### 7.4.8 与档案详情的关系
+
+- **不重复入口**：操作列里的 ⬇ / ↑ / ↻ 按钮直接调端点（§5.1–§5.7），不打开档案详情；档案详情 §7.1「解析区块」作为全功能详情页保留
+- **冲突解决**：用户在列表点了 ▶「开始解析」后，若在详情页打开同一档案，看到的状态应一致（同一 `archive.status`，由后端权威）
 
 ---
 
@@ -514,8 +654,13 @@ Worker 真正上线时，只需移除 `if QUOTA_PARSE_MOCK: ...` 分支并指向
 
 ## 13. 版本
 
-- **v0.1**（本文档）：初稿，待与 `parser/SPEC.md` v0.2 核对。包含：7 个核心端点（§5.1–§5.7）+ 1 个占位端点 `POST /parse/cancel`（§5.8，固定 501）、复用 `archive.status` 状态机、Mock 模式（§8，含 4 条硬约束）。
-- **v0.2**（未来）：
-  1. 实现 §5.8 真实取消（`cancelled` 终态落地、MinIO 半成品清理、Worker 槽位释放）。
-  2. 加 PDF 页级 OCR 置信度视图（Manifest `metrics` 扩字段，对接后端新增的 `page_confidence[]`）。
-  3. 「解析任务」tab 加批量操作（批量取消、批量下载）。
+- **v0.1**（本文档）：初稿，待与 `parser/SPEC.md` v0.2 核对。包含：7 个核心端点（§5.1–§5.7）、复用 `archive.status` 状态机、Mock 模式（§8，含 4 条硬约束）。
+- **v0.2**（中转）：新增 §3.1「按钮清单 + 状态矩阵」、§5.8 占位取消端点、UI 状态映射表加 `cancelled` 终态。
+- **v0.3**（本文档）：
+  1. 删除 §5.8 取消端点、`cancelled` 终态、§3.1.1 #2 按钮（开始解析后不允许停止）。
+  2. 状态枚举从 8 档收敛到 5 档（`未解析 / 解析中 / 待审核 / 已完成 / 解析失败`）。
+  3. §3.1 按钮从 10 个砍到 9 个。
+  4. 新增 §7.4「档案列表操作列集成解析」——状态徽章、智能图标、⋯ 下拉、删除二次确认 modal、解析中行级轮询。
+- **v0.4**（未来）：
+  1. 加 PDF 页级 OCR 置信度视图（Manifest `metrics` 扩字段，对接后端新增的 `page_confidence[]`）。
+  2. 「解析任务」tab 加批量操作（批量重新解析、批量下载）。
