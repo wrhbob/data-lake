@@ -664,3 +664,52 @@ Worker 真正上线时，只需移除 `if QUOTA_PARSE_MOCK: ...` 分支并指向
 - **v0.4**（未来）：
   1. 加 PDF 页级 OCR 置信度视图（Manifest `metrics` 扩字段，对接后端新增的 `page_confidence[]`）。
   2. 「解析任务」tab 加批量操作（批量重新解析、批量下载）。
+- **v0.3.1**（2026-07-28，筛选条实施批次，详细见 §14）：
+  1. 后端 `/api/data-lake/quota/facets` 接受 `jurisdiction_code` 查询参数；主年份聚合 + 嵌套 `editions` 子查询都按省过滤。
+  2. 前端 `_facetsParams()` helper：建筑工程定额 + 选中具体省份 → 透传 `jurisdiction_code`；`secondary="all"` 时不传（取所有省并集）。
+  3. `set-primary` / `set-secondary` 处理器在切换时主动 `getFacets()` 重刷，避免后端 facets 缓存命中过期数据。
+  4. `renderYearChips()` 移除 "secondary=all 时整行不渲染" 的短路——年份作为与省份正交的维度，"全部省份 + 某年"是合理筛法。
+  5. `getFacetItems("jurisdictions")` 后端空时 → `PROVINCE_REGIONS` 静态兜底（31 省 + 深圳市 = 32 条，**不含**兵团 / 其他 4 个计划单列市），用 `short` 字段紧凑显示。
+  6. `getFacetItems("years")` 后端空时 → 最近 6 年倒序 `[2026..2021]` 兜底。
+  7. 新增 `PROVINCE_REGIONS` 静态数组，与 `JURISDICTION_REGIONS`（GB/T 2260 全集 37 条）明确分工：前者给筛选条 chip fallback，后者给 compose 弹窗的「省份/管辖」下拉。
+  8. `renderChipGroup` 按 `field` 区分 `maxDefault`：主筛选维度（`jurisdiction/industry/scope/year/edition`）= 32，不折叠；高级筛选字段 = 8。
+
+---
+
+## 14. v0.3.1 实施批次记录（2026-07-28）
+
+> **批次目标**：补齐建筑工程定额筛选条全路径（省份 → 年份）；后端 `/facets` 留按省过滤的口子；前端在接口未就绪时也能给出合理默认值。
+
+### 14.1 改动文件清单
+
+| 文件 | 改动 | 用途 |
+|---|---|---|
+| `file_asset_service/app/quota_api.py` | `_facet_years()` 增 `jurisdiction_code` 参数；`get_facets()` 增 query 参数 | 后端按省过滤年份聚合（主年份 + 嵌套 `editions` 子查询均生效） |
+| `file_asset_service/app/ui/quota-ui.js` | `_facetsParams()` helper；`getFacetItems()` jurisdictions/years fallback；新增 `PROVINCE_REGIONS` 静态数组；`renderYearChips()` 移除 secondary=all 短路；`renderChipGroup()` 按 field 区分 maxDefault；`set-primary` / `set-secondary` handler 重刷 facets | 前端筛选条全链路 |
+
+### 14.2 关键决策
+
+1. **年份与省份正交**：选"全部省份 + 某年"是合理筛法（如"全国所有 2025 年定额"）。`renderYearChips()` 不再因 `secondary="all"` 就整行不渲染。
+2. **`PROVINCE_REGIONS` ≠ `JURISDICTION_REGIONS`**：
+   - `PROVINCE_REGIONS`（32 条 = 31 省 + 深圳市，code=440300）—— 筛选条 chip fallback，紧凑型 `short` label；
+   - `JURISDICTION_REGIONS`（37 条 = GB/T 2260 全集，含 5 个计划单列市 + 兵团）—— 仍用于 compose 弹窗的"省份/管辖"下拉，**本批次不动**。
+3. **后端 `/facets` 未就绪时**：前端不是显示"地区维度待接入"占位，而是用静态兜底展示完整省份集合；后端接好后接口数据自动让位。
+4. **`renderChipGroup` `maxDefault` 条件化**：主筛选维度（地区 / 行业 / 适用范围 / 年份 / 版次）= 32 不折叠；高级筛选字段 = 8 保持折叠。
+
+### 14.3 用户验证（全路径通过 2026-07-28）
+
+| 场景 | 期望 | 实测 |
+|---|---|---|
+| 默认状态（primary=全部） | 仅 4 个一级 chip；无二级、无年份 | ✅ |
+| primary=建筑工程定额, secondary=全部 | 地区行 32 chip + "全部"（短名，无"展开更多"，无大连 / 计划单列市）；年份行 6 chip + "全部" | ✅ |
+| primary=建筑工程定额, secondary=具体省 | 地区行同 32 chip，"该省"高亮；年份行联动（接口按省过滤 或 fallback 6 年兜底） | ✅ |
+| primary=清单规范 / 专业工程定额 | 一级 chip + 各二级行；年份与 secondary 正交 | ✅ |
+| 切 primary → 选具体省份 → 切回"全部" | `getFacets()` 自动重刷，years 跟随 jurisdiction_code 正确联动 | ✅ |
+
+### 14.4 留作批 2 / 后续批次
+
+- 操作列集成（状态徽章 / 智能图标 / ⋯ 下拉 / 删除二次确认 modal）
+- 新建 `quota-parse.js` 包 7 个解析端点
+- 解析中行级轮询
+
+

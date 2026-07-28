@@ -468,6 +468,17 @@ from quota_parser import (
 
 **v0.3 进展：** 网站前端 SPEC 升到 v0.3（删除 `cancelled` 终态与 `POST /parse/cancel` 端点——开始解析后不允许停止；状态枚举从 8 档收敛到 5 档 `未解析/解析中/待审核/已完成/解析失败`；按钮从 10 砍到 9）；README 同步去掉 `issues.md` 引用与早期方案对比段。
 
+**v0.3.1 进展（2026-07-28，前端筛选条实施批次）：**
+- **后端**：`/api/data-lake/quota/facets` 接受 `jurisdiction_code` query 参数，主年份聚合 + 嵌套 `editions` 子查询都按省过滤。
+- **前端** `_facetsParams()` helper：建筑工程定额 + 选中具体省份 → 透传 `jurisdiction_code`；`secondary="all"` 时不传（取所有省并集）。
+- **前端** `set-primary` / `set-secondary` 处理器在切换时主动 `getFacets()` 重刷，避免 facets 缓存命中过期数据。
+- **前端** `getFacetItems()` jurisdictions/years 后端空时 → 静态 fallback：j 通过新数组 `PROVINCE_REGIONS`（31 省 + 深圳市 = 32 条，无兵团 / 其他 4 个计划单列市，紧凑 `short` label）；y 最近 6 年倒序。
+- **前端** `renderYearChips()`：年份作为与省份正交的维度，"全部省份" 也显示年份行（移除 secondary=all 短路）。
+- **前端** `renderChipGroup` 按 `field` 区分 `maxDefault`：主筛选维度（jurisdiction / industry / scope / year / edition）= 32 不折叠；高级筛选字段 = 8。
+- **保留** `JURISDICTION_REGIONS`（37 条 GB/T 2260 全集）—— 仍给 compose 弹窗"省份/管辖"下拉使用，本批次未动。
+
+> 完整批次记录见 `quota/web-frontend/SPEC.md` §14（含改动文件清单、关键决策、用户验证表、留作批 2 项）。
+
 **配套 SPEC 文档：**
 - `quota/parser/SPEC.md` v0.2（解析脚本契约，已锁版）
 - `quota/parser/tests/PARITY_REPORT.md` v0.2（行为对齐验证报告）

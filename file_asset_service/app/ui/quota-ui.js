@@ -183,6 +183,46 @@
     {code:"660000",label:"新疆生产建设兵团",py:"bingtuan"},
   ]);
 
+  // ── 省级单位 + 深圳市（筛选条 chip fallback 用）────────────────
+  // 31 省级行政区 + 深圳市（440300）= 32 条；
+  // 兵团（660000）不列出，4 个其他计划单列市也不列出。
+  // short 字段用作 chip 显示文本，紧凑型 label，避免行宽爆炸。
+  // 后端 /facets 真正接好后自动让位给接口数据。
+  const PROVINCE_REGIONS = Object.freeze([
+    {code:"110000",label:"北京市",py:"beijing",short:"北京"},
+    {code:"120000",label:"天津市",py:"tianjin",short:"天津"},
+    {code:"130000",label:"河北省",py:"hebei",short:"河北"},
+    {code:"140000",label:"山西省",py:"shanxi",short:"山西"},
+    {code:"150000",label:"内蒙古自治区",py:"neimenggu",short:"内蒙古"},
+    {code:"210000",label:"辽宁省",py:"liaoning",short:"辽宁"},
+    {code:"220000",label:"吉林省",py:"jilin",short:"吉林"},
+    {code:"230000",label:"黑龙江省",py:"heilongjiang",short:"黑龙江"},
+    {code:"310000",label:"上海市",py:"shanghai",short:"上海"},
+    {code:"320000",label:"江苏省",py:"jiangsu",short:"江苏"},
+    {code:"330000",label:"浙江省",py:"zhejiang",short:"浙江"},
+    {code:"340000",label:"安徽省",py:"anhui",short:"安徽"},
+    {code:"350000",label:"福建省",py:"fujian",short:"福建"},
+    {code:"360000",label:"江西省",py:"jiangxi",short:"江西"},
+    {code:"370000",label:"山东省",py:"shandong",short:"山东"},
+    {code:"410000",label:"河南省",py:"henan",short:"河南"},
+    {code:"420000",label:"湖北省",py:"hubei",short:"湖北"},
+    {code:"430000",label:"湖南省",py:"hunan",short:"湖南"},
+    {code:"440000",label:"广东省",py:"guangdong",short:"广东"},
+    {code:"450000",label:"广西壮族自治区",py:"guangxi",short:"广西"},
+    {code:"460000",label:"海南省",py:"hainan",short:"海南"},
+    {code:"500000",label:"重庆市",py:"chongqing",short:"重庆"},
+    {code:"510000",label:"四川省",py:"sichuan",short:"四川"},
+    {code:"520000",label:"贵州省",py:"guizhou",short:"贵州"},
+    {code:"530000",label:"云南省",py:"yunnan",short:"云南"},
+    {code:"540000",label:"西藏自治区",py:"xizang",short:"西藏"},
+    {code:"610000",label:"陕西省",py:"shaanxi",short:"陕西"},
+    {code:"620000",label:"甘肃省",py:"gansu",short:"甘肃"},
+    {code:"630000",label:"青海省",py:"qinghai",short:"青海"},
+    {code:"640000",label:"宁夏回族自治区",py:"ningxia",short:"宁夏"},
+    {code:"650000",label:"新疆维吾尔自治区",py:"xinjiang",short:"新疆"},
+    {code:"440300",label:"深圳市",py:"shenzhen",short:"深圳"},
+  ]);
+
   // 适应地区下拉选项 HTML (带拼音 data 属性, 供搜索过滤)
   function renderJurisdictionOptions(selectedCode) {
     var html = '<option value="">请选择适用地区</option>';
@@ -379,6 +419,9 @@
   }
 
   // ── 年份标签组 ──────────────────────────────────────────────────────
+  // 年份是「与省份正交」的维度：选全部省份也要能按年份筛（如"全国所有 2025 年定额"）。
+  // 后端 /facets 在 jurisdiction_code 缺省时返回所有省份的 years 并集，前端 fallback
+  // 也是最近 6 年，所以不区分 secondary 是否具体选。
   function renderYearChips() {
     if (state.filters.primary === "all") return "";
     var items = getFacetItems("years");
@@ -402,7 +445,10 @@
 
   // ── 通用标签组渲染 ──────────────────────────────────────────────────
   function renderChipGroup(field, stateKey, label, items, selected, expanded) {
-    var maxDefault = 8;
+    // 主筛选维度（地区/行业/适用范围/年份/版次）行宽能容下，不强制折叠；
+    // 高级筛选字段保留 8 折叠上限，避免一屏过宽。
+    var MAIN_FIELDS = ["jurisdiction", "industry", "scope", "year", "edition"];
+    var maxDefault = MAIN_FIELDS.indexOf(field) !== -1 ? 32 : 8;
     if (typeof expanded === "undefined") expanded = false;
     var allChip = '<button class="filter-chip' + (selected === "all" ? " active" : "") +
       '" type="button" data-quota-action="set-' + stateKey + ':all">全部</button>';
@@ -456,36 +502,66 @@
   }
 
   // ── facets 数据访问（占位：数据来自 state.facets.data）─────────────
+  // 构造 GET /facets 查询参数：
+  //   - primary 始终传（决定 jurisdictions/industries/scopes/years 的语义）
+  //   - 建筑工程定额 + 选了具体省份 → 透传 jurisdiction_code 让 years 按省过滤
+  function _facetsParams() {
+    var params = { primary: state.filters.primary };
+    if (
+      state.filters.primary === "construction_regional" &&
+      state.filters.secondary &&
+      state.filters.secondary !== "all"
+    ) {
+      params.jurisdiction_code = state.filters.secondary;
+    }
+    return params;
+  }
+
   function getFacetItems(key) {
-    if (!state.facets || !state.facets.data) return [];
+    // 后端 facets 数据为空 / 未就绪时仍允许静默兜底，避免"地区维度待接入"这种空位
+    var fx = (state.facets && state.facets.data) || {};
     switch (key) {
       case "scope": case "scopes":
-        return state.facets.data.scopes || [];
-      case "jurisdiction": case "jurisdictions":
-        return state.facets.data.jurisdictions || [];
-      case "industry": case "industries":
-        return state.facets.data.industries || [];
-      case "years":
-        return (state.facets.data.years || []).map(function (y) {
-          if (typeof y === "string") return { value: y, label: String(y) };
-          return { value: y.value, label: String(y.label || y.value), editions: y.editions || [] };
+        return fx.scopes || [];
+      case "jurisdiction": case "jurisdictions": {
+        var fromFx = fx.jurisdictions || [];
+        if (fromFx.length) return fromFx;
+        // 后端未返回 jurisdictions → 静态兜底：31 省 + 深圳市 = 32 条；用 short 字段（紧凑 chip）
+        return PROVINCE_REGIONS.map(function (r) {
+          return { value: r.code, label: r.short || r.label };
         });
+      }
+      case "industry": case "industries":
+        return fx.industries || [];
+      case "years": {
+        var fromYears = fx.years || [];
+        if (fromYears.length) {
+          return fromYears.map(function (y) {
+            if (typeof y === "string") return { value: y, label: String(y), editions: [] };
+            return { value: y.value, label: String(y.label || y.value), editions: y.editions || [] };
+          });
+        }
+        // 兜底：最近 6 年倒序（仅在选了具体省份后才显示）
+        return [2026, 2025, 2024, 2023, 2022, 2021].map(function (y) {
+          return { value: String(y), label: String(y), editions: [] };
+        });
+      }
       case "disciplines":
-        return state.facets.data.disciplines || [];
+        return fx.disciplines || [];
       case "materialTypes":
-        return state.facets.data.materialTypes || [];
+        return fx.materialTypes || [];
       case "cities":
-        return state.facets.data.cities || [];
+        return fx.cities || [];
       case "issuers":
-        return state.facets.data.issuers || [];
+        return fx.issuers || [];
       case "metadataStatuses":
-        return state.facets.data.metadataStatuses || [];
+        return fx.metadataStatuses || [];
       case "archiveStatuses":
-        return state.facets.data.archiveStatuses || [];
+        return fx.archiveStatuses || [];
       case "sourceChannels":
-        return state.facets.data.sourceChannels || [];
+        return fx.sourceChannels || [];
       case "fileFormats":
-        return state.facets.data.fileFormats || [];
+        return fx.fileFormats || [];
       default:
         return [];
     }
@@ -1183,7 +1259,7 @@
     }
     if (state.flags.facets) {
       tasks.push(
-        state.api.getFacets({}).then((r) => {
+        state.api.getFacets(_facetsParams()).then((r) => {
           state.facets = { status: r.status, data: r.data };
         })
       );
@@ -1544,6 +1620,13 @@
         state.filters.edition = "all";
         state.filters.city = "all";
         state.filters.discipline = "all";
+        // 一级切到建筑工程定额时，facets 二次元数据（jurisdictions/years）按 primary 重置
+        if (state.flags.facets) {
+          state.api.getFacets(_facetsParams()).then((r) => {
+            state.facets = { status: r.status, data: r.data };
+            render();
+          });
+        }
       }
       render();
       reloadArchives();
@@ -1551,6 +1634,13 @@
     }
     if (action.indexOf("set-secondary:") === 0) {
       state.filters.secondary = action.slice(14);
+      // 建筑工程定额：切省份后重刷 facets，让 years 按省份过滤
+      if (state.filters.primary === "construction_regional" && state.flags.facets) {
+        state.api.getFacets(_facetsParams()).then((r) => {
+          state.facets = { status: r.status, data: r.data };
+          render();
+        });
+      }
       render();
       reloadArchives();
       return;

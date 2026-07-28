@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quota_parser"
+version = "0.3.0"
+description = "Quota PDF → multi-sheet XLSX pipeline (Worker-callable Python package)"
+readme = "SPEC.md"
+requires-python = ">=3.10"
+authors = [{ name = "data_lake0714 quota-parser team" }]
+license = { text = "Proprietary" }
+
+# 运行时依赖（与 quota/parser/SPEC.md §15 + DLSE/file-asset 环境实测对齐）
+dependencies = [
+    "openpyxl>=3.1.0",       # XLSX 读写
+    "requests>=2.31",        # minerU HTTP 客户端
+    "PyMuPDF>=1.24",         # 分段（fitz）
+    "beautifulsoup4>=4.12",  # Markdown HTML 解析
+    "lxml>=4.9",             # bs4 后端
+    "python-multipart>=0.0.9",  # 上传下载（web 端用）
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools]
+# 只打包 quota_parser/ 子包；external/ 复用层在 quota/parser/external/
+# 通过 PARSER_ROOT 相对路径动态 import（pipeline.py:42-46），不进 site-packages
+packages = ["quota_parser"]
+package-dir = { quota_parser = "quota_parser" }
+
+# external/ 复用层作为 data 被打进 wheel，install 后通过 PARSER_ROOT.parent / "external" 找到
+[tool.setuptools.package-data]
+quota_parser = []
+
+# 关键：单包模式（不是 src/ layout）—— quota_parser/ 在仓库根下
+# pip install -e quota/parser/ 会创建指向 quota_parser/__init__.py 的 .pth 文件

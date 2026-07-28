@@ -468,6 +468,26 @@ class Archive(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
+    # --- quota_parser integration (v0.3, 2026-07-28) ---
+    # 见 quota/INTEGRATION_PLAN.md §2.2：parse_status 独立于 status（避免污染 cost_info 域
+    # ck_archive_status CheckConstraint）。quota 档案解析子状态机用 parse_status 字段，
+    # 状态枚举：`pending / parsing / parsed / qa_passed / usable / failed_user /
+    # failed_permanent / transient`（无 CheckConstraint，自由写入，由 adapter 层校验）。
+    # 其余 12 列与 Manifest（quota-parser-result/v1）字段一一对齐（web-frontend SPEC §6.1）。
+    parse_status: Mapped[str | None] = mapped_column(String(32), index=True)
+    parse_profile: Mapped[str | None] = mapped_column(String(32))
+    parse_task_id: Mapped[str | None] = mapped_column(String(64))
+    parse_phase: Mapped[str | None] = mapped_column(String(16))
+    parse_parser_version: Mapped[str | None] = mapped_column(String(32))
+    parse_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    parse_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    parse_metrics: Mapped[dict | None] = mapped_column(archive_json_type())
+    parse_warnings: Mapped[list | None] = mapped_column(archive_json_type())
+    parse_error_code: Mapped[str | None] = mapped_column(String(32))
+    parse_error_message: Mapped[str | None] = mapped_column(Text)
+    candidate_xlsx_key: Mapped[str | None] = mapped_column(String(512))
+    final_xlsx_key: Mapped[str | None] = mapped_column(String(512))
+
     files: Mapped[list["ArchiveFile"]] = relationship(back_populates="archive", cascade="all, delete-orphan")
     data_source: Mapped[DataSource] = relationship()
     collection_task: Mapped[CollectionTask | None] = relationship()

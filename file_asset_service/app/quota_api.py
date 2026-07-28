@@ -156,7 +156,7 @@ def get_dictionaries(
 
 # ── 4. facets ───────────────────────────────────────────────────────────
 
-def _facet_years(session: Session, primary: str | None = None) -> list[dict]:
+def _facet_years(session: Session, primary: str | None = None, jurisdiction_code: str | None = None) -> list[dict]:
     stmt = select(
         QuotaPublicationSet.edition_year,
         func.count().label("cnt"),
@@ -168,6 +168,8 @@ def _facet_years(session: Session, primary: str | None = None) -> list[dict]:
             stmt = stmt.where(QuotaPublicationSet.quota_system_type == "industry_specialty")
         elif primary == "boq_standard":
             stmt = stmt.where(QuotaPublicationSet.material_type == "boq_standard")
+    if jurisdiction_code:
+        stmt = stmt.where(QuotaPublicationSet.jurisdiction_code == jurisdiction_code)
     stmt = stmt.where(QuotaPublicationSet.edition_year.isnot(None))
     stmt = stmt.group_by(QuotaPublicationSet.edition_year).order_by(desc(QuotaPublicationSet.edition_year))
     rows = session.execute(stmt).all()
@@ -181,7 +183,10 @@ def _facet_years(session: Session, primary: str | None = None) -> list[dict]:
         ).where(
             QuotaPublicationSet.edition_year == y,
             QuotaPublicationSet.edition_label.isnot(None),
-        ).group_by(QuotaPublicationSet.edition_label)
+        )
+        if jurisdiction_code:
+            ed_stmt = ed_stmt.where(QuotaPublicationSet.jurisdiction_code == jurisdiction_code)
+        ed_stmt = ed_stmt.group_by(QuotaPublicationSet.edition_label)
         ed_rows = session.execute(ed_stmt).all()
         editions = [{"value": str(el), "label": str(el), "count": int(ec)} for el, ec in ed_rows]
         years.append({"value": y, "label": y, "count": int(cnt), "editions": editions})
@@ -192,6 +197,7 @@ def _facet_years(session: Session, primary: str | None = None) -> list[dict]:
 def get_facets(
     response: Response,
     primary: str | None = Query(None, description="all|construction_regional|industry_specialty|boq_standard"),
+    jurisdiction_code: str | None = Query(None, description="filter years by jurisdiction (construction_regional only)"),
     session: Session = Depends(get_db_session),
 ) -> dict:
     jurisdictions: list[dict] = []
@@ -215,7 +221,7 @@ def get_facets(
             )
             label = div or str(code)
             jurisdictions.append({"code": str(code), "label": label, "count": int(cnt)})
-        years = _facet_years(session, "construction_regional")
+        years = _facet_years(session, "construction_regional", jurisdiction_code=jurisdiction_code)
 
     elif primary == "industry_specialty":
         i_rows = session.execute(
@@ -528,11 +534,17 @@ def get_quota_archive_detail(
             "file_name": fa.file_name if fa else None,
         })
 
+    # ── parse 子对象（quota_parser integration, 2026-07-28 · web-frontend SPEC §6.1） ──
+    from app.quota_parser.service import build_parse_section
+
+    parse_obj = build_parse_section(archive)
+
     return _json_ok(response, {
         "archive": archive_obj,
         "publication_set": publication_set_obj,
         "volumes": volumes,
         "files": files,
+        "parse": parse_obj,
     })
 
 
@@ -1171,3 +1183,341 @@ async def upload_quota_files(
         items=items,
     )
     return _json_ok(response, body)
+
+
+# ── P0-4B · quota_parser integration (2026-07-28, web-frontend SPEC §5) ─────
+# 7 个新端点：
+#   POST   /archives/{archive_id}/parse           触发解析（阶段 A）
+#   GET    /archives/{archive_id}/candidate.xlsx  下载 candidate
+#   POST   /archives/{archive_id}/reviewed        上传 reviewed（阶段 B）
+#   GET    /archives/{archive_id}/final.xlsx      下载 final
+#   GET    /archives/{archive_id}/manifest        拿 Manifest JSON
+#   GET    /archives/{archive_id}/qa-report       拿 QA 报告（json/md）
+#   POST   /archives/{archive_id}/parse/delete    删除解析结果（清 MinIO + parse_* 字段）
+#
+# Mock 模式（QUOTA_PARSE_MOCK=1）下：解析引擎走 app.mock_parse_runner（异步后台）；
+# 否则走真 quota_parser worker（未来批次）。
+
+
+@router.post("/archives/{archive_id}/parse")
+async def trigger_quota_parse(
+    response: Response,
+    archive_id: str,
+    body: dict | None = None,
+    session: Session = Depends(get_db_session),
+):
+    """触发阶段 A 解析（异步后台跑）。
+
+    QUOTA_PARSE_MOCK=1 → 后台 mock runner；否则 501（真 worker 尚未上线）。
+    重新解析走同一端点（web-frontend SPEC §3.1.3 共用端点决策）。
+    """
+    from app.quota_parser import is_parse_mock, trigger_parse as _trigger
+
+    archive = session.get(Archive, archive_id)
+    if archive is None:
+        raise HTTPException(404, detail="ARCHIVE_NOT_FOUND")
+    if archive.domain_type != "quota":
+        raise HTTPException(400, detail="NOT_A_QUOTA_ARCHIVE")
+
+    profile = (body or {}).get("profile")
+    try:
+        archive = _trigger(archive, profile=profile)
+    except ValueError as e:
+        msg = str(e)
+        if "profile" in msg:
+            raise HTTPException(422, detail=f"INVALID_PROFILE: {msg}")
+        raise HTTPException(409, detail=f"ALREADY_PARSING_OR_DONE: {msg}")
+
+    session.commit()
+    session.refresh(archive)
+
+    # 触发后台解析（mock 模式下用 mock runner）
+    if is_parse_mock():
+        from app.mock_parse_runner import schedule_mock_a
+
+        schedule_mock_a(archive_id)
+    else:
+        # 真 worker 上线前返回 501（避免静默失败）
+        raise HTTPException(
+            501,
+            detail="REAL_WORKER_NOT_IMPLEMENTED: set QUOTA_PARSE_MOCK=1 to use mock",
+        )
+
+    from app.quota_parser.service import build_parse_section
+
+    return _json_ok(response, {
+        "archive_id": archive.archive_id,
+        "status": archive.status,
+        "parse": build_parse_section(archive),
+    })
+
+
+@router.get("/archives/{archive_id}/candidate.xlsx")
+def get_candidate_xlsx(
+    archive_id: str,
+    session: Session = Depends(get_db_session),
+):
+    """下载 candidate.xlsx（QUOTA_PARSE_MOCK=1 时返回 mock fixture）。"""
+    from urllib.parse import quote
+
+    from app.quota_parser import PARSE_BUCKET_CANDIDATE
+    from app.storage import get_object_store
+
+    archive = session.get(Archive, archive_id)
+    if archive is None:
+        raise HTTPException(404, detail="ARCHIVE_NOT_FOUND")
+    if not archive.candidate_xlsx_key:
+        raise HTTPException(404, detail="CANDIDATE_NOT_READY")
+    store = get_object_store()
+    data = store.get_object(PARSE_BUCKET_CANDIDATE, archive.candidate_xlsx_key)
+    # 用 archive_id 作 ascii-safe filename，中文 title 用 RFC 5987 扩展
+    filename_ascii = f"{archive_id}-candidate.xlsx"
+    filename_utf8 = quote(f"{archive.title}-candidate.xlsx")
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"{filename_ascii}\"; "
+                f"filename*=UTF-8''{filename_utf8}"
+            ),
+        },
+    )
+
+
+@router.post("/archives/{archive_id}/reviewed")
+async def upload_reviewed_xlsx(
+    response: Response,
+    archive_id: str,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_db_session),
+):
+    """上传 reviewed.xlsx → 阶段 B → 写 final_xlsx_key。
+
+    QUOTA_PARSE_MOCK=1 → 后台 mock runner；否则调 quota_parser.finalize_reviewed_xlsx。
+    """
+    from app.quota_parser import is_parse_mock
+    from app.quota_parser.service import (
+        InvalidReviewedXlsxError,
+        QuotaParserStageBError,
+        build_parse_section,
+        upload_reviewed as _upload,
+    )
+
+    archive = session.get(Archive, archive_id)
+    if archive is None:
+        raise HTTPException(404, detail="ARCHIVE_NOT_FOUND")
+    if archive.domain_type != "quota":
+        raise HTTPException(400, detail="NOT_A_QUOTA_ARCHIVE")
+    if archive.parse_status != "parsed":
+        raise HTTPException(
+            409,
+            detail=f"ARCHIVE_NOT_READY_FOR_REVIEW: parse_status={archive.parse_status}",
+        )
+
+    reviewed_bytes = await file.read()
+    if not reviewed_bytes:
+        raise HTTPException(422, detail="EMPTY_FILE")
+
+    if is_parse_mock():
+        # mock 模式：跳过结构校验，2-3s 后推到 qa_passed
+        from app.mock_parse_runner import schedule_mock_b
+
+        schedule_mock_b(archive_id, reviewed_bytes=reviewed_bytes)
+        return _json_ok(response, {
+            "archive_id": archive_id,
+            "scheduled": True,
+            "note": "mock mode — review 校验已跳过；2-3s 后 status=qa_passed",
+        })
+
+    # 真模式：调 quota_parser.finalize_reviewed_xlsx
+    try:
+        archive = _upload(archive, reviewed_bytes)
+    except InvalidReviewedXlsxError as e:
+        session.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": e.code,
+                "reason": str(e),
+                "sheet": e.sheet,
+                "column_index": e.column_index,
+            },
+        )
+    except QuotaParserStageBError as e:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=f"FINALIZE_FAILED: {e}")
+
+    session.commit()
+    session.refresh(archive)
+    return _json_ok(response, {
+        "archive_id": archive.archive_id,
+        "parse": build_parse_section(archive),
+    })
+
+
+@router.get("/archives/{archive_id}/final.xlsx")
+def get_final_xlsx(
+    archive_id: str,
+    session: Session = Depends(get_db_session),
+):
+    """下载 final.xlsx。"""
+    from urllib.parse import quote
+
+    from app.quota_parser import PARSE_BUCKET_CANDIDATE
+    from app.storage import get_object_store
+
+    archive = session.get(Archive, archive_id)
+    if archive is None:
+        raise HTTPException(404, detail="ARCHIVE_NOT_FOUND")
+    if not archive.final_xlsx_key:
+        raise HTTPException(404, detail="FINAL_NOT_READY")
+    store = get_object_store()
+    data = store.get_object(PARSE_BUCKET_CANDIDATE, archive.final_xlsx_key)
+    filename_ascii = f"{archive_id}-final.xlsx"
+    filename_utf8 = quote(f"{archive.title}-final.xlsx")
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"{filename_ascii}\"; "
+                f"filename*=UTF-8''{filename_utf8}"
+            ),
+        },
+    )
+
+
+@router.get("/archives/{archive_id}/manifest")
+def get_manifest(
+    response: Response,
+    archive_id: str,
+    session: Session = Depends(get_db_session),
+):
+    """返回 Manifest JSON（quota-parser-result/v1 schema）。
+
+    QUOTA_PARSE_MOCK=1 → 返回 mock fixture。
+    """
+    from app.quota_parser.service import _reconstruct_manifest
+    from app.mock_parse_runner import fake_manifest
+    from app.quota_parser import is_parse_mock
+
+    archive = session.get(Archive, archive_id)
+    if archive is None:
+        raise HTTPException(404, detail="ARCHIVE_NOT_FOUND")
+    if archive.parse_status is None:
+        raise HTTPException(404, detail="MANIFEST_NOT_FOUND")
+
+    manifest = (
+        fake_manifest(archive_id, parse_status=archive.parse_status)
+        if is_parse_mock()
+        else _reconstruct_manifest(archive)
+    )
+    return _json_ok(response, manifest)
+
+
+@router.get("/archives/{archive_id}/qa-report")
+def get_qa_report(
+    response: Response,
+    archive_id: str,
+    format: str = Query("json", pattern="^(json|md)$"),
+    session: Session = Depends(get_db_session),
+):
+    """返回 QA 报告（json / md 切换）。
+
+    QUOTA_PARSE_MOCK=1 → 返回 mock fixture。
+    """
+    from app.mock_parse_runner import fake_qa_report_json, fake_qa_report_md
+    from app.quota_parser import is_parse_mock
+
+    archive = session.get(Archive, archive_id)
+    if archive is None:
+        raise HTTPException(404, detail="ARCHIVE_NOT_FOUND")
+    if archive.parse_status is None:
+        raise HTTPException(404, detail="QA_REPORT_NOT_FOUND")
+
+    if format == "md":
+        body = fake_qa_report_md(archive_id) if is_parse_mock() else _format_qa_report_md(archive)
+        return Response(content=body, media_type="text/markdown; charset=utf-8")
+
+    body = fake_qa_report_json(archive_id) if is_parse_mock() else _format_qa_report_json(archive)
+    return _json_ok(response, body)
+
+
+@router.post("/archives/{archive_id}/parse/delete")
+def delete_parse_result(
+    response: Response,
+    archive_id: str,
+    session: Session = Depends(get_db_session),
+):
+    """删除解析结果：清 Archive.parse_* 字段（MinIO 产物留待运维 GC）。
+
+    web-frontend SPEC §3.1.4 危险操作 — 前端 modal 必填档案标题确认 + 审计。
+
+    注：今天 v0.3 不在 ObjectStore Protocol 里加 delete_object（避免破坏 S3ObjectStore）。
+    MinIO 上的 candidate.xlsx / final.xlsx 由运维按 archive lifecycle 定期清理；
+    这里只清 DB 侧产物指针（parse_* 13 列 + candidate_xlsx_key / final_xlsx_key）。
+    后续批次给 ObjectStore 加 delete_object 后，改为同步清理 MinIO。
+    """
+    archive = session.get(Archive, archive_id)
+    if archive is None:
+        raise HTTPException(404, detail="ARCHIVE_NOT_FOUND")
+    if archive.parse_status is None:
+        raise HTTPException(404, detail="NOTHING_TO_DELETE")
+
+    # 1. 写审计日志（best-effort）
+    try:
+        from app.models import AuditLog
+        audit = AuditLog(
+            actor_type="api",
+            action="quota_parse_result_deleted",
+            target_type="archive",
+            target_id=archive.archive_id,
+        )
+        session.add(audit)
+    except Exception:
+        pass
+
+    # 2. 清 Archive.parse_* 字段
+    archive.parse_status = None
+    archive.parse_profile = None
+    archive.parse_task_id = None
+    archive.parse_phase = None
+    archive.parse_parser_version = None
+    archive.parse_started_at = None
+    archive.parse_finished_at = None
+    archive.parse_metrics = None
+    archive.parse_warnings = None
+    archive.parse_error_code = None
+    archive.parse_error_message = None
+    archive.candidate_xlsx_key = None
+    archive.final_xlsx_key = None
+    session.commit()
+
+    return _json_ok(response, {
+        "deleted": True,
+        "archive_id": archive_id,
+        "note": "MinIO 上的 candidate/final.xlsx 留待运维 GC",
+    })
+
+
+def _format_qa_report_md(archive: Archive) -> str:
+    """真模式下的 QA 报告 markdown（占位 — 真 worker 上线后由 quota_parser 包生成）。"""
+    return (
+        f"# QA Report\n\n"
+        f"- archive_id: `{archive.archive_id}`\n"
+        f"- parser_version: {archive.parse_parser_version or 'unknown'}\n"
+        f"- status: {archive.parse_status}\n\n"
+        f"_尚未实现真模式 QA 报告生成；待 quota_parser worker 上线。_\n"
+    )
+
+
+def _format_qa_report_json(archive: Archive) -> dict:
+    """真模式下的 QA 报告 JSON（占位 — 真 worker 上线后由 quota_parser 包生成）。"""
+    return {
+        "$schema": "quota-parser-qa/v1",
+        "task_id": archive.parse_task_id,
+        "summary": "ok",
+        "checks": [],
+        "note": "尚未实现真模式 QA 报告生成；待 quota_parser worker 上线。",
+    }

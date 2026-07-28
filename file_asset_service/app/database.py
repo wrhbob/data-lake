@@ -100,6 +100,7 @@ def _init_db_unlocked(engine: Engine) -> None:
     migrate_coverage_gap_columns(engine)
     migrate_quota_tables(engine)
     migrate_administrative_division_table(engine)
+    migrate_archive_parse_columns(engine)
     migrate_quota_lake_tables(engine)
 
 def migrate_administrative_division_table(engine: Engine) -> None:
@@ -1041,6 +1042,46 @@ def _print_compact_report(report: dict) -> None:
                     print(f"       [{idx}] {id_str}")
             else:
                 print(f"   {k}: {v}")
+
+
+def migrate_archive_parse_columns(engine: Engine) -> None:
+    """P0-4B · quota_parser integration (2026-07-28): 为 archive 表加 13 列 parse_* 字段。
+
+    幂等：检查已存在的列，缺的 ALTER TABLE 加；CREATE INDEX IF NOT EXISTS。
+    dialect 兼容：PG 用 JSONB + TIMESTAMP WITH TIME ZONE；SQLite 用 TEXT + TIMESTAMP。
+
+    见 quota/INTEGRATION_PLAN.md §2.2 —— 字段与 Manifest（quota-parser-result/v1）一一对齐，
+    parse_status 独立于 status（不污染 cost_info 域的 ck_archive_status CheckConstraint）。
+    """
+    inspector = inspect(engine)
+    if "archive" not in inspector.get_table_names():
+        return
+    existing_columns = {column["name"] for column in inspector.get_columns("archive")}
+    dialect = engine.dialect.name
+    json_type = "JSONB" if dialect == "postgresql" else "TEXT"
+    datetime_type = "TIMESTAMP WITH TIME ZONE" if dialect == "postgresql" else "TIMESTAMP"
+
+    columns = [
+        ("parse_status", "VARCHAR(32)"),
+        ("parse_profile", "VARCHAR(32)"),
+        ("parse_task_id", "VARCHAR(64)"),
+        ("parse_phase", "VARCHAR(16)"),
+        ("parse_parser_version", "VARCHAR(32)"),
+        ("parse_started_at", datetime_type),
+        ("parse_finished_at", datetime_type),
+        ("parse_metrics", json_type),
+        ("parse_warnings", json_type),
+        ("parse_error_code", "VARCHAR(32)"),
+        ("parse_error_message", "TEXT"),
+        ("candidate_xlsx_key", "VARCHAR(512)"),
+        ("final_xlsx_key", "VARCHAR(512)"),
+    ]
+
+    with engine.begin() as connection:
+        for name, type_def in columns:
+            if name not in existing_columns:
+                connection.execute(text(f"ALTER TABLE archive ADD COLUMN {name} {type_def}"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_archive_parse_status ON archive (parse_status)"))
 
 
 if __name__ == "__main__":
