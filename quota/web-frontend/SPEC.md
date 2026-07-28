@@ -147,6 +147,185 @@
 
 ---
 
+## 3.2 主界面按钮视觉规范
+
+> **目的**：把 §3.1 按钮清单（功能定义）落到具体视觉——每个按钮用什么 lucide 图标、什么文案、什么颜色、什么形态、放在哪、按什么顺序。实现者不再靠临场判断。
+>
+> **本节是 §3.1 与 §7 UI 行为之间的视觉契约层**。三节一起审阅；冲突时本节优先。
+
+### 3.2.1 设计总则
+
+| 维度 | 规范 | 实现位置 |
+|---|---|---|
+| 图标库 | [lucide](https://lucide.dev) 静态资源（已通过 `<i data-lucide="...">` 接入） | 全局 |
+| 颜色 | 主色蓝 `--color-primary`、次色灰 `--color-bg-soft`、危险红 `--color-danger`、警告橙 `--color-warning`、成功绿 `--color-success`、中性文字 `--color-text-muted` | styles.css CSS 变量 |
+| 形态 | 4 种：`icon-only`（方/圆 32×32，纯图标 hover 出 tooltip）、`icon-text`（lucide + 文字行内，详情/补录用）、`pill`（胶囊徽章，状态/标签用）、`text-link`（纯文字 + hover 下划线，用于空态 CTA） | styles.css |
+| 圆角 | 统一 6 px（按钮）/ 9999 px（徽章/筛选 chip） | styles.css |
+| tooltip | `title` 属性直接给中文短语；解析中/异常类另加 `aria-live="polite"` 提示 | JSX 直接写在按钮上 |
+| 键盘 | Tab 聚焦 + Enter/Space 触发；ESC 关闭 modal；箭头键在 ⋯ 下拉内移动焦点（v0.3.2 计划） | 全局 |
+| 危险操作 | §3.1.4：modal 标题必须是"删除解析结果"——**不是**"删除档案"或"删除 XLSX" | W5 |
+
+### 3.2.2 现有按钮清单（按区域归类）
+
+> 已存在于 `quota-ui.js` 与 `styles.css`；本节为新按钮建立参照模板。
+
+#### A. Header 区（`renderHeader()`）
+
+| 按钮 | 形态 | 图标 | 文字 | class | 颜色 | tooltip |
+|---|---|---|---|---|---|---|
+| 搜索框 | input+leading icon | `search` | placeholder="搜索资料体系、分册、标准/定额编号" | `.search-box` | 中性 | — |
+| 刷新 | icon-only | `rotate-ccw` | — | `.icon-button` + `data-quota-action="refresh"` | 中性 | "刷新" |
+| 新增档案 | icon-text | `plus` | "新增档案" | `.primary-button` | 主色蓝 | — |
+| 新增档案弹出的下拉项 | text-only | — | "新增清单规范" / "新建定额体系" / "向已有体系新增分册" / "向已有档案补充文件" | `.quota-add-item` | 中性文字 | — |
+| 开发调试 pill | text-only | — | "Archive API / domain_type: quota" | `.quota-debug-pill` | dev only，production 隐藏 | "调试信息，仅开发环境显示" |
+
+#### B. 统计条（`renderStatsBar()`）
+
+5 个 `.quota-stat`：原文 / 可访问 / 待归档 / 重复 / 异常；数值用 `statVal()`（未知显示 "—"）；小类名 `rawTotal / accessible / pendingRaw / duplicate / invalid`。
+
+#### C. Tabs 区（`renderTabs()`）
+
+| 按钮 | 图标 | 文字 | 角标条件 | 禁用态原因 |
+|---|---|---|---|---|
+| 档案列表 | `list` | "档案列表" | — | — |
+| 版本体系 | `layers` | "版本体系" | — | `coverage` capability 不可用时 disabled + title 解释 |
+| 覆盖矩阵 | `table-2` | "覆盖矩阵" | — | 同上 |
+| 待归档 | `inbox` | "待归档" | `pending > 0` 时显示 `.quota-tab-badge` | `reconciliation` capability 不可用时 disabled |
+
+#### D. 筛选区（`renderFilters()`）
+
+| 控件 | 形态 | class | 说明 |
+|---|---|---|---|
+| 一级 chip | pill | `.filter-chip` | 4 个 primary；点击切换 |
+| 二级 chip（地区/行业/适用范围） | pill | `.filter-chip` | "全部" + 各省/市 + 「展开更多」按钮 |
+| 年份 chip | pill | `.filter-chip` | "全部" + 6 年倒序 |
+| 版次 chip | pill | `.filter-chip` | 仅 ≥ 2 个版次时显示 |
+| 高级筛选 toggle | pill | `.filter-chip.filter-toggle` | "高级筛选" → "收起高级筛选" |
+| 高级筛选字段 | pill x 8 | `.filter-chip` | 8 维：分册专业/资料性质/地市/发布单位/元数据状态/档案状态/入湖通道/文件格式 |
+
+#### E. 档案列表行（`renderArchiveRow()` · v0.3.1 现状）
+
+每行 `<td>` 列结构 = `档案标题 | 资料分类 | 文件数 | 状态 | 操作`：
+
+| 列 | 内容 | class | 备注 |
+|---|---|---|---|
+| 档案标题 | `archive.title` | `.quota-col-title` | 点击整行触发 `preview-archive` |
+| 资料分类 | `CATEGORY_LABELS[meta.category.value]` | — | "建筑工程定额" / "专业工程定额" / "清单规范" / "—" |
+| 文件数 | `archive.file_count` | `.quota-col-count` | "—" 当 null |
+| 状态 | `archive.status` 直接展示 | `.quota-status-pill` | **v0.3.2 替换为 `.status-badge--xxx`**（批 2 W3） |
+| 操作 | 预览按钮 | `.quota-preview-btn` = `<i data-lucide="eye">` + `<span>预览</span>` | **v0.3.2 替换为 2 智能图标 + ⋯ 下拉**（批 2 W3/W4） |
+
+#### F. 补录 / 上传 modal（`renderComposeModal()` & `renderUploadModal()`）
+
+| 控件 | 形态 | 图标 | 文字 | class | 颜色 |
+|---|---|---|---|---|---|
+| 关闭 × | icon-only | `x` | — | `.icon-button` | 中性 |
+| 取消 | text-button | — | "取消" | `.secondary-button` | 灰 |
+| 保存草稿 | text-button | — | 由 `Compose.resolveComposeActions()` 决定 label | `.secondary-button` | 灰 |
+| 提交 | icon-text | `check` / spinner | "保存并提交核验" | `.primary-button` | 主色蓝（提交中变 spinner） |
+| 上传 PDF | upload-zone | `upload-cloud` | "选择 PDF 文件" | `.file-picker` | 蓝边虚线框 |
+| 上传并保存 | icon-text | `upload-cloud` | "上传并保存" | `.primary-button` | 主色蓝 |
+| 删除分册 / 文件 | icon-only | `trash-2` / `x` | — | `.icon-button.danger-action` | 危险红 hover |
+
+#### G. 档案详情 viewer（`renderArchiveDetailView()` · v0.3 现状）
+
+| 控件 | 形态 | 说明 |
+|---|---|---|
+| 返回档案列表 | icon-text | `<i arrow-left>` + "返回档案列表"，`.secondary-button` |
+| 状态 pill | pill | `.quota-status-pill`，v0.3.2 替换为 `.status-badge--xxx` |
+| 主文件标记 | pill | `.quota-status-pill` 含 "主文件" |
+| 当前分册标记 | pill | `.quota-status-pill` 含 "当前" |
+
+### 3.2.3 批 2 计划按钮（v0.3.2 操作列 · W3/W4）
+
+> 占位规范——批 2 实施时按此落地。如有偏差需先回 SPEC 修此节，再写代码。
+
+#### H. 状态徽章（`.status-badge` · 5 个变体）
+
+| UI 徽章 | archive.status 覆盖 | 图标 | 文字 | class | 颜色 |
+|---|---|---|---|---|---|
+| **未解析** | `registered` | — | "未解析" | `.status-badge--pending` | 灰 |
+| **解析中** | `parsing` + `transient` | `loader` / 旋转 spinner | "解析中" | `.status-badge--parsing` | 蓝 |
+| **待审核** | `parsed` | — | "待审核" | `.status-badge--review` | 橙 |
+| **已完成** | `qa_passed` + `usable` | `check` | "已完成" | `.status-badge--done` | 绿 |
+| **解析失败** | `failed_user` + `failed_permanent` | `alert-triangle` | "解析失败" | `.status-badge--failed` | 红 |
+
+排版：`<span class="status-badge status-badge--xxx"><i data-lucide="..."></i><span>...</span></span>`。`usable` 状态额外显示绿色 `.status-badge--done` 小标签（spec §7.4.1）。
+
+#### I. 操作列智能图标（`.quota-action-cell` · 每行 2 个）
+
+| UI 状态 | 图标 1 | 图标 2 |
+|---|---|---|
+| 未解析 | `eye` 👁 预览（icon-only，tooltip "预览 PDF"） | `play` ▶ 开始解析（icon-only，tooltip "开始解析 / 重新解析时切 label"） |
+| 解析中 | `eye` 👁 预览 | `loader-circle` ⏳ 占位（icon-only，disabled，永远转圈，无 tooltip） |
+| 待审核 | `download` ⬇ 下载 candidate（icon-only，tooltip "下载 candidate.xlsx"） | `upload` ⬆ 上传 reviewed（icon-only，tooltip "上传 reviewed.xlsx"） |
+| 已完成 | `download` ⬇ 下载 final（icon-only，tooltip "下载 final.xlsx"） | `eye` 👁 预览 |
+| 解析失败 | `refresh-cw` ↻ 重新解析（icon-only，tooltip "重新解析"） | `eye` 👁 预览 |
+
+按钮 class：`.quota-action-cell__icon`；hover 颜色随状态变化（解析类蓝、危险类红）。disabled 态 `opacity: 0.4 + cursor: not-allowed`。
+
+#### J. ⋯ 下拉（`.quota-dropdown` · W4）
+
+| 元素 | 形态 | 颜色 |
+|---|---|---|
+| 触发 ⋯ | icon-only | lucide `more-horizontal`，`.quota-action-cell__more`，悬停染主色蓝 |
+| 普通项 | text+leading icon | 例如 `download` "下载 candidate.xlsx" / `upload` "上传 reviewed.xlsx" / `refresh-cw` "重新解析" / `file-text` "查看 Manifest" / `check-circle` "查看 QA 报告"；`.quota-dropdown__item`，hover 浅灰背景 |
+| 分隔条 | — | `.quota-dropdown__divider`，1 px 高 + 上下内边距 4 px |
+| 危险项 | text+leading icon `trash-2` "删除解析结果" | `.quota-dropdown__item--danger`，文字红 + hover 红背景 |
+
+定位：`position: absolute; top: 100%; left: 0; min-width: 200 px;`；浮在 ⋯ 按钮下方左对齐；阴影 `box-shadow: 0 4px 12px rgba(0,0,0,.12)`。
+
+#### K. 删除二次确认 modal（`.quota-delete-confirm-modal` · W5）
+
+| 元素 | 规范 |
+|---|---|
+| modal 标题 | 固定 "删除解析结果"（§3.1.4） |
+| 副标题 | "此操作将删除 MinIO 上的 candidate / reviewed / final 三件套与 Archive `parse_*` 字段；原始 PDF 不受影响。" |
+| 档案标题展示 | `<p class="quota-delete-archive-title">[archive.title]</p>` 文字需让用户对照 |
+| 输入框 | `<input type="text" placeholder="请输入档案标题确认">`，onChange 后判断输入与 `archive.title === ?` 才解锁确认按钮 |
+| 取消 | `.secondary-button`，文字"取消"，始终 enabled |
+| 关闭 × | `.icon-button`，lucide `x`，始终 enabled |
+| 确认 | `.primary-button`，文字"删除解析结果"，disabled until `input === archive.title`；提交后变 spinner + 文字"删除中..." |
+
+modal 复用 `#quotaUploadModal` 的样式与 DOM 结构（避免重复实现）；仅 innerHTML 替换为 K 段。
+
+### 3.2.4 视觉细节参考（实现时遵循）
+
+```css
+/* 状态徽章: 5 变体 share base .status-badge */
+.status-badge              { display:inline-flex; align-items:center; gap:4px;
+                              padding:2px 10px; border-radius:9999px;
+                              font-size:12px; line-height:20px; font-weight:500; }
+.status-badge--pending     { background:#f1f5f9; color:#475569; }
+.status-badge--parsing     { background:#dbeafe; color:#1d4ed8; }
+.status-badge--review      { background:#fef3c7; color:#b45309; }
+.status-badge--done        { background:#dcfce7; color:#15803d; }
+.status-badge--failed      { background:#fee2e2; color:#b91c1c; }
+
+/* 智能图标 + ⋯ 下拉容器 */
+.quota-action-cell         { display:inline-flex; gap:4px; align-items:center; }
+.quota-action-cell__icon   { width:32px; height:32px; display:inline-flex;
+                              align-items:center; justify-content:center;
+                              border-radius:6px; cursor:pointer; }
+.quota-action-cell__icon:hover { background:var(--color-bg-soft); }
+.quota-action-cell__icon:disabled { opacity:.4; cursor:not-allowed; }
+.quota-action-cell__more   { /* 同 icon 样式 */ }
+```
+
+> 完整 CSS 在批 2 W1 实现时统一落地到 `styles.css`；本节只规定 class 名 + 颜色变量。
+
+### 3.2.5 与现有 SPEC 章节的对应关系
+
+| 本节子节 | 对应章节 |
+|---|---|
+| §3.2.2 A–G（已有按钮） | §7 UI 行为 → 实现时按本节视觉规范 |
+| §3.2.3 H 状态徽章 | §7.4.1（本节细化图标/颜色） |
+| §3.2.3 I 智能图标 | §7.4.2（本节细化每个 icon 名 + tooltip） |
+| §3.2.3 J ⋯ 下拉 | §7.4.2 + §3.1.4（本节细化 class / 颜色 / 位置） |
+| §3.2.3 K 删除 modal | §7.4.3 + §3.1.4（本节细化为完整表单） |
+
+---
+
 ## 4. 文件结构（新增 / 改动）
 
 ```
