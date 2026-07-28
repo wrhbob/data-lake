@@ -280,6 +280,8 @@ registered  →  parsing  →  parsed  →  qa_passed  →  usable
 - `file_asset_service/app/ui/index.html`：注册三个新脚本；
 - `file_asset_service/app/storage.py`：按实际需要补充流式读取、临时下载或签名下载能力。
 
+**前端代码目录布局决策（v0.2）**：3 个新 quota-parse-* 模块与现有 `quota-ui.js` / `quota-compose.js` / `quota-api.js` 并列放在 `file_asset_service/app/ui/`，不进 `quota/web-frontend/src/`。原因是 `main.py` L177 已把该目录整体挂到 `/ui-assets`，新模块放同目录、`<script>` 标签加 3 行即可，零迁移成本；与现有命名空间惯例一致。SPEC 文档本身留在 `quota/web-frontend/SPEC.md`（与 `quota/parser/SPEC.md` 平行）。若未来要把"quota 全部前端"自治到 `quota/web-frontend/src/`，届时连同 3 个旧 quota-* 文件一并迁出，扩展 `main.py` 加一条 `app.mount("/quota-assets", ...)` 即可——v0.2 不做这次重构。详见 web-frontend SPEC §4.1。
+
 现有裸上传入口不应作为生产解析入口。解析应从已经登记的定额 Archive 和已关联的 PDF 开始。
 
 ## 10. 解析项目侧初步改造点
@@ -347,6 +349,30 @@ registered  →  parsing  →  parsed  →  qa_passed  →  usable
 - ✅ candidate / final XLSX 存 MinIO（路径见 §6），`Archive` 上只存 MinIO key；不注册为派生 FileAsset。
 - ✅ 每个档案只保留最新一次解析结果，不存历史。
 - ⏳ 第一阶段是否只做"PDF→XLSX 下载"，暂不导入 `quota_item` / `consumption` 等 Layer 1 表？
+
+### G. Worker 集成层（已决策项，2026-07-28 讨论）
+
+> 来源：用户与 AI 关于"quota_parser 包如何接入 website 架构"的对话结论。
+
+| # | 决策项 | 选择 | 理由（要点） |
+|---|---|---|---|
+| 1 | 任务存表 | **复用 `FileProcessing`**，不新建 `quota_parse_task` | 现状 cost_info worker 已轮询 FileProcessing；跨域一致；不污染 Archive schema |
+| 2 | worker 进程 | **独立进程**，仿 `serve.py` onlogon 调度 | OCR 6 分钟长任务不应阻塞 FastAPI；web 挂了不影响解析；可独立重启 |
+| 3 | 入口路由 | **新建 quota 专属 endpoint** `POST /api/data-lake/quota/parse`（不复用通用 `/api/file-processing/{id}/run`） | quota 解析需传 `profile` / `parser_version` / `review_mode` 等业务参数；通用 run 端点假设参数都在 FileProcessing 行内，无法承载这些参数，强行复用会污染通用接口设计 |
+| 4 | worker 框架 | **仿 `cost_info_worker.py`**（lease → run processor → mark done/failed → red_lines check） | 跨域一致；现成样板 |
+| 5 | 桶策略 | **复用 `cost-extract` / `cost-report`**，不新建 quota 专属桶 | 零 MinIO 基础设施改动；按文件路径命名约定做域区分（`extract/quota/{archive_id}/...`） |
+
+**与已有决策的关系**：
+
+- §12.F "不新增 `quota_parse_run` 表"：方向一致（决策 1 也坚持不新建表），但落地到 `FileProcessing`（用于执行调度）而非 `Archive`。`Archive` 仍按 web-frontend SPEC §6.1 加 `parse_*` 列用于 UI 展示；两层分工不冲突。
+- §6「中间文件存储规划」：路径约定（`extract/quota/{archive_id}/candidate/candidate.xlsx` 等）保持不变；产物落到 `cost-extract` 桶（不是新建 `quota-extract`）。
+- §5「推荐运行方式」：决策 2 落实该节"不在 FastAPI 请求线程中直接运行解析"，worker 单独跑。
+
+**不在本节的内容**（避免与未决项混淆）：
+
+- profile / parser_version / review_mode 等参数在 `POST /api/data-lake/quota/parse` Body 里的具体形态和校验规则 → 写到 `quota/parser/WEBSITE_INTEGRATION.md` 或 `quota/web-frontend/SPEC.md` v0.3；
+- worker 内部 lease / heartbeat / 重试间隔 → 跟 `cost_info_worker` 对齐后再定；
+- 第一版 Worker 是否落 `cost-info-worker` 同进程 vs 独立 process group → 见 §12.B 仍 ⏳ 未决，本节不阻塞决策落地。
 
 ## 13. v0.2 实施成果（已完成）
 
