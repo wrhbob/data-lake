@@ -29,6 +29,9 @@ cq_out.txt
 quota/**/*.pdf
 # 解析 manifest 生成物
 manifests/
+# 解析脚本测试输出（tests/out/ 里的旧产物仍在跟踪中，历史快照保留；
+# 后续用 `git rm --cached -r quota/parser/tests/out/` 单开一个清理 commit）
+quota/parser/tests/out/
 
 # ── OS / IDE ────────────────────────────────────────────────────
 .DS_Store

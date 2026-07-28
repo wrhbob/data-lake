@@ -566,12 +566,10 @@ function costInfoSourceCityCodes(province) {
 }
 
 function mergeCostInfoCityOptions(province, archiveCities) {
-  const cityMap = new Map(archiveCities.map((city) => [city.value, city]));
+  const mergedCodes = new Set(archiveCities.map((city) => city.value));
   const sourceCityCodes = costInfoSourceCityCodes(province);
-  province.cities.forEach((city) => {
-    if (sourceCityCodes.has(city.value)) cityMap.set(city.value, city);
-  });
-  return Array.from(cityMap.values());
+  sourceCityCodes.forEach((code) => mergedCodes.add(code));
+  return province.cities.filter((city) => mergedCodes.has(city.value));
 }
 
 function cityOptions(provinceCode, filter = {}) {
