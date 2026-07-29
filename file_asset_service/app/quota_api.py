@@ -8,6 +8,7 @@ All counts computed via SQL aggregation; no all-table Python-side counting.
 
 from datetime import date as date_type, datetime, timezone
 from pathlib import Path
+import re
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
@@ -951,6 +952,170 @@ QUOTA_UPLOAD_CATEGORY_LABELS = {
 _QUOTA_UPLOAD_VALID_CATEGORIES = set(QUOTA_UPLOAD_CATEGORY_LABELS.keys())
 
 
+# ── 省份简称白名单（手动上传 v0.3.2 引入） ──────────────────────────────
+# 格式：short_code → (jurisdiction_code, jurisdiction_label, default_profile, jurisdiction_level)
+#
+# default_profile 含义：
+#   - "sichuan"/"chongqing"：已实现解析器，上传后立即可用
+#   - None：尚无专用解析器；上传会创建 archive + profile，但 parse 阶段需人工指定 profile
+#
+# 当前有解析器的省：sc（四川）、cq（重庆）。
+# 其余 30 个省级单位 + 深圳（副省级）均为 None。
+# short code 命名约定：
+#   - 沿用车牌/拼音简称
+#   - 河南=yu（豫）、湖北=hu（鄂）、湖南=xi（湘）— 单字母按车牌简称区分
+#   - 山西=sx（晋）、陕西=snx（陕）— 避开 shanxi/shanxi 冲突
+#   - 深圳=sz，副省级，jurisdiction_level=city
+_UPLOAD_PROVINCE_MAP: dict[str, tuple[str, str, str | None, str]] = {
+    "bj":  ("110000", "北京市",         None,        "province"),
+    "tj":  ("120000", "天津市",         None,        "province"),
+    "hb":  ("130000", "河北省",         None,        "province"),
+    "sx":  ("140000", "山西省",         None,        "province"),
+    "nm":  ("150000", "内蒙古自治区",   None,        "province"),
+    "ln":  ("210000", "辽宁省",         None,        "province"),
+    "jl":  ("220000", "吉林省",         None,        "province"),
+    "hl":  ("230000", "黑龙江省",       None,        "province"),
+    "sh":  ("310000", "上海市",         None,        "province"),
+    "js":  ("320000", "江苏省",         None,        "province"),
+    "zj":  ("330000", "浙江省",         None,        "province"),
+    "ah":  ("340000", "安徽省",         None,        "province"),
+    "fj":  ("350000", "福建省",         None,        "province"),
+    "jx":  ("360000", "江西省",         None,        "province"),
+    "sd":  ("370000", "山东省",         None,        "province"),
+    "yu":  ("410000", "河南省",         None,        "province"),  # 豫
+    "hu":  ("420000", "湖北省",         None,        "province"),  # 鄂
+    "xi":  ("430000", "湖南省",         None,        "province"),  # 湘
+    "gd":  ("440000", "广东省",         None,        "province"),
+    "gx":  ("450000", "广西壮族自治区", None,        "province"),
+    "hi":  ("460000", "海南省",         None,        "province"),
+    "cq":  ("500000", "重庆市",         "chongqing", "province"),
+    "sc":  ("510000", "四川省",         "sichuan",   "province"),
+    "gz":  ("520000", "贵州省",         None,        "province"),  # 黔
+    "yn":  ("530000", "云南省",         None,        "province"),  # 滇
+    "xz":  ("540000", "西藏自治区",     None,        "province"),  # 藏
+    "snx": ("610000", "陕西省",         None,        "province"),
+    "gs":  ("620000", "甘肃省",         None,        "province"),  # 陇
+    "qh":  ("630000", "青海省",         None,        "province"),
+    "nx":  ("640000", "宁夏回族自治区", None,        "province"),
+    "xj":  ("650000", "新疆维吾尔自治区", None,       "province"),
+    "sz":  ("440300", "深圳市",         None,        "city"),      # 副省级
+}
+
+_VALID_PROVINCE_CODES = set(_UPLOAD_PROVINCE_MAP.keys())
+_VALID_PROFILES = {"sichuan", "chongqing"}
+
+
+def _decode_upload_filename(raw: str | None) -> str:
+    """修复 Windows curl 把 UTF-8 文件名以 GBK 字节送进 Content-Disposition 后的乱码。
+
+    FastAPI 把 multipart filename 字段按 latin-1 解码成 str（HTTP/1.1 multipart 协议限制），
+    但 Windows curl 在中国区默认按 GBK 编码原始字节，导致中文字符显示成 ¡¶ËÄ´¨... 这类 mojibake。
+
+    检测启发式：
+      1. 字符串能干净通过 UTF-8 验证，且不含中文，但落在 latin-1 高位（¡-ÿ）— 大概率是 GBK
+         被错当成 UTF-8 解码后又当成 latin-1 反解码回 bytes 的结果。
+      2. 否则若整体 UTF-8 解码失败，按 latin-1 编码 + GBK 解码还原。
+
+    返回：修复后的 UTF-8 字符串；无法修复时原样返回。
+    """
+    if not raw:
+        return "(unnamed)"
+    try:
+        raw.encode("utf-8").decode("utf-8")
+        if any("¡" <= ch <= "ÿ" for ch in raw) and not any("一" <= ch <= "鿿" for ch in raw):
+            try:
+                return raw.encode("latin-1").decode("gbk")
+            except (UnicodeDecodeError, UnicodeEncodeError):
+                pass
+        return raw
+    except UnicodeError:
+        pass
+    try:
+        return raw.encode("latin-1").decode("gbk")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        return raw
+
+
+def _ensure_quota_publication_set(
+    session: Session,
+    *,
+    archive: Archive,
+    province: str | None,
+    year: int | None,
+    title: str,
+) -> QuotaPublicationSet:
+    """为手动上传的 archive 创建配套 pubset + profile（v0.3.2 引入）。
+
+    - province 必填 → 决定 jurisdiction_code / jurisdiction_level
+    - year 必填 → 决定 edition_year / edition_label
+    - 同一 (province, year) 同一档案：复用已有 pubset（幂等）
+    """
+    if not province:
+        raise HTTPException(
+            status_code=422,
+            detail="MISSING_PROVINCE: 必须传 province（省份简称）",
+        )
+    if year is None:
+        raise HTTPException(
+            status_code=422,
+            detail="MISSING_YEAR: 必须传 year（定额年份）",
+        )
+
+    jurisdiction_code, jurisdiction_label, _, jurisdiction_level = _UPLOAD_PROVINCE_MAP[province]
+    edition_label = str(year)
+
+    # biz_key 稳定可幂等：quota:upload:{province}:{year}:{title_slug}
+    title_slug = re.sub(r"[^0-9A-Za-z]+", "-", title)[:32].strip("-") or "untitled"
+    biz_key = f"quota:upload:{province}:{year}:{title_slug}"
+
+    existing = session.scalar(
+        select(QuotaPublicationSet).where(QuotaPublicationSet.biz_key == biz_key)
+    )
+    if existing is not None:
+        pub_set = existing
+    else:
+        pub_set = QuotaPublicationSet(
+            publication_set_id=str(uuid4()),
+            biz_key=biz_key,
+            publication_family_code=f"upload-{province}-{year}",
+            title=f"{jurisdiction_label}{year}定额（{title}）",
+            material_type="quota_base",
+            quota_system_type="construction_regional",
+            jurisdiction_level=jurisdiction_level,
+            jurisdiction_code=jurisdiction_code,
+            industry_sector_code=None,
+            issuer_name="manual_upload",
+            standard_or_quota_code=None,
+            edition_label=edition_label,
+            edition_year=year,
+            publish_date=None,
+            effective_date=None,
+            legal_status="effective",
+            metadata_status="complete",
+            tenant_code="platform_public",
+            visibility_scope="public",
+        )
+        session.add(pub_set)
+        session.flush()
+
+    existing_profile = session.get(QuotaArchiveProfile, archive.archive_id)
+    if existing_profile is None:
+        session.add(QuotaArchiveProfile(
+            archive_id=archive.archive_id,
+            publication_set_id=pub_set.publication_set_id,
+            document_role="main_volume",
+            discipline_code=None,
+            metadata_status="complete",
+            completeness_score=80,
+            completeness_blockers=[],
+        ))
+    elif existing_profile.publication_set_id != pub_set.publication_set_id:
+        existing_profile.publication_set_id = pub_set.publication_set_id
+
+    session.flush()
+    return pub_set
+
+
 class QuotaUploadItem(BaseModel):
     filename: str
     status: str            # "created" | "duplicate" | "failed"
@@ -1015,10 +1180,15 @@ async def upload_quota_files(
     response: Response,
     files: list[UploadFile] = File(...),
     category: str = Form(...),
+    province: str | None = Form(None, description="省简称（sc/cq/bj/tj/gd/zj...）；必填，决定 jurisdiction_code"),
+    year: int | None = Form(None, description="定额版本年（1900-2100）；必填，决定 edition_year"),
+    profile: str | None = Form(None, description="解析 profile 名；缺省按 province 自动映射"),
     session: Session = Depends(get_db_session),
     storage: ObjectStore = Depends(get_object_store),
 ) -> QuotaUploadResponse:
-    """极简定额 PDF 上传：PDF → FileAsset → Archive(quota) → ArchiveFile(main_document)。
+    """极简定额 PDF 上传：PDF → FileAsset → Archive(quota) → ArchiveFile → PubSet/Profile。
+
+    v0.3.2 起新增必填 Form 字段：province、year。可选：profile（缺省按 province 自动映射）。
 
     单文件粒度处理，一文件失败不影响其它。重复文件（同 tenant + 同 sha256）幂等返回。
     """
@@ -1027,6 +1197,25 @@ async def upload_quota_files(
         raise HTTPException(
             status_code=422,
             detail=f"INVALID_CATEGORY: {category}. 必须为 {sorted(_QUOTA_UPLOAD_VALID_CATEGORIES)} 之一",
+        )
+    # province + year 校验（v0.3.2 必填）
+    if not province:
+        raise HTTPException(422, detail="MISSING_PROVINCE: 必须传 province（省份简称）")
+    if province not in _VALID_PROVINCE_CODES:
+        raise HTTPException(
+            422,
+            detail=f"INVALID_PROVINCE: {province}. 必须为 {sorted(_VALID_PROVINCE_CODES)} 之一",
+        )
+    if year is None or year < 1900 or year > 2100:
+        raise HTTPException(422, detail=f"INVALID_YEAR: {year}（必须 1900-2100 整数）")
+    jurisdiction_code, jurisdiction_label, default_profile, jurisdiction_level = _UPLOAD_PROVINCE_MAP[province]
+    # profile 校验/缺省
+    if profile is None:
+        profile = default_profile
+    if profile is not None and profile not in _VALID_PROFILES:
+        raise HTTPException(
+            422,
+            detail=f"INVALID_PROFILE: {profile}. 必须为 {sorted(_VALID_PROFILES)} 之一（或不传）",
         )
     if not files:
         raise HTTPException(status_code=422, detail="NO_FILES_RECEIVED")
@@ -1039,7 +1228,7 @@ async def upload_quota_files(
     failed = 0
 
     for f in files:
-        filename = f.filename or "(unnamed)"
+        filename = _decode_upload_filename(f.filename)
 
         # ── 1. 扩展名校验（仅接受 .pdf）──────────────────────────────
         ext = Path(filename).suffix.lower()
@@ -1106,9 +1295,11 @@ async def upload_quota_files(
             succeeded += 1
             continue
 
-        # ── 5. 构造 title 与 sha256-based business_key ────────────────
+        # ── 5. 构造 title 与 province+year+sha256-based business_key ──
         title = Path(filename).stem or filename
-        business_key = f"quota:manual-upload:{result.sha256}"
+        # business_key 含省份 + 年份 + sha256 前 12 位：让 quota 域的 dedup 同时区分
+        # 同文件 + 同省同年的「重复」 vs 同文件跨省跨年的「迁移」（属同一文件但不同档案归属）
+        business_key = f"quota:manual-upload:{province}:{year}:{result.sha256[:12]}"
 
         # ── 6. create_archive + attach_file（含空 Archive 补偿）────────
         archive_created_by_us = False
@@ -1125,14 +1316,16 @@ async def upload_quota_files(
                     tenant_code="platform_public",
                     visibility_scope="public",
                     status="pending_tag",
+                    region_code=jurisdiction_code,    # v0.3.2：写入省份 code
                     metadata={"category": category_cell},
                     field_sources=_build_archive_field_sources(
-                        title=title, business_key=business_key),
+                        title=title, business_key=business_key,
+                        region_code=jurisdiction_code),
                 )
                 archive_created_by_us = True
             except ValueError as ve:
                 if "ARCHIVE_BUSINESS_KEY_EXISTS" in str(ve):
-                    # 极小概率：sha256 相同但步骤 4 未命中（理论不应发生，防御）
+                    # 极小概率：同 province+year+sha256[:12] 已存在（理论不应发生，防御）
                     archive = session.scalar(
                         select(Archive).where(Archive.business_key == business_key)
                     )
@@ -1152,6 +1345,16 @@ async def upload_quota_files(
                 actor_type="user",
                 actor_id="ui:quota-upload",
             )
+
+            # ── 6b. 配套 pubset + profile（v0.3.2 引入）───────────────
+            if archive_created_by_us:
+                _ensure_quota_publication_set(
+                    session,
+                    archive=archive,
+                    province=province,
+                    year=year,
+                    title=title,
+                )
         except Exception as attach_exc:  # noqa: BLE001
             # 防空 Archive 补偿：attach 失败时若 Archive 是本次新建的，回滚掉
             if archive_created_by_us:

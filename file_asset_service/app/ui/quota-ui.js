@@ -111,7 +111,7 @@
     compose: null,
     composeWarning: "",
     composeAdvancedOpen: false,
-    upload: { open: false, files: [], category: "", submitting: false },
+    upload: { open: false, files: [], category: "", province: "", year: "", submitting: false },
     toast: "",
   };
 
@@ -230,6 +230,53 @@
       var r = JURISDICTION_REGIONS[i];
       var sel = (r.code === selectedCode) ? " selected" : "";
       html += '<option value="' + escapeHtml(r.code) + '" data-label="' + escapeHtml(r.label) + '" data-py="' + r.py + '"' + sel + '>' + escapeHtml(r.label) + '</option>';
+    }
+    return html;
+  }
+
+  // ── 上传弹窗省份白名单（与后端 file_asset_service/app/quota_api.py:_UPLOAD_PROVINCE_MAP 同步）──
+  // 31 省级单位 + 深圳 = 32 条；value=省简称短码（与后端 _VALID_PROVINCE_CODES 一致）
+  const QUOTA_UPLOAD_PROVINCES = Object.freeze([
+    { code: "sc",  label: "四川省" },
+    { code: "cq",  label: "重庆市" },
+    { code: "bj",  label: "北京市" },
+    { code: "tj",  label: "天津市" },
+    { code: "hb",  label: "河北省" },
+    { code: "sx",  label: "山西省" },
+    { code: "nm",  label: "内蒙古自治区" },
+    { code: "ln",  label: "辽宁省" },
+    { code: "jl",  label: "吉林省" },
+    { code: "hl",  label: "黑龙江省" },
+    { code: "sh",  label: "上海市" },
+    { code: "js",  label: "江苏省" },
+    { code: "zj",  label: "浙江省" },
+    { code: "ah",  label: "安徽省" },
+    { code: "fj",  label: "福建省" },
+    { code: "jx",  label: "江西省" },
+    { code: "sd",  label: "山东省" },
+    { code: "yu",  label: "河南省" },
+    { code: "hu",  label: "湖北省" },
+    { code: "xi",  label: "湖南省" },
+    { code: "gd",  label: "广东省" },
+    { code: "gx",  label: "广西壮族自治区" },
+    { code: "hi",  label: "海南省" },
+    { code: "gz",  label: "贵州省" },
+    { code: "yn",  label: "云南省" },
+    { code: "xz",  label: "西藏自治区" },
+    { code: "snx", label: "陕西省" },
+    { code: "gs",  label: "甘肃省" },
+    { code: "qh",  label: "青海省" },
+    { code: "nx",  label: "宁夏回族自治区" },
+    { code: "xj",  label: "新疆维吾尔自治区" },
+    { code: "sz",  label: "深圳市" },
+  ]);
+
+  function renderUploadProvinceOptions(selectedCode) {
+    var html = '<option value="">请选择省份</option>';
+    for (var i = 0; i < QUOTA_UPLOAD_PROVINCES.length; i++) {
+      var r = QUOTA_UPLOAD_PROVINCES[i];
+      var sel = (r.code === selectedCode) ? " selected" : "";
+      html += '<option value="' + escapeHtml(r.code) + '"' + sel + '>' + escapeHtml(r.label) + '</option>';
     }
     return html;
   }
@@ -1342,7 +1389,7 @@
   // ── 极简上传弹窗 ─────────────────────────────────────────────────────
   function openUploadDialog() {
     state.addMenuOpen = false;
-    state.upload = { open: true, files: [], category: "", submitting: false };
+    state.upload = { open: true, files: [], category: "", province: "", year: "", submitting: false };
     render();
   }
 
@@ -1351,6 +1398,33 @@
     state.upload.files = [];
     state.upload.submitting = false;
     render();
+  }
+
+  // 轻量：只刷新文件列表（不重建表单，避免 input 失焦）
+  function renderUploadFileList() {
+    var wrap = document.querySelector("[data-upload-filelist='1']");
+    if (!wrap) return;
+    var u = state.upload || { files: [] };
+    wrap.innerHTML = (u.files || []).map(function (f, idx) {
+      return '<div class="manual-upload-fileitem">' +
+        '<span class="manual-upload-filename">' + escapeHtml(f.name) + '</span>' +
+        '<button class="icon-button danger-action" type="button" title="移除" data-quota-action="remove-upload-file" data-upload-idx="' + idx + '">' +
+        '<i data-lucide="x"></i></button>' +
+        '</div>';
+    }).join("");
+    refreshIcons();
+  }
+
+  // 轻量：只刷新提交按钮 disabled（不重建表单，避免 input 失焦）
+  function renderUploadSubmitButton() {
+    var btn = document.querySelector("[data-upload-submit='1']");
+    if (!btn) return;
+    var u = state.upload || {};
+    var yearNum = parseInt(u.year, 10);
+    var yearValid = u.year && !isNaN(yearNum) && yearNum >= 1900 && yearNum <= 2100;
+    var canSubmit = (u.files || []).length > 0 && u.category && u.province && yearValid && !u.submitting;
+    if (canSubmit) btn.removeAttribute("disabled");
+    else btn.setAttribute("disabled", "");
   }
 
   function renderUploadModal() {
@@ -1366,7 +1440,10 @@
     modal.setAttribute("aria-hidden", "false");
 
     const u = state.upload;
-    const canSubmit = (u.files || []).length > 0 && u.category && !u.submitting;
+    // 校验：files + category + province + year 都必填；year 范围 1900-2100
+    var yearNum = parseInt(u.year, 10);
+    var yearValid = u.year && !isNaN(yearNum) && yearNum >= 1900 && yearNum <= 2100;
+    var canSubmit = (u.files || []).length > 0 && u.category && u.province && yearValid && !u.submitting;
 
     const categoryOptions = [
       { value: "", label: "请选择资料分类" },
@@ -1400,11 +1477,25 @@
               <small>可多选 .pdf，单次最多 50 个</small>
             </span>
           </label>
-          <div class="manual-upload-filelist">${fileListHtml}</div>
+          <div class="manual-upload-filelist" data-upload-filelist="1">${fileListHtml}</div>
           <div class="quota-simple-form">
             <div class="quota-simple-row">
               <div class="quota-simple-field">
-                <label>资料分类</label>
+                <label>省份 <span class="quota-required-marker" aria-label="必填">*</span></label>
+                <select class="quota-field-input" data-qfield="upload.province">
+                  ${renderUploadProvinceOptions(u.province)}
+                </select>
+              </div>
+              <div class="quota-simple-field">
+                <label>年份 <span class="quota-required-marker" aria-label="必填">*</span></label>
+                <input type="number" class="quota-field-input" data-qfield="upload.year"
+                  value="${escapeHtml(u.year || "")}"
+                  placeholder="如 2026" min="1900" max="2100" step="1" />
+              </div>
+            </div>
+            <div class="quota-simple-row">
+              <div class="quota-simple-field">
+                <label>资料分类 <span class="quota-required-marker" aria-label="必填">*</span></label>
                 <select class="quota-field-input" data-qfield="upload.category">
                   ${categoryOptions.map(function (o) {
                     return '<option value="' + escapeHtml(o.value) + '"' + (o.value === u.category ? ' selected' : '') + '>' + escapeHtml(o.label) + '</option>';
@@ -1417,6 +1508,7 @@
         <footer class="quota-compose-footer">
           <button class="secondary-button" type="button" data-quota-action="close-upload">取消</button>
           <button class="primary-button" type="button" data-quota-action="submit-upload"
+            data-upload-submit="1"
             ${canSubmit ? "" : "disabled"}
             ${u.submitting ? '<i class="spinner"></i>' : ""}>
             ${u.submitting ? '<span>上传中...</span>' : '<i data-lucide="upload-cloud"></i><span>上传并保存</span>'}
@@ -1429,7 +1521,14 @@
 
   async function submitUpload() {
     const u = state.upload;
-    if (!u || (u.files || []).length === 0 || !u.category || u.submitting) return;
+    if (!u || (u.files || []).length === 0 || u.submitting) return;
+    // 前端二次校验：files + category + province + year 都必填；year 范围 1900-2100
+    if (!u.category) { setToast("请选择资料分类"); return; }
+    if (!u.province) { setToast("请选择省份"); return; }
+    var yearNum = parseInt(u.year, 10);
+    if (!u.year || isNaN(yearNum) || yearNum < 1900 || yearNum > 2100) {
+      setToast("请输入合法年份（1900-2100）"); return;
+    }
     if (typeof global.fetch !== "function") { setToast("fetch 不可用"); return; }
 
     u.submitting = true;
@@ -1438,6 +1537,8 @@
     const formData = new FormData();
     (u.files || []).forEach(function (f) { formData.append("files", f, f.name); });
     formData.append("category", u.category);
+    formData.append("province", u.province);
+    formData.append("year", String(yearNum));
 
     try {
       const response = await global.fetch("/api/data-lake/quota/upload", {
@@ -1568,7 +1669,8 @@
       var idx = el && el.dataset ? Number(el.dataset.uploadIdx) : -1;
       if (Array.isArray(state.upload.files) && idx >= 0 && idx < state.upload.files.length) {
         state.upload.files.splice(idx, 1);
-        renderUploadModal();
+        renderUploadFileList();
+        renderUploadSubmitButton();
       }
       return;
     }
@@ -1823,12 +1925,23 @@
         var newFiles = Array.from(t.files || []);
         state.upload.files = (state.upload.files || []).concat(newFiles);
         t.value = "";
-        renderUploadModal();
+        renderUploadFileList();
+        renderUploadSubmitButton();
         return;
       }
       if (t.dataset && t.dataset.qfield === "upload.category") {
         state.upload.category = t.value;
-        renderUploadModal();
+        renderUploadSubmitButton();
+        return;
+      }
+      if (t.dataset && t.dataset.qfield === "upload.province") {
+        state.upload.province = t.value;
+        renderUploadSubmitButton();
+        return;
+      }
+      if (t.dataset && t.dataset.qfield === "upload.year") {
+        state.upload.year = t.value;
+        renderUploadSubmitButton();
         return;
       }
     }
@@ -1963,7 +2076,7 @@
     state.active = false;
     state.addMenuOpen = false;
     state.compose = null;
-    state.upload = { open: false, files: [], category: "", submitting: false };
+    state.upload = { open: false, files: [], category: "", province: "", year: "", submitting: false };
     const shell = $("#quotaShell");
     if (shell) shell.hidden = true;
     const modal = $("#quotaComposeModal");
