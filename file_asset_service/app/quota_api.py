@@ -26,9 +26,11 @@ from app.models import (
     Archive,
     ArchiveEvent,
     ArchiveFile,
+    CrawlLineage,
     DataSource,
     FileAsset,
     IngestEvent,
+    Outbox,
     QuotaArchiveProfile,
     QuotaDictionary,
     QuotaProjectionCandidate,
@@ -1773,11 +1775,24 @@ def delete_archive(
         pass
 
     # 2. 先清依赖行（FK 没有 ON DELETE CASCADE，必须手动）
-    #    - archive_event: 状态机事件历史
-    #    - quota_archive_profile: 1:1 profile 行
+    #    链路：outbox → archive_event → crawl_lineage → archive
+    #    - outbox：发件箱，按 event_id 关联 archive_event；不删会拒删 archive_event
+    #    - archive_event：状态机事件历史
+    #    - crawl_lineage：爬虫血缘，archive_id 直接 FK 到 archive
+    #    - quota_archive_profile：1:1 profile 行
     #    archive_file 由 ORM cascade="all, delete-orphan" 在 session.delete 时自动清
     session.execute(
+        delete(Outbox).where(
+            Outbox.event_id.in_(
+                select(ArchiveEvent.event_id).where(ArchiveEvent.archive_id == archive_id)
+            )
+        )
+    )
+    session.execute(
         delete(ArchiveEvent).where(ArchiveEvent.archive_id == archive_id)
+    )
+    session.execute(
+        delete(CrawlLineage).where(CrawlLineage.archive_id == archive_id)
     )
     session.execute(
         delete(QuotaArchiveProfile).where(QuotaArchiveProfile.archive_id == archive_id)
