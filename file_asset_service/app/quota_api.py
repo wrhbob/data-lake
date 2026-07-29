@@ -1772,12 +1772,18 @@ def delete_archive(
     except Exception:
         pass
 
-    # 2. 手动删 quota_archive_profile（FK 没 cascade）
+    # 2. 先清依赖行（FK 没有 ON DELETE CASCADE，必须手动）
+    #    - archive_event: 状态机事件历史
+    #    - quota_archive_profile: 1:1 profile 行
+    #    archive_file 由 ORM cascade="all, delete-orphan" 在 session.delete 时自动清
+    session.execute(
+        delete(ArchiveEvent).where(ArchiveEvent.archive_id == archive_id)
+    )
     session.execute(
         delete(QuotaArchiveProfile).where(QuotaArchiveProfile.archive_id == archive_id)
     )
 
-    # 3. 删主表行 — archive_file 由 ORM cascade="all, delete-orphan" 自动级联
+    # 3. 删主表行 — 触发 ORM cascade 清 archive_file；DB 层面无其他引用
     session.delete(archive)
     session.commit()
 
