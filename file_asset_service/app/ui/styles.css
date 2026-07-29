@@ -4043,14 +4043,14 @@ a.rail-button {
   white-space: nowrap;
 }
 .quota-table .quota-col-count {
-  text-align: right;
+  text-align: center;
   white-space: nowrap;
   width: 64px;
 }
 .quota-table .quota-col-actions {
   min-width: 88px;
   white-space: nowrap;
-  text-align: right;
+  text-align: center;
 }
 .quota-preview-btn {
   display: inline-flex;
@@ -4102,8 +4102,9 @@ a.rail-button {
   white-space: nowrap;
 }
 .quota-action-cell {
-  display: inline-flex;
+  display: flex;
   align-items: center;
+  justify-content: center;
   gap: 4px;
 }
 .quota-action-cell__icon {

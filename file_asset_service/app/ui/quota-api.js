@@ -34,9 +34,11 @@
     "coverage",
     "compose",
     "archiveFiles",
+    "deleteParse",
+    "deleteArchive",
   ]);
 
-  // 端点映射（compose / archiveFiles 为 POST）
+  // 端点映射（compose / archiveFiles / deleteParse / deleteArchive 为写）
   const ENDPOINTS = Object.freeze({
     capabilities: { method: "GET", path: "/capabilities" },
     stats: { method: "GET", path: "/stats" },
@@ -48,6 +50,10 @@
     coverage: { method: "GET", path: "/coverage" },
     compose: { method: "POST", path: "/compose" },
     archiveFiles: { method: "POST", path: "/archives/{id}/files" },
+    // SPEC-QA-001 §5.8 / §5.10 — 危险操作；
+    // 后端契约：POST /archives/{id}/parse/delete 与 DELETE /archives/{id}
+    deleteParse: { method: "POST", path: "/archives/{id}/parse/delete" },
+    deleteArchive: { method: "DELETE", path: "/archives/{id}" },
   });
 
   function allStatus(status) {
@@ -246,6 +252,19 @@
           headers: { "Content-Type": "application/json", Accept: "application/json" },
           body: JSON.stringify(payload || {}),
         }),
+      // 危险操作（SPEC-QA-001 §5.8 / §5.10）：
+      // - deleteParseResult: 删除解析产物 + archive.parse_* + archive_file.parse_* + parse_job；
+      //   原 PDF 与档案元数据保留，回到未解析态可重新解析。
+      // - deleteArchive: 删除档案本体 + 关联 archive_file + quota_archive_profile +
+      //   parse_job；若所属资料体系是唯一分册则级联删体系本身（不可恢复）。
+      deleteParseResult: (archiveId) => {
+        var path = ENDPOINTS.deleteParse.path.replace("{id}", encodeURIComponent(archiveId));
+        return request(path, { method: ENDPOINTS.deleteParse.method });
+      },
+      deleteArchive: (archiveId) => {
+        var path = ENDPOINTS.deleteArchive.path.replace("{id}", encodeURIComponent(archiveId));
+        return request(path, { method: ENDPOINTS.deleteArchive.method });
+      },
     };
   }
 
