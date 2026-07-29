@@ -7,7 +7,7 @@
     <link rel="icon" href="data:," />
     <script>
       window.__uiAssetBase = window.location.protocol === "file:" ? "./" : "/ui-assets/";
-      window.__uiAssetVersion = "20260715-trading-publish-sort-v18";
+      window.__uiAssetVersion = "20260729-hover-fix-v2";
       document.write(`<link rel="stylesheet" href="${window.__uiAssetBase}styles.css?v=${window.__uiAssetVersion}" />`);
     </script>
     <script defer src="https://unpkg.com/lucide@latest"></script>
@@ -131,6 +131,10 @@
     <section id="quotaComposeModal" class="modal-backdrop quota-modal" aria-label="清单定额补录" aria-hidden="true" hidden></section>
 
     <section id="quotaUploadModal" class="modal-backdrop quota-modal" aria-label="定额 PDF 上传" aria-hidden="true" hidden></section>
+
+    <section id="quotaDeleteParseModal" class="modal-backdrop quota-modal" aria-label="删除解析结果" aria-hidden="true" hidden></section>
+
+    <section id="quotaDeleteArchiveModal" class="modal-backdrop quota-modal" aria-label="删除档案" aria-hidden="true" hidden></section>
 
     <div id="quotaToast" class="toast" role="status" aria-live="polite" hidden></div>
 

@@ -322,12 +322,20 @@ select:focus-visible {
   color: var(--text);
 }
 
-/* HOTFIX-QA-UPLOAD-003: pointer-events: none on children of [data-quota-action]
-   elements ensures click events always target the actionable element itself,
-   never the nested <svg>/<path>/<span> produced by Lucide icon replacement.
-   This makes event delegation via closest("[data-quota-action]") reliable
-   even when the user clicks directly on the icon glyph or text span. */
-[data-quota-action] > * {
+/* HOTFIX-QA-UPLOAD-003: pointer-events: none on Lucide-generated children
+   of [data-quota-action] elements ensures click events always target the
+   actionable element itself, never the nested <svg>/<path> produced by
+   Lucide icon replacement. This makes event delegation via
+   closest("[data-quota-action]") reliable even when the user clicks
+   directly on the icon glyph.
+   2026-07-29: scoped to svg/path/span only — was previously `> *` which
+   killed :hover detection on the parent button because Lucide icons are
+   stroke-only SVGs with most pixels transparent; the parent failed to
+   receive mouseenter and the custom ::after tooltip never appeared. */
+[data-quota-action] > svg,
+[data-quota-action] > i,
+[data-quota-action] > span,
+[data-quota-action] > svg * {
   pointer-events: none;
 }
 
@@ -4068,6 +4076,260 @@ a.rail-button {
   width: 14px;
   height: 14px;
   flex-shrink: 0;
+}
+
+/* ── 状态徽章 5 变体（v0.4 web-frontend/SPEC.md §3.2.3 H） ── */
+.status-badge--pending  { background: #f1f5f9; color: #475569; }
+.status-badge--parsing  { background: #dbeafe; color: #1d4ed8; }
+.status-badge--review   { background: #fef3c7; color: #b45309; }
+.status-badge--done     { background: #dcfce7; color: #15803d; }
+.status-badge--failed   { background: #fee2e2; color: #b91c1c; }
+.status-badge i {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+.status-badge--spin i {
+  animation: quota-spin 1.1s linear infinite;
+}
+@keyframes quota-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* ── 列表行操作列：智能图标 + ⋯ 下拉 ── */
+.quota-col-status {
+  white-space: nowrap;
+}
+.quota-action-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.quota-action-cell__icon {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text, #1a1a1a);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.quota-action-cell__icon:hover {
+  background: var(--surface-soft, #f5f5f5);
+  color: var(--primary, #2563eb);
+}
+.quota-action-cell__icon:disabled,
+.quota-action-cell__icon[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.quota-action-cell__icon:disabled:hover,
+.quota-action-cell__icon[aria-disabled="true"]:hover {
+  background: transparent;
+  color: inherit;
+}
+
+/* CSS 自定义 tooltip（解决浏览器原生 title 不显示的问题）
+   - 位置：按钮右侧 4px，垂直居中
+   - 黑底白字，圆角，阴影
+   - 瞬时出现（hover 即显示，不需等 1-2s）*/
+.quota-action-cell__icon::after,
+.quota-action-cell__more::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%) translateX(-4px);
+  background: rgba(17, 24, 39, 0.95);
+  color: #fff;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+  z-index: 50;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+.quota-action-cell__icon:hover::after,
+.quota-action-cell__more:hover::after {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+.quota-action-cell__icon,
+.quota-action-cell__more {
+  position: relative;
+}
+.quota-action-cell__icon:disabled::after,
+.quota-action-cell__icon[aria-disabled="true"]::after {
+  display: none;
+}
+.quota-action-cell__icon i {
+  width: 16px;
+  height: 16px;
+}
+.quota-action-cell__icon.status-badge--spin i,
+.quota-action-cell__icon[disabled] i {
+  animation: quota-spin 1.1s linear infinite;
+}
+
+/* ── ⋯ 下拉 ── */
+.quota-dropdown {
+  position: relative;
+  display: inline-flex;
+}
+.quota-dropdown__menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 200px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  padding: 4px 0;
+  z-index: 30;
+}
+.quota-dropdown__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 12px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  font-size: 13px;
+  color: var(--text, #1a1a1a);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.quota-dropdown__item:hover {
+  background: var(--surface-soft, #f5f5f5);
+}
+.quota-dropdown__item i {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.quota-dropdown__item--danger {
+  color: var(--danger, #b91c1c);
+}
+.quota-dropdown__item--danger:hover {
+  background: #fef2f2;
+}
+.quota-dropdown__divider {
+  height: 1px;
+  background: var(--border, #e5e7eb);
+  margin: 4px 0;
+}
+.quota-dropdown__empty {
+  padding: 8px 12px;
+  color: var(--muted, #6b7280);
+  font-size: 12px;
+}
+
+/* ── 删除解析结果二次确认 modal（v0.4 SPEC §3.2.3 K） ── */
+.quota-delete-confirm-modal {
+  background: var(--surface, #fff);
+  border-radius: 10px;
+  width: min(480px, 92vw);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+.quota-delete-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+}
+.quota-delete-header h2 {
+  margin: 4px 0 0;
+  font-size: 18px;
+  color: var(--danger, #b91c1c);
+}
+.quota-delete-header .eyebrow {
+  margin: 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--danger, #b91c1c);
+  letter-spacing: 0.04em;
+}
+.quota-delete-body {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+.quota-delete-subtitle {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted, #4b5563);
+}
+.quota-delete-subtitle code {
+  background: var(--surface-soft, #f5f5f5);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.quota-delete-archive-title {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text, #1a1a1a);
+}
+.quota-delete-archive-title strong {
+  color: var(--danger, #b91c1c);
+  word-break: break-all;
+}
+.quota-delete-input-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text, #1a1a1a);
+}
+.quota-delete-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #b91c1c;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.quota-delete-error i {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.quota-delete-confirm-btn[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.quota-delete-confirm-btn {
+  background: var(--danger, #b91c1c);
+  border-color: var(--danger, #b91c1c);
+}
+.quota-delete-confirm-btn:hover {
+  background: #991b1b;
+  border-color: #991b1b;
 }
 .quota-empty {
   display: flex;

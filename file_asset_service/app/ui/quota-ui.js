@@ -60,12 +60,118 @@
     "操作",
   ]);
 
+  // ── 5 状态徽章（v0.4 web-frontend/SPEC.md §3.2.3 H） ──
+  // 把 archive.status + parse.error_code 推导出 5 个 UI 状态之一
+  //   pending / parsing / review / done / failed
+  // 注意：useless 中走 done 渲染（合并 qa_passed + usable）
+  const PARSE_STATUS_VARIANT = Object.freeze({
+    pending:  "pending",
+    parsing:  "parsing",
+    parsed:   "review",
+    qa_passed: "done",
+    usable:   "done",
+    failed_user: "failed",
+    failed_permanent: "failed",
+  });
+
+  function resolveUiStatus(row) {
+    var st = (row && row.status) || "registered";
+    // transient 在 parsing 上叠加，但不替换主徽章——留后续 banner 处理
+    return PARSE_STATUS_VARIANT[st] || "pending";
+  }
+
+  function renderStatusBadge(row) {
+    var variant = resolveUiStatus(row);
+    var labelMap = {
+      pending:  "未解析",
+      parsing:  "解析中",
+      review:   "待审核",
+      done:     "已完成",
+      failed:   "解析失败",
+    };
+    var iconMap = {
+      pending:  null,
+      parsing:  "loader",
+      review:   null,
+      done:     "check",
+      failed:   "alert-triangle",
+    };
+    var label = labelMap[variant] || "—";
+    var icon = iconMap[variant];
+    var extraSpin = variant === "parsing" ? " status-badge--spin" : "";
+    var inner = icon
+      ? '<i data-lucide="' + icon + '"></i><span>' + escapeHtml(label) + '</span>'
+      : '<span>' + escapeHtml(label) + '</span>';
+    return '<span class="status-badge status-badge--' + variant + extraSpin + '">' + inner + '</span>';
+  }
+
   // 分类标签映射（仅展示用，与 file_role 无关）
   const CATEGORY_LABELS = {
     construction_quota: "建筑工程定额",
     industry_quota: "专业工程定额",
     boq_standard: "清单规范",
   };
+
+  // ── 智能动作矩阵（v0.4 SPEC §3.2.3 I） ──
+  // 5 UI 状态 × 2 智能图标（lucide 名 + tooltip + action 名）
+  const SMART_ACTIONS = Object.freeze({
+    pending: [
+      { icon: "eye",  tip: "预览 PDF",         action: "preview-archive" },
+      { icon: "play", tip: "开始解析",         action: "parse-trigger" },
+    ],
+    parsing: [
+      { icon: "eye",          tip: "预览 PDF",  action: "preview-archive" },
+      { icon: "loader-circle", tip: "解析中",   action: "__disabled__" },
+    ],
+    review: [
+      { icon: "download", tip: "下载 candidate.xlsx", action: "parse-download-candidate" },
+      { icon: "upload",   tip: "上传 reviewed.xlsx",   action: "parse-upload-reviewed" },
+    ],
+    done: [
+      { icon: "download", tip: "下载 final.xlsx", action: "parse-download-final" },
+      { icon: "eye",      tip: "预览 PDF",         action: "preview-archive" },
+    ],
+    failed: [
+      { icon: "refresh-cw", tip: "重新解析", action: "parse-trigger" },
+      { icon: "eye",       tip: "预览 PDF",  action: "preview-archive" },
+    ],
+  });
+
+  // ⋯ 下拉项（按状态返回，普通项 + 危险项）
+  // 普通项 icon / label / action；danger: true 渲染分隔条 + 红色
+  // 删除档案 (#10) 在所有状态下都放 ⋯ 下拉危险区；删除解析结果 (#9) 仅 parsed/qa_passed/usable/failed_*
+  const DROPDOWN_ITEMS = Object.freeze({
+    pending: [
+      { divider: true },
+      { icon: "trash-2", label: "删除档案", action: "archive-delete", danger: true },
+    ],
+    parsing: [
+      { icon: "file-text", label: "查看 Manifest", action: "parse-show-manifest" },
+      { divider: true },
+      { icon: "trash-2",   label: "删除档案",      action: "archive-delete", danger: true },
+    ],
+    review: [
+      { icon: "file-text",      label: "查看 Manifest", action: "parse-show-manifest" },
+      { icon: "refresh-cw",     label: "重新解析",       action: "parse-trigger" },
+      { divider: true },
+      { icon: "trash-2",        label: "删除解析结果",   action: "parse-delete", danger: true },
+      { icon: "trash-2",        label: "删除档案",       action: "archive-delete", danger: true },
+    ],
+    done: [
+      { icon: "file-text",   label: "查看 Manifest", action: "parse-show-manifest" },
+      { icon: "check-circle", label: "查看 QA 报告", action: "parse-show-qa" },
+      { divider: true },
+      { icon: "trash-2",     label: "删除解析结果",  action: "parse-delete", danger: true },
+      { icon: "trash-2",     label: "删除档案",      action: "archive-delete", danger: true },
+    ],
+    failed: [
+      { icon: "file-text",   label: "查看 Manifest", action: "parse-show-manifest" },
+      { icon: "check-circle", label: "查看 QA 报告", action: "parse-show-qa" },
+      { divider: true },
+      { icon: "trash-2",     label: "删除解析结果",  action: "parse-delete", danger: true },
+      { icon: "trash-2",     label: "删除档案",      action: "archive-delete", danger: true },
+    ],
+  });
 
   const CAP = (Api && Api.CAP) || {
     UNKNOWN: "unknown",
@@ -112,6 +218,28 @@
     composeWarning: "",
     composeAdvancedOpen: false,
     upload: { open: false, files: [], category: "", province: "", year: "", submitting: false },
+    // 列表行 ⋯ 下拉：open=false 时下拉隐藏
+    dropdown: { open: false, archiveId: "", variant: "pending" },
+    // 删除解析结果 modal：open=false 时隐藏
+    deleteParse: {
+      open: false,
+      archiveId: "",
+      title: "",
+      // 输入框值（用于二次确认）
+      confirmInput: "",
+      submitting: false,
+      // 后端报错信息（422 等），modal 不关闭以保留反馈
+      error: "",
+    },
+    // 删除档案 modal（#10；与 #9 严格区分，按 SPEC §3.1.4）
+    deleteArchive: {
+      open: false,
+      archiveId: "",
+      title: "",
+      confirmInput: "",
+      submitting: false,
+      error: "",
+    },
     toast: "",
   };
 
@@ -704,19 +832,332 @@
     var meta = row.metadata || {};
     var categoryCell = meta.category || {};
     var categoryVal = (categoryCell.value && CATEGORY_LABELS[categoryCell.value]) || categoryCell.value || "—";
-    var archiveId = encodeURIComponent(row.archive_id || "");
+    var archiveIdEnc = encodeURIComponent(row.archive_id || "");
+    var archiveId = row.archive_id || "";
+    var variant = resolveUiStatus(row);
+    var smartIcons = renderSmartActions(archiveIdEnc, variant);
+    var dropdownHtml = renderDropdown(archiveIdEnc, variant);
     return `
-      <tr data-quota-action="preview-archive" data-archive-id="${archiveId}" style="cursor:pointer" title="点击预览">
+      <tr data-quota-action="preview-archive" data-archive-id="${archiveIdEnc}" style="cursor:pointer" title="点击预览">
         <td class="quota-col-title">${cell(row.title)}</td>
         <td>${cell(categoryVal)}</td>
         <td class="quota-col-count">${cell(row.file_count)}</td>
-        <td><span class="quota-status-pill">${cell(row.status)}</span></td>
+        <td class="quota-col-status">${renderStatusBadge(row)}</td>
         <td class="quota-col-actions">
-          <button class="quota-preview-btn" type="button" data-quota-action="preview-archive" data-archive-id="${archiveId}" title="预览 PDF">
-            <i data-lucide="eye"></i><span>预览</span>
-          </button>
+          <span class="quota-action-cell">${smartIcons}${dropdownHtml}</span>
         </td>
       </tr>`;
+  }
+
+  // 智能图标（2 个 icon-only 按钮）
+  function renderSmartActions(archiveIdEnc, variant) {
+    var arr = SMART_ACTIONS[variant] || [];
+    return arr.map(function (it) {
+      var disabled = it.action === "__disabled__";
+      var dataAttr = disabled
+        ? ' disabled aria-disabled="true" data-tooltip="' + escapeHtml(it.tip) + '"'
+        : ' data-quota-action="' + it.action + '" data-archive-id="' + archiveIdEnc + '"' +
+          ' data-tooltip="' + escapeHtml(it.tip) + '"';
+      return '<button class="quota-action-cell__icon" type="button"' + dataAttr +
+        ' title="' + escapeHtml(it.tip) + '"><i data-lucide="' + it.icon + '"></i></button>';
+    }).join("");
+  }
+
+  // ⋯ 下拉触发按钮 + 菜单（菜单默认 hidden，由 dropdown.open 控制）
+  // 当前行 dropdown.open 命中 → 菜单去掉 hidden、aria-expanded=true
+  function renderDropdown(archiveIdEnc, variant) {
+    var items = DROPDOWN_ITEMS[variant] || [];
+    var listHtml = items.length
+      ? items.map(function (it) {
+          if (it.divider) return '<div class="quota-dropdown__divider"></div>';
+          var cls = "quota-dropdown__item" + (it.danger ? " quota-dropdown__item--danger" : "");
+          return '<button class="' + cls + '" type="button" data-quota-action="' + it.action +
+            '" data-archive-id="' + archiveIdEnc + '"><i data-lucide="' + it.icon +
+            '"></i><span>' + escapeHtml(it.label) + '</span></button>';
+        }).join("")
+      : '<div class="quota-dropdown__empty">无更多操作</div>';
+    var isOpen = state.dropdown && state.dropdown.open && state.dropdown.archiveId === archiveIdEnc;
+    var menuAttrs = isOpen ? ' role="menu"' : ' role="menu" hidden';
+    var triggerAttrs = isOpen
+      ? ' data-quota-action="dropdown-toggle" data-archive-id="' + archiveIdEnc + '"' +
+        ' title="更多操作" aria-haspopup="true" aria-expanded="true"'
+      : ' data-quota-action="dropdown-toggle" data-archive-id="' + archiveIdEnc + '"' +
+        ' title="更多操作" aria-haspopup="true" aria-expanded="false"';
+    return '<span class="quota-dropdown' + (isOpen ? ' is-open' : '') + '">' +
+      '<button class="quota-action-cell__icon quota-action-cell__more" type="button"' +
+        triggerAttrs + ' data-tooltip="更多操作"><i data-lucide="more-horizontal"></i></button>' +
+      '<div class="quota-dropdown__menu"' + menuAttrs + '>' + listHtml + '</div>' +
+    '</span>';
+  }
+
+  // ── 删除解析结果 modal（v0.4 SPEC §3.2.3 K） ──
+  // 二次确认：输入档案标题才解锁确认按钮；提交后端 §5.8 端点
+  // modal 不挂 quotalModal 样式名——样式独享 class 集合（styles.css 中定义）
+  function renderDeleteParseModal() {
+    var modal = document.getElementById("quotaDeleteParseModal");
+    if (!modal) return;
+    var d = state.deleteParse || {};
+    if (!d.open) {
+      modal.hidden = true;
+      modal.setAttribute("aria-hidden", "true");
+      modal.innerHTML = "";
+      return;
+    }
+    modal.hidden = false;
+    modal.setAttribute("aria-hidden", "false");
+    var titleMatch = (d.confirmInput || "") === (d.title || "");
+    var errorHtml = d.error
+      ? '<div class="quota-delete-error" role="alert"><i data-lucide="alert-circle"></i><span>' +
+        escapeHtml(d.error) + '</span></div>'
+      : "";
+    modal.innerHTML = `
+      <form class="quota-delete-confirm-modal" data-quota-form="delete-parse">
+        <header class="quota-delete-header">
+          <div>
+            <p class="eyebrow">危险操作</p>
+            <h2>删除解析结果</h2>
+          </div>
+          <button class="icon-button" type="button" data-quota-action="close-delete-parse" title="关闭">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div class="quota-delete-body">
+          <p class="quota-delete-subtitle">
+            此操作将删除 MinIO 上的 markdown / html / candidate.xlsx / final.xlsx
+            与 Archive <code>parse_*</code> 字段、<code>archive_file</code> 4 类 parse_* 行、关联
+            <code>parse_job</code> 记录；<strong>原始 PDF 与档案元数据保留</strong>，回到未解析态可重新解析。
+          </p>
+          <p class="quota-delete-archive-title">档案：<strong>${escapeHtml(d.title || "—")}</strong></p>
+          <label class="quota-delete-input-row">
+            <span>请输入档案标题以确认</span>
+            <input type="text" class="quota-field-input" data-quota-input="delete-parse-confirm"
+              value="${escapeHtml(d.confirmInput || "")}" placeholder="完整档案标题" autocomplete="off" />
+          </label>
+          ${errorHtml}
+        </div>
+        <footer class="quota-compose-footer">
+          <button class="secondary-button" type="button" data-quota-action="close-delete-parse">取消</button>
+          <button class="primary-button quota-delete-confirm-btn" type="button"
+            data-quota-action="submit-delete-parse"
+            aria-disabled="${titleMatch ? "false" : "true"}">
+            <i data-lucide="trash-2"></i>
+            <span>${d.submitting ? "删除中…" : "删除解析结果"}</span>
+          </button>
+        </footer>
+      </form>
+    `;
+  }
+
+  // 只刷新确认按钮 disabled 视觉（避免 input 失焦）
+  function refreshDeleteParseConfirmBtn() {
+    var btn = document.querySelector("[data-quota-action='submit-delete-parse']");
+    if (!btn) return;
+    var d = state.deleteParse || {};
+    var titleMatch = (d.confirmInput || "") === (d.title || "");
+    btn.setAttribute("aria-disabled", titleMatch ? "false" : "true");
+    var label = btn.querySelector("span");
+    if (label) label.textContent = d.submitting ? "删除中…" : "删除解析结果";
+  }
+
+  function openDeleteParseModal(archiveId, title) {
+    state.deleteParse = {
+      open: true,
+      archiveId: archiveId || "",
+      title: title || "",
+      confirmInput: "",
+      submitting: false,
+      error: "",
+    };
+    renderDeleteParseModal();
+    refreshIcons();
+  }
+
+  function closeDeleteParseModal() {
+    state.deleteParse = {
+      open: false,
+      archiveId: "",
+      title: "",
+      confirmInput: "",
+      submitting: false,
+      error: "",
+    };
+    renderDeleteParseModal();
+  }
+
+  // ── 删除档案 modal（#10；按 SPEC §3.1.4 与 #9 严格区分）──────────────
+  // 副标题更重（涉及资料体系可能级联删）；按钮 label 改"确认删除档案"；audit action='quota_archive_deleted'
+  function renderDeleteArchiveModal() {
+    var modal = document.getElementById("quotaDeleteArchiveModal");
+    if (!modal) return;
+    var d = state.deleteArchive || {};
+    if (!d.open) {
+      modal.hidden = true;
+      modal.setAttribute("aria-hidden", "true");
+      modal.innerHTML = "";
+      return;
+    }
+    modal.hidden = false;
+    modal.setAttribute("aria-hidden", "false");
+    var titleMatch = (d.confirmInput || "") === (d.title || "");
+    var errorHtml = d.error
+      ? '<div class="quota-delete-error" role="alert"><i data-lucide="alert-circle"></i><span>' +
+        escapeHtml(d.error) + '</span></div>'
+      : "";
+    modal.innerHTML = `
+      <form class="quota-delete-confirm-modal" data-quota-form="delete-archive">
+        <header class="quota-delete-header">
+          <div>
+            <p class="eyebrow">危险操作 · 不可恢复</p>
+            <h2>删除档案</h2>
+          </div>
+          <button class="icon-button" type="button" data-quota-action="close-delete-archive" title="关闭">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div class="quota-delete-body">
+          <p class="quota-delete-subtitle">
+            此操作将<strong>删除档案本身及其全部关联文件</strong>（原始 PDF + 4 类解析产物 +
+            <code>archive_file</code> + <code>quota_archive_profile</code> + <code>parse_job</code>）；
+            若该档案是所属 <code>quota_publication_set</code> 的唯一分册，<strong>资料体系本身也会被删</strong>。
+            <br/><strong>此操作不可恢复。</strong>
+          </p>
+          <p class="quota-delete-archive-title">档案：<strong>${escapeHtml(d.title || "—")}</strong></p>
+          <label class="quota-delete-input-row">
+            <span>请输入档案标题以确认</span>
+            <input type="text" class="quota-field-input" data-quota-input="delete-archive-confirm"
+              value="${escapeHtml(d.confirmInput || "")}" placeholder="完整档案标题" autocomplete="off" />
+          </label>
+          ${errorHtml}
+        </div>
+        <footer class="quota-compose-footer">
+          <button class="secondary-button" type="button" data-quota-action="close-delete-archive">取消</button>
+          <button class="primary-button quota-delete-confirm-btn" type="button"
+            data-quota-action="submit-delete-archive"
+            aria-disabled="${titleMatch ? "false" : "true"}">
+            <i data-lucide="trash-2"></i>
+            <span>${d.submitting ? "删除中…" : "确认删除档案"}</span>
+          </button>
+        </footer>
+      </form>
+    `;
+  }
+
+  function refreshDeleteArchiveConfirmBtn() {
+    var btn = document.querySelector("[data-quota-action='submit-delete-archive']");
+    if (!btn) return;
+    var d = state.deleteArchive || {};
+    var titleMatch = (d.confirmInput || "") === (d.title || "");
+    btn.setAttribute("aria-disabled", titleMatch ? "false" : "true");
+    var label = btn.querySelector("span");
+    if (label) label.textContent = d.submitting ? "删除中…" : "确认删除档案";
+  }
+
+  function openDeleteArchiveModal(archiveId, title) {
+    state.deleteArchive = {
+      open: true,
+      archiveId: archiveId || "",
+      title: title || "",
+      confirmInput: "",
+      submitting: false,
+      error: "",
+    };
+    renderDeleteArchiveModal();
+    refreshIcons();
+  }
+
+  function closeDeleteArchiveModal() {
+    state.deleteArchive = {
+      open: false,
+      archiveId: "",
+      title: "",
+      confirmInput: "",
+      submitting: false,
+      error: "",
+    };
+    renderDeleteArchiveModal();
+  }
+
+  // 后端契约见 web-frontend/SPEC.md §5.10：DELETE /api/data-lake/quota/archives/{id}
+  function submitDeleteArchive() {
+    var d = state.deleteArchive || {};
+    if (!d.open || d.submitting) return;
+    if ((d.confirmInput || "") !== (d.title || "")) {
+      state.deleteArchive.error = "档案标题输入不匹配，请重新输入完整标题。";
+      renderDeleteArchiveModal();
+      return;
+    }
+    if (!d.archiveId) {
+      closeDeleteArchiveModal();
+      return;
+    }
+    state.deleteArchive.submitting = true;
+    state.deleteArchive.error = "";
+    refreshDeleteArchiveConfirmBtn();
+    var archiveId = d.archiveId;
+    var p = (state.api && state.api.deleteArchive)
+      ? state.api.deleteArchive(archiveId)
+      : Promise.resolve({ status: "error", error: "deleteArchive API 未配置" });
+    Promise.resolve(p).then(function (resp) {
+      if (resp && resp.status === "ready" && !resp.error) {
+        closeDeleteArchiveModal();
+        // 删完跳回档案列表
+        state.view = "archives";
+        reloadArchives();
+      } else {
+        state.deleteArchive.submitting = false;
+        state.deleteArchive.error = (resp && resp.error) || "删除失败，请重试";
+        renderDeleteArchiveModal();
+        refreshIcons();
+      }
+    }).catch(function (e) {
+      state.deleteArchive.submitting = false;
+      state.deleteArchive.error = (e && e.message) || "删除请求异常";
+      renderDeleteArchiveModal();
+      refreshIcons();
+    });
+  }
+
+  // 提交删除（POST /api/data-lake/quota/archives/{id}/parse/delete）
+  // 后端契约见 web-frontend/SPEC.md §5.8（v0.4 强化版）
+  // 二次确认已由 UI 验证（confirmInput === title）；这里再做一道校验
+  function submitDeleteParse() {
+    var d = state.deleteParse || {};
+    if (!d.open || d.submitting) return;
+    if ((d.confirmInput || "") !== (d.title || "")) {
+      // 二次确认不通过：不调后端，直接提示
+      state.deleteParse.error = "档案标题输入不匹配，请重新输入完整标题。";
+      renderDeleteParseModal();
+      return;
+    }
+    if (!d.archiveId) {
+      closeDeleteParseModal();
+      return;
+    }
+    state.deleteParse.submitting = true;
+    state.deleteParse.error = "";
+    refreshDeleteParseConfirmBtn();
+    var archiveId = d.archiveId;
+    var p = (state.api && state.api.deleteParseResult)
+      ? state.api.deleteParseResult(archiveId)
+      : Promise.resolve({ status: "error", error: "deleteParseResult API 未配置" });
+    Promise.resolve(p).then(function (resp) {
+      // 成功：resp.status === "ready" && !resp.error
+      if (resp && resp.status === "ready" && !resp.error) {
+        closeDeleteParseModal();
+        // 刷新列表
+        reloadArchives();
+      } else {
+        state.deleteParse.submitting = false;
+        state.deleteParse.error = (resp && resp.error) || "删除失败，请重试";
+        renderDeleteParseModal();
+        refreshIcons();
+      }
+    }).catch(function (e) {
+      state.deleteParse.submitting = false;
+      state.deleteParse.error = (e && e.message) || "删除请求异常";
+      renderDeleteParseModal();
+      refreshIcons();
+    });
   }
 
   function renderGoPendingButton() {
@@ -897,6 +1338,8 @@
     `;
     renderComposeModal();
     renderUploadModal();
+    renderDeleteParseModal();
+    renderDeleteArchiveModal();
     refreshIcons();
   }
 
@@ -1781,6 +2224,111 @@
       render();
       return;
     }
+    // ── ⋯ 下拉：点击触发按钮展开/收起 ──
+    if (action === "dropdown-toggle") {
+      var ddArchiveId = (el && el.dataset && el.dataset.archiveId) || "";
+      var wasOpen = state.dropdown.open && state.dropdown.archiveId === ddArchiveId;
+      // 切换：点同一行收起；点不同行直接跳
+      if (wasOpen) {
+        state.dropdown = { open: false, archiveId: "", variant: "pending" };
+      } else {
+        var ddRow = (state.archives.data || []).find(function (r) {
+          return encodeURIComponent(r.archive_id || "") === ddArchiveId;
+        });
+        state.dropdown = {
+          open: true,
+          archiveId: ddArchiveId,
+          variant: ddRow ? resolveUiStatus(ddRow) : "pending",
+        };
+      }
+      render();
+      return;
+    }
+    // ── 解析动作（行级 / 下拉共用）───────────────────────────────────
+    if (action === "parse-trigger") {
+      var ptId = (el && el.dataset && el.dataset.archiveId) || "";
+      if (ptId) {
+        document.dispatchEvent(new CustomEvent("quota:parse-trigger", {
+          detail: { archiveId: decodeURIComponent(ptId) }
+        }));
+      }
+      // 点完关下拉
+      state.dropdown = { open: false, archiveId: "", variant: "pending" };
+      render();
+      return;
+    }
+    if (action === "parse-download-candidate" || action === "parse-download-final" ||
+        action === "parse-show-manifest" || action === "parse-show-qa") {
+      var pdId = (el && el.dataset && el.dataset.archiveId) || "";
+      if (pdId) {
+        document.dispatchEvent(new CustomEvent("quota:parse-action", {
+          detail: { action: action, archiveId: decodeURIComponent(pdId) }
+        }));
+      }
+      state.dropdown = { open: false, archiveId: "", variant: "pending" };
+      render();
+      return;
+    }
+    if (action === "parse-upload-reviewed") {
+      var puId = (el && el.dataset && el.dataset.archiveId) || "";
+      if (puId) {
+        document.dispatchEvent(new CustomEvent("quota:parse-upload-reviewed", {
+          detail: { archiveId: decodeURIComponent(puId) }
+        }));
+      }
+      state.dropdown = { open: false, archiveId: "", variant: "pending" };
+      render();
+      return;
+    }
+    // ── 危险操作：删除解析结果（行 ⋯ 下拉入口）────────────────────
+    if (action === "parse-delete") {
+      var pdDelId = (el && el.dataset && el.dataset.archiveId) || "";
+      var pdDelRow = (state.archives.data || []).find(function (r) {
+        return encodeURIComponent(r.archive_id || "") === pdDelId;
+      });
+      var pdDelTitle = pdDelRow ? (pdDelRow.title || "") : "";
+      var pdDelRealId = pdDelId ? decodeURIComponent(pdDelId) : "";
+      state.dropdown = { open: false, archiveId: "", variant: "pending" };
+      openDeleteParseModal(pdDelRealId, pdDelTitle);
+      // focus 到 input 等 DOM 挂载完
+      setTimeout(function () {
+        var inp = document.querySelector("[data-quota-input='delete-parse-confirm']");
+        if (inp) inp.focus();
+      }, 0);
+      return;
+    }
+    // ── 危险操作：删除档案（#10，行 ⋯ 下拉入口；按 SPEC §3.1.4 与 #9 严格区分）──
+    if (action === "archive-delete") {
+      var adDelId = (el && el.dataset && el.dataset.archiveId) || "";
+      var adDelRow = (state.archives.data || []).find(function (r) {
+        return encodeURIComponent(r.archive_id || "") === adDelId;
+      });
+      var adDelTitle = adDelRow ? (adDelRow.title || "") : "";
+      var adDelRealId = adDelId ? decodeURIComponent(adDelId) : "";
+      state.dropdown = { open: false, archiveId: "", variant: "pending" };
+      openDeleteArchiveModal(adDelRealId, adDelTitle);
+      setTimeout(function () {
+        var inp = document.querySelector("[data-quota-input='delete-archive-confirm']");
+        if (inp) inp.focus();
+      }, 0);
+      return;
+    }
+    if (action === "close-delete-parse") {
+      closeDeleteParseModal();
+      return;
+    }
+    if (action === "submit-delete-parse") {
+      submitDeleteParse();
+      return;
+    }
+    if (action === "close-delete-archive") {
+      closeDeleteArchiveModal();
+      return;
+    }
+    if (action === "submit-delete-archive") {
+      submitDeleteArchive();
+      return;
+    }
     if (action.indexOf("open-archive:") === 0) {
       const id = action.slice("open-archive:".length);
       if (!id) return;
@@ -2011,6 +2559,24 @@
     const t = event.target;
     if (!t) return;
 
+    // ── 删除解析结果 modal 的确认输入 ──────────────────────────────
+    if (state.deleteParse && state.deleteParse.open) {
+      if (t.dataset && t.dataset.quotaInput === "delete-parse-confirm") {
+        state.deleteParse.confirmInput = t.value || "";
+        // 只刷新按钮 disabled 视觉，不重建 modal——避免 input 失焦
+        refreshDeleteParseConfirmBtn();
+        return;
+      }
+    }
+    // ── 删除档案 modal 的确认输入（#10）───────────────────────────
+    if (state.deleteArchive && state.deleteArchive.open) {
+      if (t.dataset && t.dataset.quotaInput === "delete-archive-confirm") {
+        state.deleteArchive.confirmInput = t.value || "";
+        refreshDeleteArchiveConfirmBtn();
+        return;
+      }
+    }
+
     // ── 上传弹窗的输入处理（不依赖 state.compose）──────────────────────
     if (state.upload && state.upload.open) {
       if (t.dataset && t.dataset.qfileInput === "upload") {
@@ -2126,6 +2692,11 @@
           state.addMenuOpen = false;
           render();
         }
+        // 点击空白关闭 ⋯ 下拉（点击 dropdown 内部任何子项都会带 data-quota-action 上走 handleAction）
+        if (state.dropdown && state.dropdown.open && !target.closest(".quota-dropdown")) {
+          state.dropdown = { open: false, archiveId: "", variant: "pending" };
+          render();
+        }
         return;
       }
       // 阻止默认行为（防止表单提交 / 复选框切换等副作用）
@@ -2136,8 +2707,15 @@
     document.addEventListener("change", handleInput);
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || !state.active) return;
+      // 优先级：上传 → compose → 删除解析结果 → ⋯ 下拉
       if (state.upload && state.upload.open) closeUploadDialog();
-      else if (state.compose) closeCompose();
+      else if (state.compose && state.compose.open) closeCompose();
+      else if (state.deleteParse && state.deleteParse.open) closeDeleteParseModal();
+      else if (state.deleteArchive && state.deleteArchive.open) closeDeleteArchiveModal();
+      else if (state.dropdown && state.dropdown.open) {
+        state.dropdown = { open: false, archiveId: "", variant: "pending" };
+        render();
+      }
     });
   }
 
@@ -2169,6 +2747,13 @@
     state.addMenuOpen = false;
     state.compose = null;
     state.upload = { open: false, files: [], category: "", province: "", year: "", submitting: false };
+    state.dropdown = { open: false, archiveId: "", variant: "pending" };
+    state.deleteParse = {
+      open: false, archiveId: "", title: "", confirmInput: "", submitting: false, error: "",
+    };
+    state.deleteArchive = {
+      open: false, archiveId: "", title: "", confirmInput: "", submitting: false, error: "",
+    };
     const shell = $("#quotaShell");
     if (shell) shell.hidden = true;
     const modal = $("#quotaComposeModal");
@@ -2180,6 +2765,16 @@
     if (uploadModal) {
       uploadModal.hidden = true;
       uploadModal.innerHTML = "";
+    }
+    const deleteModal = document.getElementById("quotaDeleteParseModal");
+    if (deleteModal) {
+      deleteModal.hidden = true;
+      deleteModal.innerHTML = "";
+    }
+    const deleteArchModal = document.getElementById("quotaDeleteArchiveModal");
+    if (deleteArchModal) {
+      deleteArchModal.hidden = true;
+      deleteArchModal.innerHTML = "";
     }
   }
 
@@ -2234,12 +2829,24 @@
       tabEnabled,
       shouldUseComposeMenu,
       renderArchiveRow,
+      renderStatusBadge,
+      renderSmartActions,
+      renderDropdown,
+      resolveUiStatus,
+      openDeleteParseModal,
+      closeDeleteParseModal,
+      submitDeleteParse,
+      openDeleteArchiveModal,
+      closeDeleteArchiveModal,
+      submitDeleteArchive,
       renderUploadModal,
       handleAction,
       TAB_CAPABILITY,
       TABS,
       LIST_COLUMNS,
       PRIMARY_FILTERS,
+      SMART_ACTIONS,
+      DROPDOWN_ITEMS,
     },
   };
 
