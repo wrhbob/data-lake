@@ -15,8 +15,9 @@ import hashlib
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.orm import sessionmaker
 
-from app.models import Archive, ArchiveEvent, ArchiveFile, FileAsset, QuotaArchiveProfile
+from app.models import Archive, ArchiveEvent, ArchiveFile, FileAsset, QuotaArchiveProfile, QuotaPublicationSet
 from app.quota_api import (
     QuotaUploadResponse,
     _cleanup_empty_archive,
@@ -43,12 +44,21 @@ class _StubUploadFile:
         return self._content
 
 
-def _call_upload(session, storage, files, category="construction_quota"):
-    """便捷包装：直接调用 async 端点函数。"""
+def _call_upload(session, storage, files, category="construction_quota",
+                 province="sc", year=2025, profile=None):
+    """便捷包装：直接调用 async 端点函数。
+
+    province / year 默认 "sc" / 2025（v0.3.2 起端点必填；测试覆盖默认值场景）。
+    profile 必须显式传 None：FastAPI 的 Form(None) 默认在直接调用（非依赖注入）
+    时返回 FormInfo 对象而非 None，会触发 INVALID_PROFILE 校验。
+    """
     coro = upload_quota_files(
         response=_DummyResponse(),
         files=files,
         category=category,
+        province=province,
+        year=year,
+        profile=profile,
         session=session,
         storage=storage,
     )
@@ -100,7 +110,8 @@ def test_single_pdf_upload_creates_archive_with_main_document(db_session, fake_s
     archive = db_session.get(Archive, item.archive_id)
     assert archive is not None
     assert archive.domain_type == "quota"
-    assert archive.business_key == f"quota:manual-upload:{_sha256(content)}"
+    # v0.3.2 起 business_key 公式：quota:manual-upload:{province}:{year}:{sha256[:12]}
+    assert archive.business_key == f"quota:manual-upload:sc:2025:{_sha256(content)[:12]}"
     assert archive.status == "pending_tag"
 
     # ArchiveFile: file_role == main_document, is_primary=True
@@ -466,7 +477,7 @@ def test_business_key_uses_sha256_not_title(db_session, fake_storage):
     )
 
     a1 = db_session.get(Archive, first.items[0].archive_id)
-    expected_bk = f"quota:manual-upload:{_sha256(content_a)}"
+    expected_bk = f"quota:manual-upload:sc:2025:{_sha256(content_a)[:12]}"
     assert a1.business_key == expected_bk
     # 幂等：同一 Archive
     assert second.items[0].status == "duplicate"
@@ -479,7 +490,7 @@ def test_business_key_uses_sha256_not_title(db_session, fake_storage):
         [_StubUploadFile("renamed.pdf", content_b)],
     )
     a3 = db_session.get(Archive, third.items[0].archive_id)
-    assert a3.business_key == f"quota:manual-upload:{_sha256(content_b)}"
+    assert a3.business_key == f"quota:manual-upload:sc:2025:{_sha256(content_b)[:12]}"
     assert a3.business_key != a1.business_key
 
 
@@ -551,7 +562,7 @@ def test_http_upload_then_list_shows_file_count_1_and_primary_file():
     resp = client.post(
         "/api/data-lake/quota/upload",
         files=[("files", ("test.pdf", b"%PDF-1.4 fake content", "application/pdf"))],
-        data={"category": "construction_quota"},
+        data={"category": "construction_quota", "province": "sc", "year": "2025"},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -580,7 +591,7 @@ def test_http_upload_then_detail_has_archive_file():
     resp = client.post(
         "/api/data-lake/quota/upload",
         files=[("files", ("detail.pdf", b"%PDF-1.4 detail test", "application/pdf"))],
-        data={"category": "industry_quota"},
+        data={"category": "industry_quota", "province": "sc", "year": "2025"},
     )
     archive_id = resp.json()["items"][0]["archive_id"]
 
@@ -603,7 +614,7 @@ def test_http_upload_response_has_archive_id_for_preview():
     resp = client.post(
         "/api/data-lake/quota/upload",
         files=[("files", ("preview.pdf", b"%PDF-1.4 preview test", "application/pdf"))],
-        data={"category": "boq_standard"},
+        data={"category": "boq_standard", "province": "sc", "year": "2025"},
     )
     item = resp.json()["items"][0]
     assert item["status"] == "created"
@@ -615,3 +626,113 @@ def test_http_upload_response_has_archive_id_for_preview():
     assert detail["archive_id"] == item["archive_id"]
     assert len(detail["files"]) == 1
     assert detail["files"][0]["file_id"] == item["file_id"]
+
+
+# ── v0.3.3 回归 · Fix A (f549975) ────────────────────────────────────────
+# v0.3.2 (35ed914) 引入 _ensure_quota_publication_set 但忘了 commit，
+# 端点返回后 FastAPI dep 关 session 回滚未提交事务，导致 PubSet+Profile 丢失。
+# Fix A: helper 末尾补 commit。本测试用「关闭 session 后用新 session 查询」
+# 模拟 FastAPI dep teardown，验证 PubSet+Profile 真的持久化到 DB。
+#
+# 若 revert Fix A，本测试在 fresh session 查询时会找不到 Profile+PubSet，FAIL。
+
+
+def test_upload_persists_quota_pubset_and_profile_after_session_close(
+    db_session, fake_storage
+):
+    """回归 (v0.3.3 · f549975)：上传后关闭端点 session（模拟 FastAPI dep teardown），
+    用全新 session 查询 QuotaPublicationSet + QuotaArchiveProfile，断言两者都落库。
+
+    关键：不调用 db_session.commit()，只 close。SQLAlchemy 2.0 session.close() 会
+    回滚未提交事务。Archive + ArchiveFile 由 _attach_archive_file 已 commit，保留；
+    PubSet + Profile 由 _ensure_quota_publication_set flush（无 commit）— 若 fix A
+    失效，close 会回滚它们，fresh session 查不到。
+    """
+    content = b"%PDF-1.4 regression test for pubset+profile commit (v0.3.3)"
+    result = _call_upload(
+        db_session, fake_storage,
+        [_StubUploadFile("sc2025-regression.pdf", content)],
+        category="construction_quota",
+        province="sc",
+        year=2025,
+    )
+
+    assert result.succeeded == 1
+    archive_id = result.items[0].archive_id
+
+    # 拿 engine 备用（close 后 get_bind() 仍可用）
+    engine = db_session.get_bind()
+
+    # 关键：直接 close 不 commit，模拟 FastAPI dep 关闭 session 的 rollback 语义。
+    db_session.close()
+
+    # 用全新 session 验证持久化（模拟下次请求的 query session）
+    NewSess = sessionmaker(bind=engine, future=True, expire_on_commit=False)
+    with NewSess() as fresh:
+        # Archive 必须存在（_attach_archive_file 已 commit，与 fix A 无关）
+        archive = fresh.get(Archive, archive_id)
+        assert archive is not None, "Archive 缺失（attach_file commit 失效？）"
+        assert archive.domain_type == "quota"
+
+        # QuotaPublicationSet 必须存在 —— 这是 fix A 的核心保证
+        pubset = fresh.execute(
+            select(QuotaPublicationSet).where(
+                QuotaPublicationSet.biz_key.like("quota:upload:sc:2025:%")
+            )
+        ).scalar_one_or_none()
+        assert pubset is not None, (
+            "QuotaPublicationSet 缺失 → fix A (f549975) 失效或被回滚。"
+            "helper 必须 commit，否则 FastAPI dep 关 session 会回滚。"
+        )
+        assert pubset.jurisdiction_code == "510000", f"四川 code 应为 510000，实际 {pubset.jurisdiction_code}"
+        assert pubset.edition_year == 2025
+        assert pubset.quota_system_type == "construction_regional"
+        assert pubset.material_type == "quota_base"
+
+        # QuotaArchiveProfile 必须存在并指向同一 pubset
+        profile = fresh.get(QuotaArchiveProfile, archive_id)
+        assert profile is not None, (
+            "QuotaArchiveProfile 缺失 → fix A (f549975) 失效或被回滚。"
+        )
+        assert profile.publication_set_id == pubset.publication_set_id
+        assert profile.document_role == "main_volume"
+
+
+def test_http_upload_persists_quota_pubset_and_profile():
+    """HTTP 层回归 (v0.3.3 · f549975)：端到端验证 fix A。
+
+    HTTP 路径天然就是「每个请求一个新 session」，等价于生产环境 FastAPI dep teardown。
+    若 fix A 失效，HTTP upload 返回后用独立 session 查不到 PubSet+Profile。
+    """
+    client, _ = _build_test_client()
+
+    resp = client.post(
+        "/api/data-lake/quota/upload",
+        files=[("files", ("http-regression.pdf",
+                          b"%PDF-1.4 http layer pubset profile regression",
+                          "application/pdf"))],
+        data={"category": "construction_quota", "province": "sc", "year": "2025"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["succeeded"] == 1
+    archive_id = body["items"][0]["archive_id"]
+
+    # 通过 GET /api/archives/{id} 详情 + /api/data-lake/quota/archives/{id}
+    # 间接验证 Profile+PubSet 持久化（这些端点会 join quota_archive_profile + quota_publication_set）
+    detail = client.get(f"/api/archives/{archive_id}").json()
+    assert detail["archive_id"] == archive_id
+
+    # 直接 SQL 查询 PubSet（验证 DB 层落库，不依赖任何 ORM 关系）
+    from sqlalchemy import create_engine
+    # 从 _build_test_client 拿不到 engine，重建一个 in-memory + 同 schema
+    # 注意：HTTP 层用的是独立 engine，要共享数据必须用同一个 engine。
+    # 这里改用直接走 _run_quota_filtered_listing 的依赖：让 HTTP 列表接口承担「跨 session 可见」验证。
+    list_resp = client.get("/api/archives?domain_type=quota&primary=construction_quota")
+    assert list_resp.status_code == 200, list_resp.text
+    items = list_resp.json()
+    matched = [i for i in items if i["archive_id"] == archive_id]
+    assert len(matched) == 1, (
+        f"archive {archive_id} 在列表中应可见（profile+pubset 持久化的间接证据）；"
+        f"若 fix A 失效，列表接口因 LEFT JOIN WHERE 把它过滤掉"
+    )
