@@ -182,7 +182,9 @@ def _facet_years(session: Session, primary: str | None = None, jurisdiction_code
             QuotaPublicationSet.edition_label,
             func.count().label("ed_cnt"),
         ).where(
-            QuotaPublicationSet.edition_year == y,
+            # 注意: edition_year 是 int 列, 必须用整数 year 比较
+            # 用 str(year)==y 会触发 psycopg 'integer = character varying' 500
+            QuotaPublicationSet.edition_year == year,
             QuotaPublicationSet.edition_label.isnot(None),
         )
         if jurisdiction_code:

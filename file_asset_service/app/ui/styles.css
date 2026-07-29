@@ -281,6 +281,16 @@ select:focus-visible {
   font-weight: 500;
 }
 
+/* HOTFIX 2026-07-29: 替代原生 [disabled] 的视觉灰态。
+   [disabled] 会吞 click 事件让用户"按了没反应"。
+   改用 aria-disabled + 自定义样式，让 submitUpload 自己弹 toast。 */
+.primary-button.is-disabled-soft,
+.primary-button[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: auto; /* 关键：保证 click 还能走到 delegated handler */
+}
+
 .secondary-button,
 .warning-button,
 .ghost-button,

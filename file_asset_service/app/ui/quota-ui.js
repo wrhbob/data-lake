@@ -571,9 +571,10 @@
       case "scope": case "scopes":
         return fx.scopes || [];
       case "jurisdiction": case "jurisdictions": {
-        var fromFx = fx.jurisdictions || [];
-        if (fromFx.length) return fromFx;
-        // 后端未返回 jurisdictions → 静态兜底：31 省 + 深圳市 = 32 条；用 short 字段（紧凑 chip）
+        // HOTFIX-QA-CHIP-001 · 2026-07-29：地区 chip 一直显示 32 个省级单位（31 省 + 深圳市），
+        // 不读后端 fx.jurisdictions。原因：之前 /facets 500 时静态兜底一直显示，
+        // 修好 500 后 DB 里只有四川有档案 → chip 坍缩到 1 个，影响其他省份可见性。
+        // 静态 chip 与"是否有数据"解耦 — 后端 facets 数据驱动的筛选命中数另在他处展示。
         return PROVINCE_REGIONS.map(function (r) {
           return { value: r.code, label: r.short || r.label };
         });
@@ -1416,6 +1417,9 @@
   }
 
   // 轻量：只刷新提交按钮 disabled（不重建表单，避免 input 失焦）
+  // 注意: 2026-07-29 我们去掉了 disabled 属性,
+  // 因为 disabled 会吞掉 click 事件, 用户点了没反应又看不到原因。
+  // 现在 submit 按钮永远可点击, 缺字段由 submitUpload 内 setToast 告知。
   function renderUploadSubmitButton() {
     var btn = document.querySelector("[data-upload-submit='1']");
     if (!btn) return;
@@ -1423,8 +1427,9 @@
     var yearNum = parseInt(u.year, 10);
     var yearValid = u.year && !isNaN(yearNum) && yearNum >= 1900 && yearNum <= 2100;
     var canSubmit = (u.files || []).length > 0 && u.category && u.province && yearValid && !u.submitting;
-    if (canSubmit) btn.removeAttribute("disabled");
-    else btn.setAttribute("disabled", "");
+    // 仅做视觉提示（按钮变色/边框），不动 disabled 属性
+    if (canSubmit) btn.classList && btn.classList.remove("is-disabled-soft");
+    else btn.classList && btn.classList.add("is-disabled-soft");
   }
 
   function renderUploadModal() {
@@ -1509,7 +1514,7 @@
           <button class="secondary-button" type="button" data-quota-action="close-upload">取消</button>
           <button class="primary-button" type="button" data-quota-action="submit-upload"
             data-upload-submit="1"
-            ${canSubmit ? "" : "disabled"}
+            ${canSubmit ? "" : 'aria-disabled="true"'}
             ${u.submitting ? '<i class="spinner"></i>' : ""}>
             ${u.submitting ? '<span>上传中...</span>' : '<i data-lucide="upload-cloud"></i><span>上传并保存</span>'}
           </button>
@@ -1521,21 +1526,43 @@
 
   async function submitUpload() {
     const u = state.upload;
-    if (!u || (u.files || []).length === 0 || u.submitting) return;
-    // 前端二次校验：files + category + province + year 都必填；year 范围 1900-2100
-    if (!u.category) { setToast("请选择资料分类"); return; }
-    if (!u.province) { setToast("请选择省份"); return; }
-    var yearNum = parseInt(u.year, 10);
-    if (!u.year || isNaN(yearNum) || yearNum < 1900 || yearNum > 2100) {
-      setToast("请输入合法年份（1900-2100）"); return;
+    // 2026-07-29 v2: 之前仅看 state.upload.files —— 但我们已经发现 state
+    // 可能与 DOM 不同步（input 有 files，state 是空）。现在以 DOM <input type="file">
+    // 为准 + state 作 fallback, 同时把多个缺失字段合并成一条 toast。
+    if (!u) { setToast("上传状态丢失，请重新打开弹窗"); return; }
+    if (u.submitting) { setToast("正在上传中，请稍候"); return; }
+
+    // 真相源：DOM 中当前的 file input
+    var liveFiles = [];
+    var fileInput = document.getElementById("quotaUploadFile");
+    if (fileInput && fileInput.files && fileInput.files.length > 0) {
+      liveFiles = Array.from(fileInput.files);
     }
-    if (typeof global.fetch !== "function") { setToast("fetch 不可用"); return; }
+    // 回退：如果 user 已经选了文件被 close/reopen 流程吃掉，至少 state 还能补救
+    var effectiveFiles = liveFiles.length > 0 ? liveFiles : (u.files || []);
+    // 同步回 state（保守起见）
+    u.files = effectiveFiles;
+
+    var yearNum = parseInt(u.year, 10);
+    var yearValid = u.year && !isNaN(yearNum) && yearNum >= 1900 && yearNum <= 2100;
+
+    // 一次性收集所有缺失字段
+    var missing = [];
+    if (effectiveFiles.length === 0) missing.push("文件");
+    if (!u.category) missing.push("分类");
+    if (!u.province) missing.push("省份");
+    if (!yearValid) missing.push("合法年份(1900-2100)");
+    if (typeof global.fetch !== "function") missing.push("fetch 不可用");
+    if (missing.length > 0) {
+      setToast("请补齐：" + missing.join("、"));
+      return;
+    }
 
     u.submitting = true;
-    renderUploadModal(); // 立刻禁用按钮 + 显示「上传中...」
+    renderUploadModal(); // 立刻显示「上传中...」状态
 
     const formData = new FormData();
-    (u.files || []).forEach(function (f) { formData.append("files", f, f.name); });
+    effectiveFiles.forEach(function (f) { formData.append("files", f, f.name); });
     formData.append("category", u.category);
     formData.append("province", u.province);
     formData.append("year", String(yearNum));
