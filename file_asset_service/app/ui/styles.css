@@ -3766,9 +3766,9 @@ a.rail-button {
   height: 100vh;
   overflow-y: auto;
   padding: 20px 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
+}
+.quota-shell > * + * {
+  margin-top: 14px;
 }
 .quota-header {
   display: flex;
