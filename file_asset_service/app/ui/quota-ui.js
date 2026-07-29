@@ -225,8 +225,6 @@
       open: false,
       archiveId: "",
       title: "",
-      // 输入框值（用于二次确认）
-      confirmInput: "",
       submitting: false,
       // 后端报错信息（422 等），modal 不关闭以保留反馈
       error: "",
@@ -236,7 +234,6 @@
       open: false,
       archiveId: "",
       title: "",
-      confirmInput: "",
       submitting: false,
       error: "",
     },
@@ -905,7 +902,6 @@
     }
     modal.hidden = false;
     modal.setAttribute("aria-hidden", "false");
-    var titleMatch = (d.confirmInput || "") === (d.title || "");
     var errorHtml = d.error
       ? '<div class="quota-delete-error" role="alert"><i data-lucide="alert-circle"></i><span>' +
         escapeHtml(d.error) + '</span></div>'
@@ -928,43 +924,27 @@
             <code>parse_job</code> 记录；<strong>原始 PDF 与档案元数据保留</strong>，回到未解析态可重新解析。
           </p>
           <p class="quota-delete-archive-title">档案：<strong>${escapeHtml(d.title || "—")}</strong></p>
-          <label class="quota-delete-input-row">
-            <span>请输入档案标题以确认</span>
-            <input type="text" class="quota-field-input" data-quota-input="delete-parse-confirm"
-              value="${escapeHtml(d.confirmInput || "")}" placeholder="完整档案标题" autocomplete="off" />
-          </label>
           ${errorHtml}
         </div>
         <footer class="quota-compose-footer">
           <button class="secondary-button" type="button" data-quota-action="close-delete-parse">取消</button>
           <button class="primary-button quota-delete-confirm-btn" type="button"
-            data-quota-action="submit-delete-parse"
-            aria-disabled="${titleMatch ? "false" : "true"}">
+            data-quota-action="submit-delete-parse">
             <i data-lucide="trash-2"></i>
-            <span>${d.submitting ? "删除中…" : "删除解析结果"}</span>
+            <span>${d.submitting ? "删除中…" : "确认删除解析结果"}</span>
           </button>
         </footer>
       </form>
     `;
   }
 
-  // 只刷新确认按钮 disabled 视觉（避免 input 失焦）
-  function refreshDeleteParseConfirmBtn() {
-    var btn = document.querySelector("[data-quota-action='submit-delete-parse']");
-    if (!btn) return;
-    var d = state.deleteParse || {};
-    var titleMatch = (d.confirmInput || "") === (d.title || "");
-    btn.setAttribute("aria-disabled", titleMatch ? "false" : "true");
-    var label = btn.querySelector("span");
-    if (label) label.textContent = d.submitting ? "删除中…" : "删除解析结果";
-  }
+  // 二次确认仅靠弹窗文案承载，弹窗内无输入项，点击确认按钮即提交后端
 
   function openDeleteParseModal(archiveId, title) {
     state.deleteParse = {
       open: true,
       archiveId: archiveId || "",
       title: title || "",
-      confirmInput: "",
       submitting: false,
       error: "",
     };
@@ -977,7 +957,6 @@
       open: false,
       archiveId: "",
       title: "",
-      confirmInput: "",
       submitting: false,
       error: "",
     };
@@ -998,7 +977,6 @@
     }
     modal.hidden = false;
     modal.setAttribute("aria-hidden", "false");
-    var titleMatch = (d.confirmInput || "") === (d.title || "");
     var errorHtml = d.error
       ? '<div class="quota-delete-error" role="alert"><i data-lucide="alert-circle"></i><span>' +
         escapeHtml(d.error) + '</span></div>'
@@ -1022,18 +1000,12 @@
             <br/><strong>此操作不可恢复。</strong>
           </p>
           <p class="quota-delete-archive-title">档案：<strong>${escapeHtml(d.title || "—")}</strong></p>
-          <label class="quota-delete-input-row">
-            <span>请输入档案标题以确认</span>
-            <input type="text" class="quota-field-input" data-quota-input="delete-archive-confirm"
-              value="${escapeHtml(d.confirmInput || "")}" placeholder="完整档案标题" autocomplete="off" />
-          </label>
           ${errorHtml}
         </div>
         <footer class="quota-compose-footer">
           <button class="secondary-button" type="button" data-quota-action="close-delete-archive">取消</button>
           <button class="primary-button quota-delete-confirm-btn" type="button"
-            data-quota-action="submit-delete-archive"
-            aria-disabled="${titleMatch ? "false" : "true"}">
+            data-quota-action="submit-delete-archive">
             <i data-lucide="trash-2"></i>
             <span>${d.submitting ? "删除中…" : "确认删除档案"}</span>
           </button>
@@ -1042,22 +1014,11 @@
     `;
   }
 
-  function refreshDeleteArchiveConfirmBtn() {
-    var btn = document.querySelector("[data-quota-action='submit-delete-archive']");
-    if (!btn) return;
-    var d = state.deleteArchive || {};
-    var titleMatch = (d.confirmInput || "") === (d.title || "");
-    btn.setAttribute("aria-disabled", titleMatch ? "false" : "true");
-    var label = btn.querySelector("span");
-    if (label) label.textContent = d.submitting ? "删除中…" : "确认删除档案";
-  }
-
   function openDeleteArchiveModal(archiveId, title) {
     state.deleteArchive = {
       open: true,
       archiveId: archiveId || "",
       title: title || "",
-      confirmInput: "",
       submitting: false,
       error: "",
     };
@@ -1070,7 +1031,6 @@
       open: false,
       archiveId: "",
       title: "",
-      confirmInput: "",
       submitting: false,
       error: "",
     };
@@ -1078,21 +1038,18 @@
   }
 
   // 后端契约见 web-frontend/SPEC.md §5.10：DELETE /api/data-lake/quota/archives/{id}
+  // 点击即提交；归档态不可恢复的提示由弹窗承担，UI 不再要求输入标题
   function submitDeleteArchive() {
     var d = state.deleteArchive || {};
     if (!d.open || d.submitting) return;
-    if ((d.confirmInput || "") !== (d.title || "")) {
-      state.deleteArchive.error = "档案标题输入不匹配，请重新输入完整标题。";
-      renderDeleteArchiveModal();
-      return;
-    }
     if (!d.archiveId) {
       closeDeleteArchiveModal();
       return;
     }
     state.deleteArchive.submitting = true;
     state.deleteArchive.error = "";
-    refreshDeleteArchiveConfirmBtn();
+    renderDeleteArchiveModal();
+    refreshIcons();
     var archiveId = d.archiveId;
     var p = (state.api && state.api.deleteArchive)
       ? state.api.deleteArchive(archiveId)
@@ -1119,23 +1076,18 @@
 
   // 提交删除（POST /api/data-lake/quota/archives/{id}/parse/delete）
   // 后端契约见 web-frontend/SPEC.md §5.8（v0.4 强化版）
-  // 二次确认已由 UI 验证（confirmInput === title）；这里再做一道校验
+  // 点击即提交，弹窗内无输入项
   function submitDeleteParse() {
     var d = state.deleteParse || {};
     if (!d.open || d.submitting) return;
-    if ((d.confirmInput || "") !== (d.title || "")) {
-      // 二次确认不通过：不调后端，直接提示
-      state.deleteParse.error = "档案标题输入不匹配，请重新输入完整标题。";
-      renderDeleteParseModal();
-      return;
-    }
     if (!d.archiveId) {
       closeDeleteParseModal();
       return;
     }
     state.deleteParse.submitting = true;
     state.deleteParse.error = "";
-    refreshDeleteParseConfirmBtn();
+    renderDeleteParseModal();
+    refreshIcons();
     var archiveId = d.archiveId;
     var p = (state.api && state.api.deleteParseResult)
       ? state.api.deleteParseResult(archiveId)
@@ -2290,11 +2242,6 @@
       var pdDelRealId = pdDelId ? decodeURIComponent(pdDelId) : "";
       state.dropdown = { open: false, archiveId: "", variant: "pending" };
       openDeleteParseModal(pdDelRealId, pdDelTitle);
-      // focus 到 input 等 DOM 挂载完
-      setTimeout(function () {
-        var inp = document.querySelector("[data-quota-input='delete-parse-confirm']");
-        if (inp) inp.focus();
-      }, 0);
       return;
     }
     // ── 危险操作：删除档案（#10，行 ⋯ 下拉入口；按 SPEC §3.1.4 与 #9 严格区分）──
@@ -2307,10 +2254,6 @@
       var adDelRealId = adDelId ? decodeURIComponent(adDelId) : "";
       state.dropdown = { open: false, archiveId: "", variant: "pending" };
       openDeleteArchiveModal(adDelRealId, adDelTitle);
-      setTimeout(function () {
-        var inp = document.querySelector("[data-quota-input='delete-archive-confirm']");
-        if (inp) inp.focus();
-      }, 0);
       return;
     }
     if (action === "close-delete-parse") {
@@ -2559,23 +2502,7 @@
     const t = event.target;
     if (!t) return;
 
-    // ── 删除解析结果 modal 的确认输入 ──────────────────────────────
-    if (state.deleteParse && state.deleteParse.open) {
-      if (t.dataset && t.dataset.quotaInput === "delete-parse-confirm") {
-        state.deleteParse.confirmInput = t.value || "";
-        // 只刷新按钮 disabled 视觉，不重建 modal——避免 input 失焦
-        refreshDeleteParseConfirmBtn();
-        return;
-      }
-    }
-    // ── 删除档案 modal 的确认输入（#10）───────────────────────────
-    if (state.deleteArchive && state.deleteArchive.open) {
-      if (t.dataset && t.dataset.quotaInput === "delete-archive-confirm") {
-        state.deleteArchive.confirmInput = t.value || "";
-        refreshDeleteArchiveConfirmBtn();
-        return;
-      }
-    }
+    // 删除 modal 内已无输入项；input/change 事件只在上传弹窗与 compose 弹窗触发
 
     // ── 上传弹窗的输入处理（不依赖 state.compose）──────────────────────
     if (state.upload && state.upload.open) {
@@ -2749,10 +2676,10 @@
     state.upload = { open: false, files: [], category: "", province: "", year: "", submitting: false };
     state.dropdown = { open: false, archiveId: "", variant: "pending" };
     state.deleteParse = {
-      open: false, archiveId: "", title: "", confirmInput: "", submitting: false, error: "",
+      open: false, archiveId: "", title: "", submitting: false, error: "",
     };
     state.deleteArchive = {
-      open: false, archiveId: "", title: "", confirmInput: "", submitting: false, error: "",
+      open: false, archiveId: "", title: "", submitting: false, error: "",
     };
     const shell = $("#quotaShell");
     if (shell) shell.hidden = true;

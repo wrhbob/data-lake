@@ -1730,3 +1730,59 @@ def _format_qa_report_json(archive: Archive) -> dict:
         "checks": [],
         "note": "尚未实现真模式 QA 报告生成；待 quota_parser worker 上线。",
     }
+
+
+# ── §5.10 DELETE /archives/{archive_id} ────────────────────────────────
+# web-frontend SPEC §3.1.4 危险操作 #10 — 整档删除（不可恢复）。
+# 行为契约：
+#   1. 校验 archive 存在；domain_type 必须为 quota（防止误删其他域）
+#   2. 写审计日志 action=quota_archive_deleted（best-effort，失败不阻断）
+#   3. SQLAlchemy cascade 自动删除 archive_file（all, delete-orphan 已在模型上声明）
+#   4. 手动删 quota_archive_profile 1:1 行（无级联 FK）
+#   5. 删 Archive 主表行
+#   6. MinIO 上的 PDF 原件 + 解析产物 留待运维 GC（与 parse/delete 同样限制，
+#      ObjectStore Protocol v1 暂未加 delete_object，避免破坏 S3ObjectStore）
+#
+# 与 #9 (parse/delete) 的区别：#9 保留原 PDF 与 archive 元数据；#10 全删。
+@router.delete("/archives/{archive_id}")
+def delete_archive(
+    response: Response,
+    archive_id: str,
+    session: Session = Depends(get_db_session),
+):
+    """整档删除（不可恢复）。
+
+    仅允许 quota 域；其他域走各自域 API。
+    """
+    archive = session.get(Archive, archive_id)
+    if archive is None:
+        raise HTTPException(404, detail="ARCHIVE_NOT_FOUND")
+    if archive.domain_type != "quota":
+        raise HTTPException(403, detail="WRONG_DOMAIN")
+
+    # 1. 审计（best-effort）
+    try:
+        from app.models import AuditLog
+        session.add(AuditLog(
+            actor_type="api",
+            action="quota_archive_deleted",
+            target_type="archive",
+            target_id=archive.archive_id,
+        ))
+    except Exception:
+        pass
+
+    # 2. 手动删 quota_archive_profile（FK 没 cascade）
+    session.execute(
+        delete(QuotaArchiveProfile).where(QuotaArchiveProfile.archive_id == archive_id)
+    )
+
+    # 3. 删主表行 — archive_file 由 ORM cascade="all, delete-orphan" 自动级联
+    session.delete(archive)
+    session.commit()
+
+    return _json_ok(response, {
+        "deleted": True,
+        "archive_id": archive_id,
+        "note": "MinIO 上的原件 + 解析产物留待运维 GC",
+    })
