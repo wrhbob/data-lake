@@ -1837,7 +1837,10 @@
       return;
     }
     if (action.indexOf("set-editionYear:") === 0) {
-      var newYear = action.slice(17);
+      // v0.3.4 修复：slice(17) 是 off-by-one。"set-editionYear:" 是 16 字符，
+      // slice(17) 会切掉首字符 → "2018" 变 "018" → Number("018")=18 → 后端查 edition_year=18 返 0 条，
+      // 同时 selected==="018" 与 chip value "2018" 不匹配 → 无蓝色高亮。一个 bug，两个症状。
+      var newYear = action.slice(16);
       if (newYear !== state.filters.editionYear) {
         state.filters.editionYear = newYear;
         // 年份切换：清空版次
