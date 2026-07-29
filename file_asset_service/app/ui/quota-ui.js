@@ -1267,19 +1267,57 @@
   // 已扩展接受 6 个 quota 域参数（primary / jurisdiction_code / industry_sector_code /
   // edition_year / edition_label / discipline_code），前端这里把 currentArchiveFilters()
   // 的产出作为 query string 拼上去。
+  //
+  // 2026-07-29 v0.3.3 Plan C：加严格输入校验器 `_sanitizeArchiveFilters`。
+  // 根因：当前端任何 chip 状态漏过 currentArchiveFilters()（例如版本遗留路径），
+  // 字符串 "all" 会作为 edition_year 值发到后端，触发 FastAPI 422 int_parsing。
+  // 校验器统一拦截：白名单 keys + 类型强转 + "all"/空值丢弃。
+  // 这层防御独立于 currentArchiveFilters()，无论上游怎么传都安全。
+  const _ARCHIVE_FILTER_SCHEMA = Object.freeze({
+    search: { kind: "string" },
+    primary: { kind: "string" },
+    jurisdiction_code: { kind: "string" },
+    industry_sector_code: { kind: "string" },
+    edition_year: { kind: "int" },        // 后端 int | None，字符串 → 422
+    edition_label: { kind: "string" },
+    discipline_code: { kind: "string" },
+  });
+  function _sanitizeArchiveFilters(filters) {
+    const out = {};
+    if (!filters || typeof filters !== "object") return out;
+    Object.keys(filters).forEach((k) => {
+      const spec = _ARCHIVE_FILTER_SCHEMA[k];
+      if (!spec) return;  // 未知 key 直接丢弃（防御 typo / 调试残留字段）
+      let v = filters[k];
+      // 哨兵 + 空值一律丢弃（"all" / undefined / null / 空串）
+      if (v === undefined || v === null) return;
+      if (typeof v === "string") {
+        const trimmed = v.trim();
+        if (trimmed === "" || trimmed === "all") return;
+        v = trimmed;
+      }
+      if (spec.kind === "int") {
+        // 必须是数字（含 "2026" 字符串）。非数字 → 丢，绝不让 422 出门
+        const n = typeof v === "number" ? v : Number(v);
+        if (!Number.isFinite(n) || !Number.isInteger(n)) return;
+        out[k] = n;
+      } else {
+        out[k] = String(v);
+      }
+    });
+    return out;
+  }
+
   async function loadQuotaArchivesGeneric(filters) {
     if (typeof global.fetch !== "function") {
       return { status: CAP.ERROR, data: [], error: "fetch 不可用" };
     }
+    const safe = _sanitizeArchiveFilters(filters);
     const params = new URLSearchParams();
     params.set("domain_type", "quota");
-    if (filters && typeof filters === "object") {
-      Object.keys(filters).forEach((k) => {
-        const v = filters[k];
-        if (v === undefined || v === null || v === "") return;
-        params.set(k, String(v));
-      });
-    }
+    Object.keys(safe).forEach((k) => {
+      params.set(k, String(safe[k]));
+    });
     params.set("limit", "500");
     try {
       const response = await global.fetch("/api/archives?" + params.toString(), {
