@@ -10,14 +10,15 @@ from typing import Annotated
 from urllib.parse import quote
 from zipfile import BadZipFile, ZipFile
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.archive_rules import build_quota_business_key
 from app.archive_service import (
+    _archive_summary_rows,
     attach_file as attach_archive_file,
     count_archives,
     create_archive,
@@ -32,6 +33,159 @@ from app.archive_service import (
 from app.basic_auth import BasicAuthMiddleware
 from app.assets import register_asset
 from app.collection import create_collection_task, create_data_source, list_collection_tasks, list_data_sources
+def _run_quota_filtered_listing(
+    session: Session,
+    *,
+    domain_type: str | None,
+    status: str | None,
+    region_code: str | None,
+    channel_type: str | None,
+    tenant_code: str | None,
+    source_id: str | None,
+    search: str | None,
+    primary: str | None,
+    jurisdiction_code: str | None,
+    industry_sector_code: str | None,
+    edition_year: int | None,
+    edition_label: str | None,
+    discipline_code: str | None,
+    limit: int,
+    offset: int,
+    mirror: FileMirror | None,
+) -> tuple[list[dict[str, object]], int]:
+    """Quota-domain listing with the 6 chip-side filters the generic endpoint
+    was missing. Mirrors quota_api.list_quota_archives (quota_api.py:285) but
+    routes results through _archive_summary_rows so primary_file is preserved
+    for inline preview.
+
+    Activation rule: any of the 6 quota params must be supplied AND domain_type
+    must equal 'quota' (or be None — caller checks). Pure generic listings stay
+    on the legacy code path so behavior is identical for non-quota callers.
+    """
+    base = (
+        select(Archive, QuotaArchiveProfile, QuotaPublicationSet)
+        .join(
+            QuotaArchiveProfile,
+            QuotaArchiveProfile.archive_id == Archive.archive_id,
+            isouter=True,
+        )
+        .join(
+            QuotaPublicationSet,
+            QuotaPublicationSet.publication_set_id == QuotaArchiveProfile.publication_set_id,
+            isouter=True,
+        )
+        .where(Archive.is_withdrawn.is_(False))
+    )
+    if domain_type:
+        base = base.where(Archive.domain_type == domain_type)
+    if status:
+        base = base.where(Archive.status == status)
+    if region_code:
+        base = base.where(Archive.region_code == region_code)
+    if channel_type:
+        base = base.where(Archive.channel_type == channel_type)
+    if tenant_code:
+        base = base.where(Archive.tenant_code == tenant_code)
+    if source_id:
+        base = base.where(Archive.source_id == source_id)
+    if search:
+        pattern = f"%{search}%"
+        base = base.where(
+            or_(Archive.title.ilike(pattern), Archive.business_key.ilike(pattern))
+        )
+
+    # ── quota-specific chip filters ─────────────────────────────
+    if primary == "construction_regional":
+        base = base.where(QuotaPublicationSet.quota_system_type == "construction_regional")
+    elif primary == "industry_specialty":
+        base = base.where(QuotaPublicationSet.quota_system_type == "industry_specialty")
+    elif primary == "boq_standard":
+        base = base.where(QuotaPublicationSet.material_type == "boq_standard")
+    if jurisdiction_code:
+        base = base.where(QuotaPublicationSet.jurisdiction_code == jurisdiction_code)
+    if industry_sector_code:
+        base = base.where(QuotaPublicationSet.industry_sector_code == industry_sector_code)
+    if edition_year is not None:
+        base = base.where(QuotaPublicationSet.edition_year == edition_year)
+    if edition_label:
+        base = base.where(QuotaPublicationSet.edition_label == edition_label)
+    if discipline_code:
+        base = base.where(QuotaArchiveProfile.discipline_code == discipline_code)
+
+    # Count (mirror the same WHERE; do not order/offset/limit)
+    count_stmt = select(func.count()).select_from(Archive).where(Archive.is_withdrawn.is_(False))
+    if domain_type:
+        count_stmt = count_stmt.where(Archive.domain_type == domain_type)
+    if status:
+        count_stmt = count_stmt.where(Archive.status == status)
+    if region_code:
+        count_stmt = count_stmt.where(Archive.region_code == region_code)
+    if channel_type:
+        count_stmt = count_stmt.where(Archive.channel_type == channel_type)
+    if tenant_code:
+        count_stmt = count_stmt.where(Archive.tenant_code == tenant_code)
+    if source_id:
+        count_stmt = count_stmt.where(Archive.source_id == source_id)
+    if search:
+        pattern = f"%{search}%"
+        count_stmt = count_stmt.where(
+            or_(Archive.title.ilike(pattern), Archive.business_key.ilike(pattern))
+        )
+    # quota filter contributions need a join to be meaningful for the count
+    if primary or jurisdiction_code or industry_sector_code or edition_year is not None or edition_label:
+        count_stmt = count_stmt.join(
+            QuotaArchiveProfile,
+            QuotaArchiveProfile.archive_id == Archive.archive_id,
+            isouter=True,
+        ).join(
+            QuotaPublicationSet,
+            QuotaPublicationSet.publication_set_id == QuotaArchiveProfile.publication_set_id,
+            isouter=True,
+        )
+        if primary == "construction_regional":
+            count_stmt = count_stmt.where(QuotaPublicationSet.quota_system_type == "construction_regional")
+        elif primary == "industry_specialty":
+            count_stmt = count_stmt.where(QuotaPublicationSet.quota_system_type == "industry_specialty")
+        elif primary == "boq_standard":
+            count_stmt = count_stmt.where(QuotaPublicationSet.material_type == "boq_standard")
+        if jurisdiction_code:
+            count_stmt = count_stmt.where(QuotaPublicationSet.jurisdiction_code == jurisdiction_code)
+        if industry_sector_code:
+            count_stmt = count_stmt.where(QuotaPublicationSet.industry_sector_code == industry_sector_code)
+        if edition_year is not None:
+            count_stmt = count_stmt.where(QuotaPublicationSet.edition_year == edition_year)
+        if edition_label:
+            count_stmt = count_stmt.where(QuotaPublicationSet.edition_label == edition_label)
+    if discipline_code:
+        # needs the profile join if not already present
+        if not (primary or jurisdiction_code or industry_sector_code or edition_year is not None or edition_label):
+            count_stmt = count_stmt.join(
+                QuotaArchiveProfile,
+                QuotaArchiveProfile.archive_id == Archive.archive_id,
+                isouter=True,
+            )
+        count_stmt = count_stmt.where(QuotaArchiveProfile.discipline_code == discipline_code)
+
+    total_count = int(session.scalar(count_stmt) or 0)
+
+    # Paginated, ordered list
+    capped_limit = max(1, min(limit, 500))
+    safe_offset = max(0, offset)
+    paginated = (
+        base.order_by(
+            Archive.publish_date.desc().nullslast(),
+            Archive.created_at.desc(),
+            Archive.archive_id.desc(),
+        )
+        .offset(safe_offset)
+        .limit(capped_limit)
+    )
+    rows = session.execute(paginated).all()
+    archives = [r[0] for r in rows]
+    items = _archive_summary_rows(session, archives, mirror=mirror)
+    return items, total_count
+
+
 from app.config import get_settings
 from app.coverage_backfill import run_coverage_backfill
 from app.crawl_campaign import campaign_to_dict, create_campaign, list_campaigns
@@ -54,7 +208,17 @@ from app.info_price_downstream import (
     list_info_price_extracts,
     load_extract_payload,
 )
-from app.models import Archive, ArchiveFile, CollectionTask, DataSource, FileAsset, FileProcessing, IngestEvent
+from app.models import (
+    Archive,
+    ArchiveFile,
+    CollectionTask,
+    DataSource,
+    FileAsset,
+    FileProcessing,
+    IngestEvent,
+    QuotaArchiveProfile,
+    QuotaPublicationSet,
+)
 from app.quota_api import router as quota_router
 from app.national_cost_info_regions import load_national_regions
 from app.national_info_price_audit import build_audit_summary, load_source_audit_rows, validate_source_audit
@@ -1005,12 +1169,72 @@ def create_app(*, init_schema: bool = True) -> FastAPI:
         tenant_code: str | None = None,
         source_id: str | None = None,
         search: str | None = None,
+        # ── quota 域 chip 筛选（仅在 domain_type=quota 时生效，2026-07-29 增）──
+        primary: str | None = Query(
+            None,
+            description="定额体系大类；与 quota_api /facets 同义：all|construction_regional|industry_specialty|boq_standard",
+        ),
+        jurisdiction_code: str | None = Query(
+            None,
+            description="省级行政区划码（510000 / 440000 …）",
+        ),
+        industry_sector_code: str | None = Query(
+            None, description="行业代码（专业工程定额用）"
+        ),
+        edition_year: int | None = Query(
+            None,
+            description="定额版本年（1900-2100 整数）",
+        ),
+        edition_label: str | None = Query(
+            None, description="定额版本标识字符串"
+        ),
+        discipline_code: str | None = Query(
+            None, description="专业分类码"
+        ),
         limit: int = 100,
         offset: int = 0,
         session: Session = Depends(get_db_session),
         mirror: FileMirror = Depends(get_file_mirror),
     ) -> list[dict[str, object]]:
         try:
+            quota_filter_active = any(
+                v is not None
+                for v in (
+                    primary,
+                    jurisdiction_code,
+                    industry_sector_code,
+                    edition_year,
+                    edition_label,
+                    discipline_code,
+                )
+            )
+            # quota 域 chip 筛选：路由到带 join 的 SQL，但保留 primary_file 预览字段。
+            if quota_filter_active:
+                items, total_count = _run_quota_filtered_listing(
+                    session,
+                    domain_type=domain_type,
+                    status=status,
+                    region_code=region_code,
+                    channel_type=channel_type,
+                    tenant_code=tenant_code,
+                    source_id=source_id,
+                    search=search,
+                    primary=primary,
+                    jurisdiction_code=jurisdiction_code,
+                    industry_sector_code=industry_sector_code,
+                    edition_year=edition_year,
+                    edition_label=edition_label,
+                    discipline_code=discipline_code,
+                    limit=limit,
+                    offset=offset,
+                    mirror=mirror,
+                )
+                response.headers["X-Total-Count"] = str(total_count)
+                response.headers["X-Limit"] = str(max(1, min(limit, 500)))
+                response.headers["X-Offset"] = str(max(0, offset))
+                return items
+
+            # 通用路径：所有现有 caller 行为不变
             total_count = count_archives(
                 session,
                 domain_type=domain_type,

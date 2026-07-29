@@ -1261,12 +1261,28 @@
   // ── 列表数据源：通用 /api/archives?domain_type=quota（裸数组，含 primary_file）──
   // 不走 state.api.getArchives()（那是 /api/data-lake/quota/archives，响应是 {items:[...]}
   // 且无 primary_file 字段——不适合预览）。
-  async function loadQuotaArchivesGeneric() {
+  //
+  // 2026-07-29 修复 chip 筛选：原本硬编码 /api/archives?domain_type=quota&limit=500 不带任何
+  // 筛选条件 → 选了 primary="专业工程定额" / jurisdiction="云南" 也不影响列表。后端现在
+  // 已扩展接受 6 个 quota 域参数（primary / jurisdiction_code / industry_sector_code /
+  // edition_year / edition_label / discipline_code），前端这里把 currentArchiveFilters()
+  // 的产出作为 query string 拼上去。
+  async function loadQuotaArchivesGeneric(filters) {
     if (typeof global.fetch !== "function") {
       return { status: CAP.ERROR, data: [], error: "fetch 不可用" };
     }
+    const params = new URLSearchParams();
+    params.set("domain_type", "quota");
+    if (filters && typeof filters === "object") {
+      Object.keys(filters).forEach((k) => {
+        const v = filters[k];
+        if (v === undefined || v === null || v === "") return;
+        params.set(k, String(v));
+      });
+    }
+    params.set("limit", "500");
     try {
-      const response = await global.fetch("/api/archives?domain_type=quota&limit=500", {
+      const response = await global.fetch("/api/archives?" + params.toString(), {
         headers: { Accept: "application/json" },
       });
       if (response.status === 401 || response.status === 403) {
@@ -1322,8 +1338,9 @@
     if (state.flags.archives) {
       // 切换到通用 /api/archives?domain_type=quota：响应是裸数组 list[ArchiveSummaryResponse]，
       // 含 primary_file{file_id,file_name,file_role}（预览所需），旧 /api/data-lake/quota/archives 无此字段。
+      // 2026-07-29 修复：把 URL 上挂上当前 chip 筛选，与 reloadArchives 一致。
       tasks.push(
-        loadQuotaArchivesGeneric().then((result) => {
+        loadQuotaArchivesGeneric(currentArchiveFilters()).then((result) => {
           state.archives = result;
         })
       );
@@ -1335,8 +1352,10 @@
   // ── 列表筛选参数构造 + 仅列表的轻量重载 ───────────────────────────────
   function currentArchiveFilters() {
     const f = state.filters || {};
+    // 2026-07-29 修复：键名对齐后端 /api/archives 接受的参数。
+    // 之前 q 是孤儿字段（后端用 search），chip 切换从不生效。现在传 search。
     const params = {
-      q: f.q || undefined,
+      search: f.q || undefined,
       primary: f.primary && f.primary !== "all" ? f.primary : undefined,
       edition_year: f.editionYear && f.editionYear !== "all" ? f.editionYear : undefined,
       edition_label: f.edition && f.edition !== "all" ? f.edition : undefined,
@@ -1346,6 +1365,10 @@
       if (f.primary === "construction_regional") params.jurisdiction_code = f.secondary;
       else if (f.primary === "industry_specialty") params.industry_sector_code = f.secondary;
     }
+    // 去掉所有 undefined，避免 URL 里出现 ?key=
+    Object.keys(params).forEach((k) => {
+      if (params[k] === undefined) delete params[k];
+    });
     return params;
   }
 
@@ -1353,9 +1376,10 @@
     if (!state.api || !state.flags.archives) return;
     state.archives = { status: CAP.UNKNOWN, data: null, error: "" };
     render();
-    // 与 load() 一致：走通用 /api/archives?domain_type=quota（裸数组，含 primary_file）
-    // 不走旧 /api/data-lake/quota/archives（无 primary_file，且 join Profile/PubSet 会过滤无 Profile 的档案）
-    loadQuotaArchivesGeneric().then((result) => {
+    // 2026-07-29：补上传 chip 当前筛选条件，跨端点 query string 一致；
+    // 后端 /api/archives 已支持 primary / jurisdiction_code / edition_year /
+    // edition_label / discipline_code / industry_sector_code 6 个 quota 域参数。
+    loadQuotaArchivesGeneric(currentArchiveFilters()).then((result) => {
       state.archives = result;
       render();
     });
