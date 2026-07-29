@@ -6,10 +6,16 @@
 > - 业务层：[`quota/README.md`](README.md)、[`quota/INTEGRATION_PLAN.md`](INTEGRATION_PLAN.md)
 > - DDL 权威源：`file_asset_service/app/models.py`（SQLAlchemy 2.0 declarative）
 > - 一键导出：`python -c "from app.models import Base; print(Base.metadata)"` → 用 `Base.metadata.create_all(engine)` 生成完整 CREATE TABLE
+>
+> **v0.4 更新**（2026-07-29）：
+> 1. 新增 §3.9 `quota_parse_job` 队列表（DB 队列 + 单 worker 串行消费）
+> 2. §3.10 4 个新 `archive_file.file_role`：`parse_markdown` / `parse_html` / `parse_candidate_xlsx` / `parse_final_xlsx`
+> 3. §5 ALTER TABLE 增 §5.3 改 `ck_archive_file_role` CheckConstraint + §5.4 新增 `quota_parse_job` 表
+> 4. §6 验证 SQL 加 4 项
 
 ---
 
-## 1. 表清单（22 张）
+## 1. 表清单（23 张）
 
 按模型在 `models.py` 中的出现顺序：
 
@@ -38,6 +44,7 @@
 | 21 | **`quota_publication_relation`** | `QuotaPublicationRelation` | **资料体系关系（SPEC-QA-001 §6.7）** |
 | 22 | **`quota_dictionary`** | `QuotaDictionary` | **受控字典（SPEC-QA-001 §7 D1）** |
 | 23 | **`administrative_division`** | `AdministrativeDivision` | **行政区划（GB/T 2260-2024）** |
+| 24 | **`quota_parse_job`**（v0.4 新增） | `QuotaParseJob` | **解析任务队列表（v0.4 web 集成）** |
 
 > **粗体**表是与 quota_parser / quota 域直接相关的核心表，DDL 见 §3。
 
@@ -354,6 +361,66 @@ CREATE INDEX ix_administrative_division_level ON administrative_division (level)
 CREATE INDEX ix_administrative_division_parent_code ON administrative_division (parent_code);
 ```
 
+### 3.9 `quota_parse_job`（v0.4 新增 · 解析任务队列表）
+
+> web 端点 `POST /parse` 只写库不入进程——所有真实解析任务由独立 `quota_parser_worker` 进程单 worker 串行消费本表。
+> 背景与决策见 `quota/INTEGRATION_PLAN.md` §1.2 与 `quota/web-frontend/SPEC.md` §8.2。
+
+```sql
+CREATE TABLE quota_parse_job (
+    job_id           VARCHAR(36) PRIMARY KEY,
+    archive_id       VARCHAR(36) NOT NULL REFERENCES archive(archive_id) ON DELETE CASCADE,
+    profile          VARCHAR(32) NOT NULL,  -- sichuan / chongqing
+    status           VARCHAR(16) NOT NULL DEFAULT 'queued',  -- queued/running/done/failed/cancelled
+    attempt          INTEGER NOT NULL DEFAULT 0,  -- 已尝试次数（transient 重试计数）
+    max_attempts     INTEGER NOT NULL DEFAULT 3,  -- transient 失败最大重试
+    worker_pid       INTEGER,  -- 抢到该 job 的 worker 进程 PID
+    worker_hostname  VARCHAR(128),  -- 抢到该 job 的 worker 所在主机（多机部署用）
+    enqueued_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    started_at       TIMESTAMP WITH TIME ZONE,  -- 抢到时写
+    finished_at      TIMESTAMP WITH TIME ZONE,  -- done/failed/cancelled 时写
+    error_code       VARCHAR(32),  -- transient / failed_permanent / failed_user（与 Archive.parse_error_code 同枚举）
+    error_message    TEXT,
+    parse_task_id    VARCHAR(64),  -- 关联 Archive.parse_task_id，便于 join 查
+    created_by       VARCHAR(128),  -- 哪个 web 用户触发了这次解析
+    metadata         JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+    CONSTRAINT ck_quota_parse_job_status CHECK (status IN ('queued', 'running', 'done', 'failed', 'cancelled')),
+    CONSTRAINT ck_quota_parse_job_profile CHECK (profile IN ('sichuan', 'chongqing')),
+    CONSTRAINT ck_quota_parse_job_attempt CHECK (attempt >= 0 AND attempt <= max_attempts)
+);
+
+-- worker 抢单查询：status='queued' ORDER BY enqueued_at LIMIT 1 FOR UPDATE SKIP LOCKED
+CREATE INDEX ix_quota_parse_job_status_enqueued ON quota_parse_job (status, enqueued_at);
+-- 查某档案的解析历史
+CREATE INDEX ix_quota_parse_job_archive_id ON quota_parse_job (archive_id);
+-- 失败排查：error_code 非空的最近 50 条
+CREATE INDEX ix_quota_parse_job_status_error ON quota_parse_job (status, error_code) WHERE error_code IS NOT NULL;
+```
+
+**关键不变量**：
+1. 同一时刻**至多一条** `status='running'` 记录——worker 全局只启 1 个，进程级 `fcntl.flock` 二次保护（防运维误启多 worker）。
+2. `archive_id + status='queued' or 'running'` 唯一索引建议（v0.5 再加）——目前靠 `POST /parse` 端点 SELECT FOR UPDATE 防并发入队。
+3. `attempt <= max_attempts` 触发后自动转 `failed_user`（不再 transient）。
+4. 删除 Archive 时 `ON DELETE CASCADE` 同步删 `quota_parse_job`；删 #9「删除解析结果」也物理删 `quota_parse_job`；删 #10「删除档案」通过 CASCADE 自然清理。
+
+### 3.10 `archive_file.file_role` 4 个新枚举（v0.4 扩展）
+
+`ck_archive_file_role` CheckConstraint 在 v0.3 是 23 个 role；v0.4 加 4 个解析中间产物 role：
+
+| 新 role | 含义 | 谁写 | 对应 MinIO key | 谁读 |
+|---|---|---|---|---|
+| `parse_markdown` | MinerU 解析出的 markdown（OCR + 表格结构） | worker 阶段 A | `quota/<archive_id>/artifacts/result.md` | 详情页 / 列表 ⋯ 下拉下载 |
+| `parse_html` | MinerU 解析出的 html（带 `<table>` 嵌入） | worker 阶段 A | `quota/<archive_id>/artifacts/result.html` | 详情页 / 列表 ⋯ 下拉下载 |
+| `parse_candidate_xlsx` | 阶段 A 输出的待审核 xlsx | worker 阶段 A | `quota/<archive_id>/candidate.xlsx`（与 `Archive.candidate_xlsx_key` 同 key） | #3 下载 candidate |
+| `parse_final_xlsx` | 阶段 B 输出的最终 xlsx | worker 阶段 B | `quota/<archive_id>/final.xlsx`（与 `Archive.final_xlsx_key` 同 key） | #5 下载 final |
+
+**幂等保证**：role 值与 `Archive.candidate_xlsx_key` / `final_xlsx_key` 列冗余，但 list 端点 `archive.file_count` **只数 `file_role IN ('main_document', 'priced_source')` 不数 4 类 parse_***，避免把同一物理文件重复计入。
+
+`file_id` 字段语义：4 个 parse_* role 共享 `Archive` 的同一 file_id（`Archive` 的主 file），但通过 `file_role` 区分逻辑用途；这样 `archive_file` 行有 1 个 `file_asset.file_id` 但 4 条 `file_role` 行（materialized view 视角下是 1 PDF 物理文件 + 4 逻辑角色）。
+
+> 不为 4 个新 role 加 FK / 强约束——`file_role` 是受控词表（CheckConstraint 白名单），不需要额外关系。
+
 ---
 
 ## 4. 其他 14 张表
@@ -400,9 +467,58 @@ ALTER TABLE archive ADD COLUMN IF NOT EXISTS final_xlsx_key          VARCHAR(512
 
 -- 5.2 索引
 CREATE INDEX IF NOT EXISTS ix_archive_parse_status ON archive (parse_status);
+
+-- ============================================================
+-- v0.4 新增（2026-07-29）— 中间产物入 archive_file + 解析队列表
+-- ============================================================
+
+-- 5.3 ck_archive_file_role CheckConstraint：加 4 个新 role
+-- PostgreSQL 改 CheckConstraint 必须先 drop 再 add（无法直接 ALTER）
+ALTER TABLE archive_file DROP CONSTRAINT IF EXISTS ck_archive_file_role;
+ALTER TABLE archive_file ADD CONSTRAINT ck_archive_file_role CHECK (file_role IN (
+    'main_document', 'attachment', 'priced_source', 'qingdan_package',
+    'drawing', 'geological', 'tender_doc',
+    'web_snapshot', 'zip_package', 'preview',
+    'quota_db', 'bill_standard', 'quota_supplement', 'quota_interpretation',
+    'atlas_document', 'standard_document', 'scan_image',
+    'policy_document', 'policy_attachment', 'cover',
+    'table_of_contents', 'appendix', 'release_announcement', 'other',
+    -- v0.4 新增：
+    'parse_markdown', 'parse_html', 'parse_candidate_xlsx', 'parse_final_xlsx'
+));
+
+-- 5.4 新增 quota_parse_job 队列表（v0.4 web 集成 · MinerU 单 worker 串行）
+CREATE TABLE IF NOT EXISTS quota_parse_job (
+    job_id           VARCHAR(36) PRIMARY KEY,
+    archive_id       VARCHAR(36) NOT NULL REFERENCES archive(archive_id) ON DELETE CASCADE,
+    profile          VARCHAR(32) NOT NULL,
+    status           VARCHAR(16) NOT NULL DEFAULT 'queued',
+    attempt          INTEGER NOT NULL DEFAULT 0,
+    max_attempts     INTEGER NOT NULL DEFAULT 3,
+    worker_pid       INTEGER,
+    worker_hostname  VARCHAR(128),
+    enqueued_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    started_at       TIMESTAMP WITH TIME ZONE,
+    finished_at      TIMESTAMP WITH TIME ZONE,
+    error_code       VARCHAR(32),
+    error_message    TEXT,
+    parse_task_id    VARCHAR(64),
+    created_by       VARCHAR(128),
+    metadata         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    CONSTRAINT ck_quota_parse_job_status CHECK (status IN ('queued', 'running', 'done', 'failed', 'cancelled')),
+    CONSTRAINT ck_quota_parse_job_profile CHECK (profile IN ('sichuan', 'chongqing')),
+    CONSTRAINT ck_quota_parse_job_attempt CHECK (attempt >= 0 AND attempt <= max_attempts)
+);
+CREATE INDEX IF NOT EXISTS ix_quota_parse_job_status_enqueued ON quota_parse_job (status, enqueued_at);
+CREATE INDEX IF NOT EXISTS ix_quota_parse_job_archive_id ON quota_parse_job (archive_id);
+CREATE INDEX IF NOT EXISTS ix_quota_parse_job_status_error ON quota_parse_job (status, error_code) WHERE error_code IS NOT NULL;
 ```
 
-**幂等保证**：`IF NOT EXISTS` 让这段 SQL 反复跑也不会报错。
+**幂等保证**：
+- §5.1 用 `ADD COLUMN IF NOT EXISTS`；
+- §5.3 `DROP CONSTRAINT IF EXISTS` + `ADD CONSTRAINT`（PG 8.0+）；
+- §5.4 `CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS`。
+- 反复跑这段 SQL 不会报错。
 
 ---
 
@@ -422,18 +538,38 @@ SELECT indexname FROM pg_indexes
 WHERE tablename = 'archive' AND indexname = 'ix_archive_parse_status';
 -- 期望 1 行
 
--- 6.3 quota 5 张表都存在
+-- 6.3 quota 6 张表都存在
 SELECT table_name FROM information_schema.tables
 WHERE table_schema = 'public'
   AND table_name LIKE 'quota_%'
 ORDER BY table_name;
--- 期望 5 行：quota_archive_profile / quota_dictionary / quota_projection_candidate /
---            quota_publication_relation / quota_publication_set
+-- 期望 6 行：quota_archive_profile / quota_dictionary / quota_parse_job (v0.4) /
+--            quota_projection_candidate / quota_publication_relation / quota_publication_set
 
 -- 6.4 file_processing 表存在
 SELECT table_name FROM information_schema.tables
 WHERE table_schema = 'public' AND table_name = 'file_processing';
 -- 期望 1 行
+
+-- ============================================================
+-- v0.4 新增验证
+-- ============================================================
+
+-- 6.5 ck_archive_file_role CheckConstraint 含 4 个 parse_* role
+SELECT conname, pg_get_constraintdef(oid)
+FROM pg_constraint
+WHERE conname = 'ck_archive_file_role';
+-- 期望 definition 包含: 'parse_markdown' / 'parse_html' / 'parse_candidate_xlsx' / 'parse_final_xlsx'
+
+-- 6.6 quota_parse_job 表存在 + 3 个约束
+SELECT conname, contype FROM pg_constraint
+WHERE conrelid = 'quota_parse_job'::regclass
+ORDER BY conname;
+-- 期望 3 行：ck_quota_parse_job_attempt / ck_quota_parse_job_profile / ck_quota_parse_job_status
+
+-- 6.7 quota_parse_job 3 个索引存在
+SELECT indexname FROM pg_indexes WHERE tablename = 'quota_parse_job' ORDER BY indexname;
+-- 期望 3 行：ix_quota_parse_job_archive_id / ix_quota_parse_job_status_enqueued / ix_quota_parse_job_status_error
 ```
 
 ---
@@ -441,18 +577,18 @@ WHERE table_schema = 'public' AND table_name = 'file_processing';
 ## 7. 创建顺序建议
 
 1. **空库** → 跑 §2 脚本一次性 `create_all` → 跑 §5 ALTER（幂等 no-op）
-2. **已有库**（archive 表已存在）→ 跑 §2 脚本（自动跳过 archive 表已存在的部分）→ 跑 §5 ALTER 补 13 列
+2. **已有库**（archive 表已存在）→ 跑 §2 脚本（自动跳过 archive 表已存在的部分）→ 跑 §5 ALTER 补 13 列 + §5.3 改 CheckConstraint + §5.4 新表
 3. 跑 §6 验证 SQL 确认
 
 ---
 
 ## 8. 不在本文件范围内
 
-- **MinIO bucket**：quota 解析产物**复用** cost 域的 `cost-extract` / `cost-report` 桶（quota/README.md §12.G 决策 4）。key 前缀 `quota/<archive_id>/{candidate,final}.xlsx` 与 cost 域 `cost/...` 区分。详见 `quota/INTEGRATION_PLAN.md` §2.3。
-- **quota_parser worker 进程**：用 §3.1 `file_processing` 表调度；今天 mock 模式不写
-- **历史数据回填**：13 列默认 NULL，无需回填；解析任务状态从零开始
+- **MinIO bucket**：quota 解析产物**复用** cost 域的 `cost-extract` / `cost-report` 桶（quota/README.md §12.G 决策 4）。key 前缀 `quota/<archive_id>/{candidate,final}.xlsx` 与 cost 域 `cost/...` 区分。v0.4 扩展：md/html 进 `cost-extract` 桶，路径 `quota/<archive_id>/artifacts/result.{md,html}`。详见 `quota/INTEGRATION_PLAN.md` §2.3。
+- **quota_parser worker 进程**：v0.4 改用 `quota_parse_job` 表（§3.9）+ 独立 `quota_parser_worker.py` 进程单 worker 串行；不再用 `file_processing` 表（v0.3 §3.1 决策作废）。
+- **历史数据回填**：13 列默认 NULL，无需回填；解析任务状态从零开始。
 
 ---
 
-**锁版本**：v1（2026-07-28）。
+**锁版本**：v2（2026-07-29，v0.4 web 集成）。
 后续加 quota 域新表（`quota_item` / `consumption` / `qa_printed_price` 等）时，更新本文档。

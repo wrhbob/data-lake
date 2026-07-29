@@ -1,16 +1,24 @@
-# quota_parser 集成 Plan（2026-07-28 锁定）
+# quota_parser 集成 Plan（v0.4 · 2026-07-29 锁定）
 
 > 目标：把已有的 `quota_parser` Python 包（v0.3 冻结，见 [`parser/SPEC.md`](parser/SPEC.md)）
 > 嵌入 file-asset service，让用户在网站上触发、监控、下载、上传解析任务全流程。
 >
 > 配套 SPEC：
 > - 后端脚本契约：`quota/parser/SPEC.md` v0.2 + §21 v0.3 变更
-> - 网站前端契约：`quota/web-frontend/SPEC.md` v0.3 + v0.3.1
+> - 网站前端契约：`quota/web-frontend/SPEC.md` v0.4
+> - DB 契约：`quota/DB_SCHEMA.md` v2
 > - Worker 集成层决策：`quota/README.md` §12.G
+>
+> **v0.4 关键决策**（2026-07-29）：
+> 1. 真实 worker 改用 `quota_parse_job` DB 队列表（§1.2）+ 独立 `quota_parser_worker.py` 进程单 worker 串行（**v0.3 计划用 `file_processing` 表作废**——MinerU 12GB 显存禁止并发，PG 队列表 + 进程级 flock 二次保护最稳）。
+> 2. 中间产物（markdown / html / candidate.xlsx / final.xlsx）全部进 `archive_file` 表（4 个新 `file_role`），列表「文件数」只数原件 PDF。
+> 3. 端点从 7 扩到 10（新增 §5.10 `DELETE /archives/{id}`、§5.9 `GET /parse-queue`、§5.8 删除解析结果强化）。
+> 4. 两类删除分开：#9 删除解析结果（列表 ⋯ 下拉 + 详情页）vs #10 删除档案（**仅详情页**）。
+> 5. 「已完成」态「重新解析」默认隐藏，详情页「高级操作」折叠区作为逃生口。
 
 ---
 
-## 0. 现状（截至 2026-07-28）
+## 0. 现状（截至 2026-07-29）
 
 | 项 | 状态 |
 |---|---|
@@ -18,45 +26,67 @@
 | `quota_parser` 包打包 | ❌ 无 `pyproject.toml` / 无 `setup.py`；目前只能通过 `PYTHONPATH` 直接 import |
 | file-asset 环境 `quota_parser` 可 import？ | ❌ 未安装（环境装的是 `file_asset_service` editable，site-packages 找不到 quota_parser） |
 | `quota/parser/quota_parser/external/` 复用层 | ✅ 已迁入（`mineru_pdf_parse` / `quota_md_to_csv_v2` / `quota_csv_finalize`） |
-| `Archive` 表 parse 子对象 | ❌ 无（web-frontend SPEC §6.1 列了 13 列 `parse_*`，未实施） |
-| `quota_api.py` 7 个解析端点 | ❌ 无（现有端点只覆盖入湖/档案台/统计） |
-| `file_asset_service/app/quota_parser/` adapter 子包 | ❌ 无 |
-| mock 模式 (`QUOTA_PARSE_MOCK=1`) | ❌ 无 |
-| 前端解析区块（`quota-parse.js / quota-parse-api.js / quota-parse-mock.js`） | ❌ 无 |
-| 真实 Worker 轮询 | ❌ `serve_worker()` 是占位实现 |
+| `Archive` 表 parse 子对象 | ✅ v0.3 已实施（13 列 `parse_*` + 索引） |
+| `quota_api.py` 7 个解析端点 | ✅ v0.3 已实施（mock 模式可走通） |
+| `file_asset_service/app/quota_parser/` adapter 子包 | ✅ v0.3 已实施（`service.py`） |
+| mock 模式 (`QUOTA_PARSE_MODE=mock`) | ✅ v0.3 已实施 |
+| 前端解析区块（`quota-parse.js / quota-parse-api.js / quota-parse-mock.js`） | ❌ 未实施（v0.4 工作量） |
+| 真实 Worker 轮询 | ❌ v0.3 计划用 `file_processing` 表 → **v0.4 改用 `quota_parse_job` 表** |
+| 列表行 ⋯ 下拉（5 状态智能图标） | ❌ v0.3 已 SPEC 但未实施 |
+| 中间产物入 `archive_file` | ❌ v0.4 新增 |
+| 删除档案端点 | ❌ v0.4 新增 |
 
-**核心问题**：脚本侧 v0.3 完整、网站侧 0 落地。今天打通 web 端最小可跑链路。
+**核心问题（v0.4）**：v0.3 mock 模式能跑，但真脚本（4 个 CLI skill）未在 web 端验证；DB 队列表 + 单 worker 串行架构未实施；详情页 / 列表行 UI 未动工。
 
 ---
 
-## 1. 集成架构（数据流总览）
+## 1. 集成架构（数据流总览；v0.4 双模式）
 
 ```
-用户在档案详情点「开始解析」
+用户在档案详情点「开始解析」/ 列表行点 ▶ 图标
   │
   │  HTTP POST /api/data-lake/quota/archives/{archive_id}/parse
   ▼
 quota_api.py parse 端点
   │
-  │  写 Archive.parse_status='parsing', parse_task_id=...
-  │  触发后端"解析引擎"：真实 worker 或 mock runner
+  │  ┌─ 写 Archive.parse_status='parsing', parse_task_id=...
+  │  │   ┌─ [v0.4 real] 写 quota_parse_job (status=queued)         ──┐
+  │  │   └─ [v0.4 mock] asyncio.create_task(run_mock_pipeline(...)) ─┤
+  │  └─ 由 QUOTA_PARSE_MODE 决定走哪条路
   ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  解析引擎（今天是 mock；后续切真 worker）                         │
+│  解析引擎                                                        │
 │                                                                 │
-│  [MOCK 分支]  QUOTA_PARSE_MOCK=1                                │
+│  [MOCK 分支]  QUOTA_PARSE_MODE=mock (开发)                       │
 │    → asyncio.create_task(run_mock_pipeline(archive_id))         │
-│    → sleep 5-10s → 填 parse_* 13 列 + 写假 candidate.xlsx      │
+│    → sleep 5-10s → 填 parse_* 13 列 + 写假 candidate.xlsx 到    │
+│      MinIO + 同步在 archive_file 注册 4 个 parse_* 行          │
 │                                                                 │
-│  [真分支]  独立 quota_parser worker 进程（未来 step）             │
-│    → 轮询 FileProcessing 表（status='pending' + quota 域）      │
-│    → lease → 下载 PDF → run_quota_pipeline → 上传 MinIO → 写库 │
-│    → cleanup_workspace(success=...)                            │
+│  [真分支]  QUOTA_PARSE_MODE=real (生产)  v0.4 主线              │
+│    → 独立 quota_parser_worker.py 进程（scripts/run_quota_      │
+│      parser_worker.sh 常驻）                                    │
+│    → fcntl.flock(/var/run/quota_parser_worker.lock) 防多启     │
+│    → 轮询 quota_parse_job:                                      │
+│        SELECT ... WHERE status='queued' ORDER BY enqueued_at    │
+│        LIMIT 1 FOR UPDATE SKIP LOCKED                            │
+│    → lease 改 status='running', 写 started_at + worker_pid      │
+│    → 下载 PDF → subprocess 串行调 4 个 CLI skill:               │
+│        mineru-pdf-parse → quota-md-to-csv-v2 →                  │
+│        quota-csv-finalize → to_xlsx                             │
+│    → 4 类中间产物上 MinIO + archive_file 注册 4 个 parse_* role │
+│    → 写 Archive.parse_status='parsed' + candidate_xlsx_key      │
+│    → 写 quota_parse_job status='done', finished_at              │
+│    → cleanup_workspace(success=True)                            │
+│                                                                 │
+│  失败分类：                                                      │
+│    transient  → attempt+1, 状态回 queued (3 次内重试)           │
+│    failed_user / failed_permanent → status='failed'              │
 └─────────────────────────────────────────────────────────────────┘
   │
   │  候选产物：candidate.xlsx / final.xlsx / manifest.json /
-  │           qa_report.json / qa_report.md  → 全部上传 MinIO
-  │  状态：Archive.parse_status + parse_* 13 列
+  │           qa_report.json / qa_report.md / artifacts/result.md
+  │           / artifacts/result.html  → 全部上传 MinIO
+  │  状态：Archive.parse_status + parse_* 13 列 + archive_file 4 行
   ▼
 用户在档案详情（或列表操作列）看到解析状态推进：
   未解析 → 解析中 → 待审核 → 已完成
@@ -66,8 +96,94 @@ quota_api.py parse 端点
 
 **数据契约**（前端只读，不转换）：
 - `GET /api/data-lake/quota/archives/{id}` 返回 ArchiveDetail，**追加 `parse` 子对象**（web-frontend SPEC §6.1）
-- 7 个解析端点统一挂在 `/api/data-lake/quota/archives/{id}/*`（与现有 quota_api.py 同 prefix）
+- 10 个解析端点统一挂在 `/api/data-lake/quota/archives/{id}/*`（v0.4 是 10 个，v0.3 是 7 个）
 - 字段名与 Manifest（`quota-parser-result/v1` schema）一一对齐
+
+## 1.2 真实 worker 详细设计（v0.4 主线）
+
+### 1.2.1 为什么不用 `file_processing` 表（v0.3 决策作废）
+
+- `file_processing` 是通用 worker 调度表（任何 processor 都用），quota 域用要加 `processor='quota_parser_v2'` 字段。
+- 缺点：抢单逻辑复杂（`SELECT ... FOR UPDATE SKIP LOCKED` 在 PG 上要 9.5+），且 quota 域**强串行**（单 worker 跑全 quota 队）——通用 worker 模型与 quota 强串行需求不匹配。
+- v0.4 决策：**quota 域独立用 `quota_parse_job` 表**（专用 + 强串行），其他域继续用 `file_processing`。两表共存，不互相影响。
+
+### 1.2.2 quota_parse_job 表设计
+
+详见 `quota/DB_SCHEMA.md` §3.9。核心字段：
+- `status`：`queued / running / done / failed / cancelled`（5 态）
+- `attempt` + `max_attempts`：transient 重试计数
+- `worker_pid` + `worker_hostname`：哪个 worker 进程抢到
+- `error_code` + `error_message`：失败分类
+- 索引：`(status, enqueued_at)` 抢单用；`(archive_id)` 历史查
+
+### 1.2.3 `quota_parser_worker.py` 进程模型
+
+```python
+# scripts/run_quota_parser_worker.sh
+# 启动方式：nohup scripts/run_quota_parser_worker.sh >> logs/worker.log 2>&1 &
+
+import fcntl
+from app.quota_parser_worker import run_worker
+
+# 启动时：fcntl.flock 占 /var/run/quota_parser_worker.lock
+# 主循环：
+#   while True:
+#     with session() as db:
+#       job = db.execute(text("""
+#         SELECT * FROM quota_parse_job
+#         WHERE status='queued' ORDER BY enqueued_at
+#         LIMIT 1 FOR UPDATE SKIP LOCKED
+#       """)).first()
+#       if job:
+#         job.status='running'; job.started_at=now(); job.worker_pid=os.getpid()
+#         db.commit()
+#         run_one_job(job)  # subprocess 调 4 个 CLI skill
+#       else:
+#         time.sleep(2)  # 2s 轮询
+```
+
+### 1.2.4 串行保证（4 层）
+
+1. **进程级 `fcntl.flock`**：防运维误启多 worker 进程。
+2. **DB 行锁 `FOR UPDATE SKIP LOCKED`**：即使多 worker 进程（被 flock 挡了），DB 层也不会双抢。
+3. **profile 限两省**：目前只 `sichuan` / `chongqing` 两 profile，避免 worker 跑异构任务。
+4. **archive 唯一入队**：`POST /parse` 端点用 `SELECT ... FOR UPDATE` 防同一 archive 并发入队（v0.4 新加）。
+
+### 1.2.5 4 个 CLI skill 的 subprocess 调用
+
+worker 启动解析时，按 `quota/parser/SPEC.md` §5.1 流程串行 subprocess 调：
+
+```bash
+# 1. MinerU PDF → md/html/json（300s+）
+$DLSE_PY quota/parser/external/mineru-pdf-parse/scripts/parse_pdf.py \
+    "$PDF_PATH" --output-dir "$WORK_DIR/ocr"
+
+# 2. md → 10 列 CSV（按 profile 分发 sc/cq）
+$DLSE_PY quota/parser/external/quota-md-to-csv-v2/extract_quota.py \
+    "$WORK_DIR/ocr/result.md" --province "$PROFILE" \
+    --output "$WORK_DIR/csv/quota.csv"
+
+# 3. CSV → xlsx（4 步流水线）
+$DLSE_PY quota/parser/external/quota-csv-finalize/clean_empty_qty.py \
+    "$WORK_DIR/csv/quota.csv"
+$DLSE_PY quota/parser/external/quota-csv-finalize/fill_work_content.py \
+    "$WORK_DIR/csv/quota_final.csv"
+$DLSE_PY quota/parser/external/quota-csv-finalize/space_split_materials.py \
+    "$WORK_DIR/csv/quota_final.csv"
+$DLSE_PY quota/parser/external/quota-csv-finalize/to_xlsx.py \
+    "$WORK_DIR/csv/quota_final.csv" --output "$WORK_DIR/xlsx/candidate.xlsx"
+```
+
+**为什么 subprocess 而不是直接 import**：
+- 4 个 CLI skill 都用 DLSE 环境（`/d/miniconda3/envs/DLSE/python.exe`），file-asset 是另一个 env（`/d/miniconda3/envs/file-asset/python.exe`）——conda env 隔离，import 跨 env 会 `ImportError`。
+- subprocess 沿用现有 skill 入口（不重写），加 4 个 parser hook 即可，零 skill 改动。
+- 4 个 skill 各自有独立 SKILL.md 与 CLI 参数定义，subprocess 调是 contract-stable 的最低耦合路径。
+
+**异常归类**（worker 侧）：
+- subprocess 退出码 0 → 成功
+- 退出码 1 + stderr 含「OOM」/「CUDA out of memory」→ `failed_permanent`（硬件问题，告警运维）
+- 退出码 1 + 其他 → `transient`（attempt+1 重试，3 次后转 `failed_user`）
+- 退出码 2 → `failed_user`（输入数据问题，user 修 PDF 后重传）
 
 ---
 
@@ -113,82 +229,113 @@ quota_api.py parse 端点
 
 注：原 SPEC §6.1 写 `parse_status` 用 `archive.status` 映射——这里改成新加独立字段（§2.1）。SPEC §6.1 表述待 step 4 后修订。
 
-### 2.3 MinIO bucket / key 布局（**复用** cost 域决策）
+### 2.3 MinIO bucket / key 布局（**复用** cost 域决策；v0.4 加 md/html）
 
 **2026-07-28 决策**：quota 解析产物**复用** cost 域已有的 `cost-extract` / `cost-report` 桶（quota/README.md §12.G 决策 4），不新增桶。靠 `key` 前缀 `quota/...` 与 cost 域产物 `cost/...` 区分。
 
-| bucket | key | 写入方 | 生命周期 |
-|---|---|---|---|
-| `cost-extract`（**复用**） | `quota/<archive_id>/candidate.xlsx` | 阶段 A worker / mock | 与 archive 同生命周期 |
-| `cost-extract`（**复用**） | `quota/<archive_id>/final.xlsx` | 阶段 B worker / mock | 与 archive 同生命周期 |
-| `cost-report`（**复用**） | `quota/<archive_id>/manifest.json` | 阶段 A | 与 archive 同生命周期 |
-| `cost-report`（**复用**） | `quota/<archive_id>/qa_report.json` | 阶段 A / B | 与 archive 同生命周期 |
-| `cost-report`（**复用**） | `quota/<archive_id>/qa_report.md` | 阶段 A / B | 与 archive 同生命周期 |
+| bucket | key | 写入方 | 生命周期 | v0.4 archive_file.role |
+|---|---|---|---|---|
+| `cost-extract`（**复用**） | `quota/<archive_id>/candidate.xlsx` | 阶段 A worker / mock | 与 archive 同生命周期 | `parse_candidate_xlsx` |
+| `cost-extract`（**复用**） | `quota/<archive_id>/final.xlsx` | 阶段 B worker / mock | 与 archive 同生命周期 | `parse_final_xlsx` |
+| `cost-extract`（**复用，v0.4 新增**） | `quota/<archive_id>/artifacts/result.md` | 阶段 A worker | 与 archive 同生命周期 | `parse_markdown` |
+| `cost-extract`（**复用，v0.4 新增**） | `quota/<archive_id>/artifacts/result.html` | 阶段 A worker | 与 archive 同生命周期 | `parse_html` |
+| `cost-report`（**复用**） | `quota/<archive_id>/manifest.json` | 阶段 A | 与 archive 同生命周期 | （不进 archive_file） |
+| `cost-report`（**复用**） | `quota/<archive_id>/qa_report.json` | 阶段 A / B | 与 archive 同生命周期 | （不进 archive_file） |
+| `cost-report`（**复用**） | `quota/<archive_id>/qa_report.md` | 阶段 A / B | 与 archive 同生命周期 | （不进 archive_file） |
 
 adapter 层两个常量（`PARSE_BUCKET_CANDIDATE` / `PARSE_BUCKET_REPORT`），如未来要拆桶单点改即可。
 
+**v0.4 新增约束**：md/html 落 MinIO 的同时**必须**在 `archive_file` 注册对应 role 行（`register_parse_artifact(archive_id, role, key, sha256)` helper）——否则前端 ⋯ 下拉下载入口找不到。`manifest.json` / `qa_report.*` 不进 archive_file（仅走 `GET /manifest` / `/qa-report` 端点，UI 弹窗展示）。
+
+### 2.4 中间产物入 archive_file（v0.4 新增）
+
+**v0.3 状态**：中间产物只在 `Archive.candidate_xlsx_key` / `final_xlsx_key` 列存 MinIO key，前端通过 `GET /candidate.xlsx` / `/final.xlsx` 端点下载。markdown / html **没有落点**。
+
+**v0.4 决策**：扩展 `archive_file` CheckConstraint，加 4 个新 `file_role`：
+- `parse_markdown`：MinerU 输出的 `<stem>.md`
+- `parse_html`：MinerU 输出的 `<stem>.html`（含 `<table>` 嵌入）
+- `parse_candidate_xlsx`：阶段 A 输出的 candidate.xlsx
+- `parse_final_xlsx`：阶段 B 输出的 final.xlsx
+
+4 个 role 的写入方：
+- `quota_parser_worker.py` 阶段 A 跑完 MinerU 后 → 调 `register_parse_artifact(archive_id, 'parse_markdown', md_key, md_sha256)` + `register_parse_artifact(archive_id, 'parse_html', html_key, html_sha256)` + `register_parse_artifact(archive_id, 'parse_candidate_xlsx', xlsx_key, xlsx_sha256)`
+- 阶段 B 跑完 finalize → `register_parse_artifact(archive_id, 'parse_final_xlsx', final_key, final_sha256)`
+- mock 模式同样调（v0.3 mock 没注册——v0.4 mock 也要补，否则前端列表「文件数」会因 mock 跑过而不对）
+
+**`Archive.candidate_xlsx_key` / `final_xlsx_key` 列保留**：与 `archive_file` 行的 4 个 parse_* role **冗余**（同一物理文件两个引用入口），保证历史 v0.3 端点契约不变。前端代码读 `candidate_xlsx_key` 列作为快速路径，`archive_file` 表作为带 audit / 显示名 / 排序的权威源。
+
+**前端「文件数」语义澄清**：
+- `archive.file_count` = `SELECT COUNT(*) FROM archive_file WHERE archive_id=? AND file_role IN ('main_document', 'priced_source')`（**只数原件 PDF**）
+- 4 类 parse_* role 行**不算** file_count——避免列表显示「文件数 5」但只有 1 个 PDF 直观错乱
+- 4 类 parse_* role 行的下载入口：列表行 ⋯ 下拉「下载 markdown」/「下载 html」/「下载 candidate」/「下载 final」按状态显示
+
 ---
 
-## 3. 完整 18 步路线图（按依赖排序）
+## 3. v0.4 实施路线图（按依赖排序）
 
-### 阶段 1 · 数据库 schema（1 步）
+> v0.3 完成的（`parse_*` 13 列 / 7 端点 / mock runner / adapter service）已标 ✅，不再列重做。
 
-| # | 任务 | 状态 |
-|---|---|---|
-| **1** | `models.py` 在 `Archive` 表加 `parse_status` + 12 个 `parse_*` 列；写完 `init_db()` 跑一次 | 🔵 今天 |
-
-### 阶段 2 · quota_parser 包打包 + 安装（2 步）
+### 阶段 1 · DB schema（v0.4 新增 2 步）
 
 | # | 任务 | 状态 |
 |---|---|---|
-| **2a** | `quota/parser/` 加 `pyproject.toml`（最小包定义；`pip install -e .` 模式） | 🔵 今天前置 |
-| **2b** | file-asset 环境装 `quota_parser` editable；验证 `import quota_parser` 通过 | 🔵 今天前置 |
+| **1a** | `models.py` 新增 `QuotaParseJob` 模型（DB_SCHEMA.md §3.9） | 🔵 v0.4 第二天 |
+| **1b** | `models.py` 改 `ArchiveFile` 的 `ck_archive_file_role` CheckConstraint，加 4 个 parse_* role | 🔵 v0.4 第二天 |
+| **1c** | 跑 §5 ALTER SQL（`quota/DB_SCHEMA.md`） | 🔵 v0.4 第二天 |
 
-### 阶段 3 · adapter 层（2 步）
-
-| # | 任务 | 状态 |
-|---|---|---|
-| **3** | 新建 `file_asset_service/app/quota_parser/service.py` —— DB ↔ MinIO ↔ quota_parser 桥 | 🔵 今天 |
-| **4** | 新建 `file_asset_service/app/quota_parser/__init__.py` | 🔵 今天 |
-
-### 阶段 4 · web API 端点（2 步）
+### 阶段 2 · 真实 worker 进程（v0.4 主线，5 步）
 
 | # | 任务 | 状态 |
 |---|---|---|
-| **5** | `quota_api.py` 新增 7 个端点（`POST /parse` / `GET /candidate.xlsx` / `POST /reviewed` / `GET /final.xlsx` / `GET /manifest` / `GET /qa-report` / 扩展 `GET /archives/{id}` 返回 `parse` 子对象）；含 `QUOTA_PARSE_MOCK=1` mock 分支 | 🔵 今天 |
-| **6** | `main.py` 注册 `quota_parser` router；启动 server 验证 `/healthz` + `/api/data-lake/quota/capabilities` | 🔵 今天 |
+| **2a** | `quota_parser/worker.py` —— 单 worker 进程骨架：fcntl.flock 启动保护 + 主循环 `SELECT ... FOR UPDATE SKIP LOCKED` | 🔵 v0.4 第二天 |
+| **2b** | `quota_parser/subprocess_runner.py` —— subprocess 调 4 个 CLI skill（含 DLSE env PATH）+ 退出码 → 异常分类 | 🔵 v0.4 第二天 |
+| **2c** | `quota_parser/service.py` 加 `register_parse_artifact(archive_id, role, key, sha256)` helper | 🔵 v0.4 第二天 |
+| **2d** | `scripts/run_quota_parser_worker.sh`（仿 `serve.py` onlogon）独立进程启动脚本 | 🔵 v0.4 第二天 |
+| **2e** | 端到端跑 1 份四川 PDF：`POST /parse` → 看 `quota_parse_job` 推进 → 看 4 类 `archive_file` 行注册 | 🔵 v0.4 第二天 |
 
-### 阶段 5 · mock 模式（1 步，含在 #5 里）
-
-| # | 任务 | 状态 |
-|---|---|---|
-| **7** | `file_asset_service/app/mock_parse_runner.py` —— `run_mock_pipeline(archive_id)` 跑 asyncio.create_task 后台；sleep 5-10s → 填 parse_* 字段 → 写假 candidate.xlsx 到 MinIO；新 session 写库（避免 DetachedInstanceError） | 🔵 今天 |
-
-### 阶段 6 · 真实 Worker 轮询（2 步）
+### 阶段 3 · quota_api.py 扩 3 端点（v0.4 新增）
 
 | # | 任务 | 状态 |
 |---|---|---|
-| **8** | 替换 `quota_parser/pipeline.serve_worker()` 占位 → 真实轮询 FileProcessing：`status='pending' AND processor='quota_parser_v2'` → lease → 下载 PDF → `run_quota_pipeline` → 上传 MinIO → 写库 | ⏳ 后续批次 |
-| **9** | `scripts/run_quota_worker.sh`（仿 `serve.py` onlogon）独立进程启动脚本 | ⏳ 后续批次 |
+| **3a** | 改 `POST /parse` 端点：real 模式写 `quota_parse_job` 代替 `asyncio.create_task`；mock 模式保持原行为 | 🔵 v0.4 第三天 |
+| **3b** | 改 `POST /parse/delete` 端点：v0.4 强化版（§5.8 7 步） | 🔵 v0.4 第三天 |
+| **3c** | 新增 `DELETE /archives/{id}` 端点（§5.10）：先调 #3b 清解析结果 → 删 profile → 删 pubset（若仅一份分册）→ 删 archive_file 全部 → 删 MinIO PDF → 删 Archive | 🔵 v0.4 第三天 |
+| **3d** | 新增 `GET /parse-queue` 端点（§5.9）：返回 running/queued/recent_failed/worker_pid | 🔵 v0.4 第三天 |
 
-### 阶段 7 · 前端（4 步）
-
-| # | 任务 | 状态 |
-|---|---|---|
-| **10** | 新建 `file_asset_service/app/ui/quota-parse.js` —— 解析区块渲染 + 解析任务 tab | ⏳ 后续批次 |
-| **11** | 新建 `file_asset_service/app/ui/quota-parse-api.js` —— HTTP 客户端 + mock 模式开关 | ⏳ 后续批次 |
-| **12** | 新建 `file_asset_service/app/ui/quota-parse-mock.js` —— 浏览器内 mock fixture | ⏳ 后续批次 |
-| **13** | 改 `quota-ui.js` 加 parse tab + 档案详情解析区块；`index.html` 注册 3 个新 script；`quota-api.js` 暴露 `archive.parse` 格式化器 | ⏳ 后续批次 |
-
-### 阶段 8 · 测试 + 文档（5 步）
+### 阶段 4 · 前端 5 状态 × 10 按钮 UI（v0.4 主工作量）
 
 | # | 任务 | 状态 |
 |---|---|---|
-| **14** | quota_parser 包单元测试（cleanup_workspace / cleanup_expired_jobs） | ⏳ |
-| **15** | quota_api.py 7 个端点 happy path + error case 单测 | ⏳ |
-| **16** | E2E：mock 模式下端到端跑通一份四川 PDF（curl 7 端点 + 看 Archive.parse_status 推进） | ⏳ |
-| **17** | CLAUDE.md 更新（worker 启动命令 + FileProcessing 表 quota 域用法） | ⏳ |
-| **18** | README / web-frontend SPEC / parser SPEC 同步（"v0.3 草案" → "v0.3 web 端在轨"） | ⏳ |
+| **4a** | `file_asset_service/app/ui/quota-parse.js`：tab + 档案详情解析区块（按 web-frontend SPEC §7.1 渲染） | 🔵 v0.4 第四天 |
+| **4b** | `file_asset_service/app/ui/quota-parse-api.js`：10 个端点的 HTTP 客户端 + mock fixture | 🔵 v0.4 第四天 |
+| **4c** | `file_asset_service/app/ui/quota-parse-mock.js`：浏览器内 mock fixture（5 状态样例数据） | 🔵 v0.4 第四天 |
+| **4d** | `file_asset_service/app/ui/quota-ui.js`：列表行 ⋯ 下拉（5 状态智能图标）+ 详情页「高级操作」折叠区（#8 重新解析 + #9 删除解析结果 + #10 删除档案） | 🔵 v0.4 第四天 |
+| **4e** | `file_asset_service/app/ui/index.html`：注册 3 个新 script | 🔵 v0.4 第四天 |
+| **4f** | `file_asset_service/app/ui/styles.css`：§3.2.4 视觉规范（5 状态徽章 + 智能图标 + ⋯ 下拉 + 危险区颜色 + 删除 modal） | 🔵 v0.4 第四天 |
+
+### 阶段 5 · 列表行「文件数」显示
+
+| # | 任务 | 状态 |
+|---|---|---|
+| **5a** | 后端 `archive_service.get_file_count(archive_id)` helper：只数 `file_role IN ('main_document', 'priced_source')` | 🔵 v0.4 第四天 |
+| **5b** | 列表端点 `GET /api/data-lake/quota/archives` 改用 helper（不改前端 schema） | 🔵 v0.4 第四天 |
+
+### 阶段 6 · 测试（v0.4）
+
+| # | 任务 | 状态 |
+|---|---|---|
+| **6a** | quota_parse_job 入队 / 抢单 / 完成 / 失败 4 类单测 | 🔵 v0.4 第五天 |
+| **6b** | 改 §5 ALTER 幂等性单测（反复跑不报错） | 🔵 v0.4 第五天 |
+| **6c** | 端到端 mock 模式跑 1 份四川 PDF（curl 10 端点 + 看 Archive.parse_status + 4 类 archive_file + quota_parse_job 推进） | 🔵 v0.4 第五天 |
+| **6d** | E2E real 模式跑 1 份四川 PDF（启动 worker → POST /parse → 等 done → 验证 4 类 archive_file + 4 类 MinIO key） | 🔵 v0.4 第五天 |
+
+### 阶段 7 · 文档同步（v0.4）
+
+| # | 任务 | 状态 |
+|---|---|---|
+| **7a** | CLAUDE.md（**今天不同步**——阶段总结时合一次） | ⏸ 暂缓 |
+| **7b** | quota/README.md：worker 启动命令 + `quota_parse_job` 表 + 4 类 archive_file 速查 | 🔵 v0.4 第五天 |
+| **7c** | quota/web-frontend/SPEC.md / DB_SCHEMA.md / INTEGRATION_PLAN.md 三者状态对齐 | ✅ **今天已改完** |
 
 ---
 

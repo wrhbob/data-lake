@@ -9,10 +9,10 @@
 
 ## 0. 文档元信息
 
-- **状态**：Draft v0.3（v0.2 基础上砍 cancelled 与 #2 按钮；5 状态收敛；新增 §7.4 档案列表操作列集成解析入口）
-- **配套**：[`quota/parser/SPEC.md`](../parser/SPEC.md) v0.2
-- **范围**：清单定额档案台（`quota-ui.js`）内新增的「解析任务」tab + 档案详情内的「解析」区块。
-- **读者**：前端实现者、parser 维护者（用于跨文档核对）。
+- **状态**：Draft v0.4（v0.3 基础上：①5 状态×9 按钮扩到 5 状态×10 按钮（详情页加 #10「删除档案」）；②中间产物 md/html/candidate.xlsx/final.xlsx 全部进 `archive_file`（4 个新 `file_role`）；③真脚本接入用 DB 队列表 + 单 worker 串行（MinerU 12GB 显存禁止并发的硬约束）；④区分「删除解析结果」(#9) 与「删除档案」(#10)，按入湖纪律分两处；⑤「已完成」态允许「重新解析」作为逃生口）
+- **配套**：[`quota/parser/SPEC.md`](../parser/SPEC.md) v0.2 + [`quota/INTEGRATION_PLAN.md`](../INTEGRATION_PLAN.md) v0.4
+- **范围**：清单定额档案台（`quota-ui.js`）内新增的「解析任务」tab + 档案详情内的「解析」区块 + 档案列表操作列 5 状态智能图标。
+- **读者**：前端实现者、parser 维护者（用于跨文档核对）、DB 维护者（`archive_file` 4 新 role + `parse_job` 新表）。
 
 ---
 
@@ -24,15 +24,19 @@
 2. 严格遵循 [`quota/parser/SPEC.md`](../parser/SPEC.md) §5 / §6 / §11 / §12 定义的数据契约——前端只消费 parser 产出的内容，不擅自转换字段。
 3. 复用现有清单定额档案台的壳、能力开关与 `quota-api.js` 模式；不引入新的全局 UI 框架。
 
-### 1.2 范围（v0.1 必做）
+### 1.2 范围（v0.4 必做）
 
 - 清单定额档案台内新增「**解析任务**」tab。
 - 档案详情视图内新增「**解析**」区块（按 archive.status 状态自适应渲染）。
-- 7 个新 HTTP 端点（见 §5），由 `quota-parse-api.js` 统一封装。
+- 档案列表行新增「操作」列（5 状态智能图标 + ⋯ 下拉，§3.2.3）+ 详情页「解析区块」形成「行级快入口 + 详情全功能」双层。
+- **10 个新 HTTP 端点**（见 §5；v0.3 是 7 个，新增 #10 删除档案 + GET /parse-queue），由 `quota-parse-api.js` 统一封装。
 - 复用现有 `archive.status` 状态机（`registered → parsing → parsed → qa_passed → usable`），不在 Archive 上加新状态列。
 - 下载 `candidate.xlsx` / `final.xlsx`；上传 `reviewed.xlsx`。
 - 内联展示 Manifest 摘要 + QA 报告摘要。
-- Mock 模式（`QUOTA_PARSE_MOCK=1`），让 UI 在 Worker 未上线时即可开发与演示。
+- Mock 模式（`QUOTA_PARSE_MODE=mock`），让 UI 在 Worker 未上线时即可开发与演示。
+- **真脚本接入（v0.4 新增）**：DB 队列表 `parse_job` + 独立 `quota_parser_worker` 进程（subprocess 调 4 个 CLI skill 包），单 worker 串行执行（**MinerU 12GB 显存禁止并发**的硬约束，见 `quota/parser/external/mineru-pdf-parse/SKILL.md`）。
+- **中间产物入 `archive_file`（v0.4 新增）**：markdown / html / candidate.xlsx / final.xlsx 全部注册为 `archive_file` 行（4 个新 `file_role`：`parse_markdown` / `parse_html` / `parse_candidate_xlsx` / `parse_final_xlsx`），原 MinIO key 仍保留在 `Archive.candidate_xlsx_key` / `final_xlsx_key` 列；列表「文件数」**只数原件 PDF**（不重复计算）。
+- **两类删除分开放（v0.4 新增）**：列表行 ⋯ 下拉放「删除解析结果」(#9，仅清 MinIO 产物 + `parse_*` 字段，档案回到未解析态可重跑)；详情页「解析区块」底部分别放「删除解析结果」与「删除档案」(#10，删 Archive + ArchiveFile + 全部 MinIO 产物 + parse_job 记录)，按入湖纪律**两个按钮之间至少 1 个普通按钮间距**。
 
 ### 1.3 非范围
 
@@ -48,7 +52,7 @@
 
 | 名词 | 含义 | 对应 parser/SPEC.md |
 |---|---|---|
-| **解析任务（Parse Run）** | 一次 PDF → XLSX 的完整流水线调用；隐式承载在 Archive 一行内 | §2 "Worker"，§5.1 "stage A" |
+| **解析任务（Parse Run）** | 一次 PDF → XLSX 的完整流水线调用；隐式承载在 Archive 一行内；外部排队由 `parse_job` 表显式追踪（v0.4） | §2 "Worker"，§5.1 "stage A" |
 | **candidate** | OCR + 抽取 + autofinalize 之后的中间 XLSX | §5.1 `candidate_xlsx_path`，§6.1 schema |
 | **reviewed** | 用户在本地 Excel 中编辑过的 XLSX | §5.2 `finalize_reviewed_xlsx` 输入，§6.2 |
 | **final** | 阶段 B 直接落盘的最终 XLSX（不再跑 autofinalize） | §5.2 `final_xlsx_path` |
@@ -56,6 +60,10 @@
 | **QA 报告** | `qa_report.json` + `qa_report.md`；结构与数值校验 | §12.2 |
 | **Profile** | 省级解析规则集（`sichuan` / `chongqing`），入湖时已冻结 | §7 |
 | **解析状态** | 给用户看的逻辑状态，由 `archive.status` 推导 | §11 + §6.2 status 枚举 |
+| **中间产物（v0.4 新增）** | markdown / html / candidate.xlsx / final.xlsx 4 类；通过 `archive_file.file_role` 区分（4 个新 role 见 §4）。列表「文件数」列**只数原件 PDF**，中间产物走详情页 / 列表 ⋯ 下拉的下载入口。 | — |
+| **parse_job（v0.4 新增）** | DB 队列表（`quota_parse_job`），web 端点 POST /parse 时写入，由独立 `quota_parser_worker` 进程单 worker 串行消费 | — |
+| **删除解析结果 (#9)** | 清 MinIO 4 类中间产物 + `Archive.parse_*` 13 列 + `archive_file` 4 类 parse_* 行 + 关联 `parse_job`；**Archive 行与原始 PDF 保留** | — |
+| **删除档案 (#10)** | 删 Archive + ArchiveFile 全部关联 + MinIO 上 PDF 原始 + 中间产物 + 关联 parse_job + `quota_archive_profile` + `quota_publication_set`（若仅此一份分册）。**仅详情页可见**，列表行不放 | — |
 
 ---
 
@@ -89,49 +97,67 @@
 
 > 来源：UI 设计对话（2026-07-28）。本节是 §7.1「按状态渲染」的速查母表；§7.1 给具体渲染细节，本节给"全按钮 × 全状态"总览。两节须一起审阅。
 
-#### 3.1.1 主操作流（9 个按钮，按动线顺序；v0.3 移除 #2 取消）
+#### 3.1.1 主操作流（10 个按钮，按动线顺序；v0.4 新增 #10 删除档案）
 
 > **v0.3 决策**：删除原 #2「取消解析」按钮与 §5.8 端点。设计意图：开始解析后不允许停止——若需中止，按"重新解析"走 §5.1，Worker 会清理 MinIO 上旧的 candidate / reviewed / final（避免半成品状态污染 MinIO 与 Worker 调度打架）。
+>
+> **v0.4 决策**：新增 #10「删除档案」。与 #9「删除解析结果」严格区分——前者删整个档案（不可恢复，按入湖纪律须输入档案标题二次确认），后者只清解析产物（档案回到未解析态可重跑）。两个按钮**不在同一视觉区**（§3.1.4）。
 
 | # | 按钮 | 触发端点 | 用户场景 | 备注 |
 |---|---|---|---|---|
-| 1 | **开始解析** | `POST /api/data-lake/quota/archives/{archive_id}/parse` | 档案详情页对已登记 PDF 发起第一轮解析 | registered 状态可见；与「重新解析」**共用同一端点**（§3.1.3） |
+| 1 | **开始解析** | `POST /api/data-lake/quota/archives/{archive_id}/parse` | 档案详情页对已登记 PDF 发起第一轮解析 | registered 状态可见；v0.4：端点只**写 `parse_job` 排队**（不直接启 worker），由独立 `quota_parser_worker` 进程单 worker 串行消费。与「重新解析」**共用同一端点**（§3.1.3） |
 | 2 | **下载 PDF 原件** | `GET /api/data-lake/archives/{id}/files/{file_id}`（**复用现有端点**） | 任何时候要拿原件查看 | 任何状态可点；档案列表的「预览」图标复用此语义 |
 | 3 | **下载 candidate XLSX** | `GET /api/data-lake/quota/archives/{archive_id}/candidate.xlsx` | parsed 后下载到本地用 Excel 改 | 待审核 及之后 |
 | 4 | **上传 reviewed XLSX** | `POST /api/data-lake/quota/archives/{archive_id}/reviewed` | parsed 后把改好的 XLSX 传回去 | 仅待审核 / 解析失败；模态框交互见 §7.3 |
 | 5 | **下载 final XLSX** | `GET /api/data-lake/quota/archives/{archive_id}/final.xlsx` | 已完成后拿最终结果 | 已完成 状态可见 |
 | 6 | **查看 Manifest** | `GET /api/data-lake/quota/archives/{archive_id}/manifest` | 排错 / 核对 profile + parser_version | 待审核 及之后；弹窗头部强提示 `parser_version` |
 | 7 | **查看 QA 报告** | `GET /api/data-lake/quota/archives/{archive_id}/qa-report` | 看阶段 A / B 自动 QA 输出 | 已完成 及之后（及解析失败） |
-| 8 | **重新解析** | **复用** `POST /api/data-lake/quota/archives/{archive_id}/parse`（同 #1） | 用新 profile 或重跑 | 待审核 / 已完成 / 解析失败 任意状态；UI 层按 `archive.status` 切换 label/icon |
-| 9 | **删除解析结果** | `POST /api/data-lake/quota/archives/{archive_id}/parse/delete`（**待确认**——见 §12） | 清掉 MinIO 产物 + Archive `parse_*` 字段 | 待审核 及之后任意状态；危险操作须二次确认 |
+| 8 | **重新解析** | **复用** `POST /api/data-lake/quota/archives/{archive_id}/parse`（同 #1） | 用新 profile 或重跑；**v0.4 决策**：「已完成」态作为逃生口默认**隐藏**，详情页展开「高级操作」后才显示 | 待审核 / 解析失败 任意状态；UI 层按 `archive.status` 切换 label/icon |
+| 9 | **删除解析结果** | `POST /api/data-lake/quota/archives/{archive_id}/parse/delete` | 清 MinIO 4 类中间产物 + `Archive.parse_*` 13 列 + `archive_file` 4 类 parse_* 行 + 关联 `parse_job`；**Archive 行与原始 PDF 保留**（回到未解析态） | 待审核 及之后任意状态；列表 ⋯ 下拉危险区 + 详情页；二次确认（输入档案标题） |
+| 10 | **删除档案** | `DELETE /api/data-lake/quota/archives/{archive_id}`（v0.4 新增） | 删 Archive + ArchiveFile 全部 + PDF 原始 + 中间产物 + 关联 parse_job + quota_archive_profile + 配额发布（若仅此一份分册）。**仅详情页可见**——列表行不放。 | 任何状态可点；二次确认（输入档案标题）；写 `audit_log` `action='quota_archive_deleted'` |
 
-#### 3.1.2 状态 × 按钮可见性矩阵（5 状态 × 9 按钮）
+#### 3.1.2 状态 × 按钮可见性矩阵（5 状态 × 10 按钮；v0.4 拆「列表行 / 详情页」两列）
 
 > **v0.3 决策**：状态从 8 档收敛到 **5 档**（`cancelled` 删除；`failed_user` + `failed_permanent` 合并为"解析失败"；`qa_passed` + `usable` 合并为"已完成"）。
+>
+> **v0.4 决策**：
+> 1. 拆两列——「列表行」放快入口（#2/#3/#4 等高频操作），「详情页」放全功能（含 #8 重新解析逃生口 + #9 #10 两类删除）。
+> 2. **#10「删除档案」仅详情页可见**，列表行不放（避免误删）。
+> 3. **#8「重新解析」在「已完成」态默认隐藏**，进详情页「高级操作」展开才显示——保留逃生口但默认不让用。
 
-| UI 状态 | `archive.status` 覆盖 | #1<br>开始 | #2<br>下载 PDF | #3<br>下载 candidate | #4<br>上传 reviewed | #5<br>下载 final | #6<br>看 Manifest | #7<br>看 QA | #8<br>重新解析 | #9<br>删除结果 |
-|---|---|---|---|---|---|---|---|---|---|---|
-| **未解析** | `registered` | ✅ | ✅ | — | — | — | — | — | — | — |
-| **解析中** | `parsing` + `transient` | — | ✅ | — | — | — | — | — | — | — |
-| **待审核** | `parsed` | — | ✅ | ✅ | ✅ | — | ✅ | — | ✅ | ✅ |
-| **已完成** | `qa_passed` + `usable` | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **解析失败** | `failed_user` + `failed_permanent` | — | ✅ | ✅ | ✅ 重做 | — | ✅ | ✅ | ✅ 换 profile | ✅ |
+| UI 状态 | `archive.status` 覆盖 | 位置 | #1<br>开始 | #2<br>下载 PDF | #3<br>下载 cand | #4<br>上传 rev | #5<br>下载 final | #6<br>看 Manifest | #7<br>看 QA | #8<br>重新解析 | #9<br>删解析结果 | #10<br>删档案 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **未解析** | `registered` | 列表行 | ✅ | ✅ | — | — | — | — | — | — | — | — |
+|  |  | 详情页 | ✅ | ✅ | — | — | — | — | — | — | — | ✅ |
+| **解析中** | `parsing` + `transient` | 列表行 | — | ✅ | — | — | — | — | — | — | — | — |
+|  |  | 详情页 | — | ✅ | — | — | — | — | — | — | — | ✅ |
+| **待审核** | `parsed` | 列表行 | — | ✅ | ✅ | ✅ | — | — | — | — | ✅ | — |
+|  |  | 详情页 | — | ✅ | ✅ | ✅ | — | ✅ | — | ✅ | ✅ | ✅ |
+| **已完成** | `qa_passed` + `usable` | 列表行 | — | ✅ | ✅ | — | ✅ | — | — | — | ✅ | — |
+|  |  | 详情页 | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | ⚠️ 逃生口（默认隐藏） | ✅ | ✅ |
+| **解析失败** | `failed_user` + `failed_permanent` | 列表行 | — | ✅ | ✅ | ✅ 重做 | — | — | — | ✅ 换 profile | ✅ | — |
+|  |  | 详情页 | — | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 > `transient` 复用「解析中」渲染（黄色 banner「重试中（N/M）」叠加在状态徽章上），不单列。
+> 「列表行」 ⋯ 下拉含 #6/#7/#8/#9（按状态）；「详情页」按上面矩阵全渲染。
 
 #### 3.1.3 共用端点与 UI label 切换
 
-- **#1 与 #8 共用同一后端端点** `POST /archives/{archive_id}/parse`：UI 层根据 `archive.status` 切换 button label 与 icon——`registered → 「开始解析」`，`parsed/qa_passed/usable/failed_* → 「重新解析」`。后端契约干净，UI 决策点单一。
-- **后端语义差异**：第一次调用 `archive.status = registered → parsing`；后续调用从任何 `{parsed, qa_passed, usable, failed_*}` 回到 `parsing`，**Worker 会清理 MinIO 上旧的 candidate / reviewed / final**（避免多版本残留）。
+- **#1 与 #8 共用同一后端端点** `POST /archives/{archive_id}/parse`：UI 层根据 `archive.status` 切换 button label 与 icon——`registered → 「开始解析」`，`parsed/usable/failed_* → 「重新解析」`。后端契约干净，UI 决策点单一。
+- **v0.4 后端语义差异**：第一次调用 `archive.status = registered → parsing`（且 `parse_job` 入队）；后续调用从任何 `{parsed, qa_passed, usable, failed_*}` 回到 `parsing`，**Worker 会清理 MinIO 上旧的 candidate / reviewed / final + 旧 `archive_file` 4 类 parse_* 行 + 旧 `parse_job`**（避免多版本残留）。语义就是「按 #9 + #1 重做」——详情页实现可优化为：先调 #9 再调 #1（但后端已合一，无需前端拆两次）。
 
 #### 3.1.4 危险操作隔离
 
-按钮 #10「删除解析结果」必须满足：
+**两类删除必须满足（v0.4 显式）**：
 
-1. **二次确认 modal**：必填「输入档案标题确认」防误删。
-2. **位置不与「重新解析」相邻**：CLAUDE.md 入湖纪律已强调两类删除要分开（删除解析结果 ≠ 删除原始档案）；视觉上保持至少 1 个普通按钮的间距。
-3. **明确语义区分**：modal 标题必须是「删除解析结果」（不是「删除档案」或「删除 XLSX」），避免与原始档案的删除混淆。
-4. **审计**：调用时记录到 `audit_log`（`action='quota_parse_result_deleted'`, `target_id=archive_id`）。
+| 维度 | #9 删除解析结果 | #10 删除档案 |
+|---|---|---|
+| modal 标题（**必须区分**） | "删除解析结果" | "删除档案" |
+| 副标题 | "此操作将删除 MinIO 上的 markdown / html / candidate.xlsx / final.xlsx 与 Archive `parse_*` 字段、`archive_file` 4 类 parse_* 行、关联 `parse_job` 记录；**原始 PDF 与档案元数据保留**，回到未解析态可重新解析。" | "此操作将删除档案本身及其全部关联文件（原始 PDF + 4 类解析产物 + archive_file + quota_archive_profile + parse_job）；若该档案是所属 quota_publication_set 的唯一分册，**资料体系本身也会被删**。**此操作不可恢复**。" |
+| 必填确认 | 输入档案标题 | 输入档案标题 |
+| 位置 | 列表行 ⋯ 下拉危险区 + 详情页解析区块 | **仅详情页**，在解析区块底部「高级操作」折叠区 |
+| 与「重新解析」间距 | 至少 1 个普通按钮（#6 或 #7） | 至少 1 个普通按钮（#7 或 #9），且需先展开折叠区 |
+| 审计 | `action='quota_parse_result_deleted'` | `action='quota_archive_deleted'` |
 
 #### 3.1.5 UI 必要展示元素（非按钮，但与按钮同处一区块）
 
@@ -144,6 +170,7 @@
 | 异常 banner（3 类） | `parse.error_code` | `transient` / `failed_permanent` / `failed_user` |
 | 行数差异 warning | `qa_report.json` | qa_passed 时若 reviewed 行数差过大 |
 | 处理耗时 | `parse.started_at` / `finished_at` | 任意终态 |
+| **「文件数」（v0.4 说明）** | `archive.file_count` | 始终——**只数原件 PDF（`file_role` 限定 `main_document` / `priced_source`），不重复计算 4 类 parse_* 中间产物**。中间产物在详情页 / ⋯ 下拉的下载入口单独列出。 |
 
 ---
 
@@ -337,15 +364,20 @@ file_asset_service/app/ui/
 ├── quota-parse.js             ★ 新建：tab 视图 + 档案详情内解析区块
 ├── quota-parse-api.js         ★ 新建：HTTP 客户端 + mock 模式开关
 ├── quota-parse-mock.js        ★ 新建：浏览器内 mock fixture 与假轮询
-├── quota-ui.js                ✎ 改：新增「parse」tab；档案详情加解析区块
+├── quota-ui.js                ✎ 改：新增「parse」tab；档案详情加解析区块；列表行 ⋯ 下拉
 ├── quota-api.js               ✎ 改：暴露 `archive.parse` 字段格式化器
 └── index.html                 ✎ 改：注册三个新脚本
 
 file_asset_service/app/
-├── quota_api.py               ✎ 改：7 个新端点（mock 分支由 QUOTA_PARSE_MOCK=1 启用）
-├── models.py                  ✎ 改：Archive 增加 `parse_*` 列（见 §6.1）
-├── schemas.py                 ✎ 改：ArchiveDetailResponse 增加 `parse` 子对象
-└── mock_parse_runner.py       ★ 新建：模拟 Worker（sleep + 状态推进）
+├── quota_api.py               ✎ 改：10 个端点（v0.3 是 7 个，新增 DELETE /archives/{id}、GET /parse-queue）；mock 分支由 QUOTA_PARSE_MODE=mock 启用
+├── quota_parser_worker.py     ★ 新建（v0.4）：独立常驻进程，单 worker 轮询 `parse_job` 表，subprocess 串行调 4 个 CLI skill
+├── quota_parser/
+│   ├── __init__.py
+│   └── service.py             ✎ 改：加 4 个新 `file_role` 的 archive_file 写库 helper（`register_parse_artifact`）
+├── models.py                  ✎ 改：Archive 增加 `parse_*` 列（见 §6.1）+ ArchiveFile 4 个新 file_role + 新表 `QuotaParseJob`
+├── schemas.py                 ✎ 改：ArchiveDetailResponse 增加 `parse` 子对象 + `parse_job` 子对象
+├── mock_parse_runner.py       ★ 改：v0.4 仅 mock 模式用，仍保留 asyncio.create_task + sleep 推进
+└── audit_log.py               ✎ 改：加 `quota_archive_deleted` / `quota_parse_result_deleted` 两类 action
 ```
 
 > 前端 SPEC 只对前端目录负责。后端目录的改动列在这里，是为了 parser 维护者能一并审阅 API 契约；后端实现属于另一个工作流。
@@ -367,18 +399,23 @@ file_asset_service/app/
 
 所有端点统一挂在 `/api/data-lake/quota/` 下，与现有 `quota_api.py` 保持一致。除非特别说明，请求/响应均为 `application/json; charset=utf-8`。所有写端点直接返回更新后的 `ArchiveDetail`，前端无需额外 GET 即可重新渲染。
 
+> **v0.4 改动**：10 个端点（v0.3 是 7 个），新增 #10 `DELETE /archives/{archive_id}` 与 `GET /parse-queue`。原 7 个端点的契约保持不变。
+
 ### 5.1 `POST /archives/{archive_id}/parse`
 
 触发解析（阶段 A）。
 
 - **请求体**：`{ "profile": "sichuan" | "chongqing" | null }`
   - `null` → 使用档案上已有的 profile（入湖时已确定）。
-- **副作用**：`archive.status` 从 `registered` 推进到 `parsing`。若已是 `{parsing, parsed, qa_passed}` 之一，返回 `409 ALREADY_PARSING_OR_DONE`。
+- **v0.4 副作用**：
+  1. **v0.4 真实模式（`QUOTA_PARSE_MODE=real`）**：写 `parse_job`（status=queued），**不**直接启 worker；由独立 `quota_parser_worker` 进程单 worker 串行消费。
+  2. **v0.4 mock 模式（`QUOTA_PARSE_MODE=mock`）**：`asyncio.create_task(run_mock_pipeline(archive_id))`，`archive.status` 从 `registered` 推进到 `parsing`；用 `asyncio.create_task` 启后台任务跑 `run_mock_pipeline(archive_id)`。
+  3. 已存在 `parse_job`（status ∈ {queued, running}）→ 返回 `409 ALREADY_PARSING_OR_DONE`。
 - **成功响应 200**：`ArchiveDetail`（见 §6.1）。
 - **错误**：
   - `404 ARCHIVE_NOT_FOUND`
   - `409 ALREADY_PARSING_OR_DONE`
-  - `422 INVALID_PROFILE`（显式 profile 不在注册表内）
+  - `422 INVALID_PROFILE`（显式 profile 不在注册表内——目前只支持 `sichuan` / `chongqing`，其他返回 422）
 
 对照：parser/SPEC.md §5.1 `run_quota_pipeline`。
 
@@ -405,7 +442,7 @@ file_asset_service/app/
 
 - **请求体**：`multipart/form-data; file=<reviewed.xlsx>`。
 - **浏览器侧预校验**（前端、上传前——见 §6.3）仅作辅助提示；**后端始终按 parser/SPEC.md §6.2 重新校验**。
-- **副作用**：成功 → `archive.status` 从 `parsed` 推进到 `qa_passed`，并写入 `final_xlsx_key`；失败 → `parsed` 推进到 `failed_user`（体现为 `archive.status` 不变 + `parse.error_code=failed_user`）。
+- **副作用**：成功 → `archive.status` 从 `parsed` 推进到 `qa_passed`，并写入 `final_xlsx_key`（同时 `archive_file` 注册 `parse_final_xlsx` 行）；失败 → `parsed` 推进到 `failed_user`（体现为 `archive.status` 不变 + `parse.error_code=failed_user`）。
 - **成功响应 200**：`ArchiveDetail`。
 - **错误**：
   - `422 INVALID_XLSX_STRUCTURE`，body 含 `{ reason: string, sheet: string, column_index?: int }`，精确指出违反的校验规则（parser/SPEC.md §6.2 禁止：改名 Sheet1、改列数、改列序、加列）。
@@ -434,6 +471,60 @@ file_asset_service/app/
 - **错误**：`404 QA_REPORT_NOT_FOUND`。
 
 对照：parser/SPEC.md §12。
+
+### 5.8 `POST /archives/{archive_id}/parse/delete`（v0.4 强化版）
+
+**v0.3 旧描述**：清 MinIO + `parse_*` 字段。
+
+**v0.4 完整语义**（与 §3.1.4 #9 危险操作对齐）：
+
+1. 删除 `quota_parse_job` 关联行（status ∈ {queued, running} → 软取消：status='cancelled'；其他状态 → 物理删）。
+2. 删除 MinIO 4 类中间产物（按 `Archive.candidate_xlsx_key` / `final_xlsx_key` + 解析时记录的 md/html key）。
+3. 删除 `archive_file` 中 4 类 `parse_*` role 行（`parse_markdown` / `parse_html` / `parse_candidate_xlsx` / `parse_final_xlsx`）。
+4. 清 `Archive.parse_*` 13 列（除 `parse_status='pending'`）。
+5. **保留**：`Archive` 行 + `quota_archive_profile` + 原始 PDF 的 `archive_file` 行。
+6. 写 `audit_log` `action='quota_parse_result_deleted'`。
+
+- **成功响应 200**：`ArchiveDetail`（status=pending_tag / registered）。
+- **错误**：
+  - `404 ARCHIVE_NOT_FOUND`
+  - `409 ALREADY_PARSING`（仅当 `parse_job` status=running 且进程仍在 active——前端先 cancel 再重试）
+
+### 5.9 `GET /parse-queue`（v0.4 新增）
+
+查看 DB 队列当前状态——**仅供调试**（生产环境隐藏，dev 环境加 `?show_queue=1` 触发）。
+
+- **响应 200**：
+  ```json
+  {
+    "mode": "real",
+    "running": [{ "job_id": "...", "archive_id": "...", "started_at": "..." }],
+    "queued":  [{ "job_id": "...", "archive_id": "...", "enqueued_at": "..." }],
+    "recent_failed": [{ "job_id": "...", "archive_id": "...", "error_code": "...", "finished_at": "..." }],
+    "worker_pid": 12345,
+    "worker_started_at": "2026-07-29T10:00:00Z"
+  }
+  ```
+- 真实模式才有 `worker_pid` / `worker_started_at`；mock 模式这俩字段为 `null`。
+
+### 5.10 `DELETE /archives/{archive_id}`（v0.4 新增 = #10 删除档案）
+
+按 §3.1.4 #10 严格语义：
+
+1. 调 §5.8 删除解析结果（前置清理，避免外键悬挂）。
+2. 删 `quota_archive_profile`（若存在）。
+3. **若该档案是所属 `quota_publication_set` 的唯一一份分册** → 删 `quota_publication_set`；否则保留（多卷定额只摘掉这一册）。
+4. 删 `archive_file` 全部（原件 PDF + 历史 parse_* 残留 + 任何 role）。
+5. 删 MinIO 上原始 PDF（按 `file_asset.blob_storage_key`）。
+6. 删 `Archive` 行。
+7. 写 `audit_log` `action='quota_archive_deleted'`，`target_id=archive_id`，`metadata={ "publication_set_id": "...", "publication_set_deleted": true/false }`。
+
+- **请求体**：`{ "confirm_title": "完整档案标题（必须严格匹配 archive.title）" }`。
+- **成功响应 200**：`{ "archive_id": "...", "publication_set_deleted": true/false }`。
+- **错误**：
+  - `404 ARCHIVE_NOT_FOUND`
+  - `422 TITLE_MISMATCH`（`confirm_title` 与 `archive.title` 不一致——含空格/标点差异）
+  - `409 ARCHIVE_REFERENCED`（被其他表引用，删除将破坏外键——返回引用方列表）
 
 > **v0.3 决策**：删除原 §5.8 取消解析端点。设计意图：开始解析后不允许停止（避免半成品状态污染 MinIO、避免与 Worker 调度逻辑打架）。如需中止，按"重新解析"走 §5.1——Worker 会清理 MinIO 上旧的 candidate / reviewed / final（见 §3.1.3）。
 
@@ -596,26 +687,32 @@ Task ID:     qp_20260727_xxxx
 [解析区块]
   - archive.status == registered：
       大按钮「开始解析」（调 §5.1）
+      [高级操作 ▼]（v0.4 新增折叠区）→ 展开后含「删除档案」(#10)
   - archive.status == parsing：
       转圈 + 「Worker 正在解析…」
       若 parse.error_code == transient：黄色 banner「重试中（N/M）」
+      [高级操作 ▼] → 含「删除档案」(#10)（注：解析中也可删，但 #9「删除解析结果」被 #9-409 ALREADY_PARSING 挡掉，#10 不挡）
   - archive.status == parsed：
       两个按钮：「下载 candidate」 | 「上传 reviewed」
       内联摘要卡（页数、candidate_rows、警告数）
       「查看 Manifest」链接（§5.6，新页签或弹窗；头部展示 Profile / parser_version / Task ID）
       「查看 QA 报告」链接（§5.7）
+      [高级操作 ▼] → 含「重新解析」(#8，逃生口) | 「删除解析结果」(#9) | 「删除档案」(#10)
   - archive.status == qa_passed：
       一个按钮：「下载 final」
       内联 QA 摘要（parser status: ok / warning / failed）
       警告列表（如有）
       「查看 Manifest」/「查看 QA 报告」链接
+      [高级操作 ▼] → 含「重新解析」(#8，逃生口，默认隐藏) | 「删除解析结果」(#9) | 「删除档案」(#10)
   - archive.status == usable：
       同 qa_passed + 绿色「Usable」徽章
+      [高级操作 ▼] → 同 qa_passed
   - 任何状态若 parse.error_code != null：
       区块顶部红色 banner，显示 parse.error_message
 ```
 
 > **v0.3**：删除 `cancelled` 分支（开始解析后不允许停止，详见 §3.1.1）。
+> **v0.4**：新增「高级操作」折叠区（按 #10/CLAUDE.md 入湖纪律与主按钮隔离），已完成态「重新解析」仅在此处可见作逃生口。
 
 若 `parse.status` 为 `pending` 且 `archive.status == registered`（初始态）——区块隐藏「开始解析」按钮之外的所有内容，按钮始终保留。
 
@@ -742,25 +839,39 @@ Task ID:     qp_20260727_xxxx
 
 ---
 
-## 8. Mock 策略（Worker 未上线前的开发模式）
+## 8. Mock 策略（双模式；v0.4 区分 mock 与 real）
 
-由环境变量 `QUOTA_PARSE_MOCK=1` 控制（`quota_api.py` 与 `quota-parse-mock.js` 都读取）。开启后：
+由环境变量 `QUOTA_PARSE_MODE` 控制（`quota_api.py` 与 `quota-parse-mock.js` 都读取）：
+- `QUOTA_PARSE_MODE=mock`（默认开发期）：前端优先 mock fixture；后端 `POST /parse` 走 `mock_parse_runner.py`。
+- `QUOTA_PARSE_MODE=real`（生产）：后端 `POST /parse` 写 `parse_job` 入队，由独立 `quota_parser_worker.py` 进程单 worker 串行消费。
 
-- **POST /parse**：端点**必须声明为 `async def`**（不是 `def`），同步把 archive 推到 `parsing`；用 `asyncio.create_task(...)` 启后台任务跑 `run_mock_pipeline(archive_id)`：sleep 2–10 s 后推到 `parsed`，把 §6.1 字段填好（fake 值），往 MinIO 写一个 10 行假的 `candidate.xlsx`，路径 `quota/<archive_id>/candidate.xlsx`。
-- **POST /reviewed**：mock 模式下跳过 openpyxl 校验，任何 `.xlsx` 都接受，sleep 2–3 s 后推到 `qa_passed`。
+### 8.1 mock 模式（v0.4 保持 v0.3 行为不变）
+
+- **POST /parse**：端点**必须声明为 `async def`**（不是 `def`），同步把 archive 推到 `parsing`；用 `asyncio.create_task(...)` 启后台任务跑 `run_mock_pipeline(archive_id)`：sleep 2–10 s 后推到 `parsed`，把 §6.1 字段填好（fake 值），往 MinIO 写一个 10 行假的 `candidate.xlsx`，路径 `quota/<archive_id>/candidate.xlsx`，**同时往 `archive_file` 注册 `parse_markdown` / `parse_html` / `parse_candidate_xlsx` 3 个 role**（v0.4 强化）。
+- **POST /reviewed**：mock 模式下跳过 openpyxl 校验，任何 `.xlsx` 都接受，sleep 2–3 s 后推到 `qa_passed`，**同时往 `archive_file` 注册 `parse_final_xlsx` role**。
 - **GET /candidate.xlsx** / **GET /final.xlsx**：返回 fixture。
 - **GET /manifest** / **GET /qa-report**：返回静态 fixture，结构**完全符合** parser/SPEC.md §6.2 / §12.2——确保 Worker 真实上线后前端代码无需改动。
 
-**硬约束（v0.1 必须满足，否则 mock 模式会在第一波前端联调就翻车）**：
+**硬约束（v0.1 必须满足，否则 mock 模式会在第一波前端联调就翻车；v0.4 全部继承）**：
 
-1. **端点必须 `async def`**：`POST /parse` 必须用 `async def`，把耗时操作放进 `asyncio.create_task` 后台跑，立即返回 200。若端点写成同步 `def`，FastAPI 会把请求丢到线程池阻塞，主线程会被 mock 的 `sleep` 占住，前端第二轮轮询会卡死。
+1. **端点必须 `async def`**：`POST /parse` 必须用 `async def`，把耗时操作放进 `asyncio.create_task` 后台跑，立即返回 200。
 2. **后台任务必须持有独立的 DB session**：FastAPI 的 `Depends(get_db_session)` 默认是请求作用域（`scope="function"`），请求返回后 session 关闭；后台任务若继续用同一个 session 引用，写库时会抛 `DetachedInstanceError` / `Session is closed`。`run_mock_pipeline` 必须自己 `SessionLocal()` 拿新 session 写 `parse_*` 列与状态推进；mock runner 不持有原请求的 session 引用。
 3. **MinIO 写也要在后台**：写 `candidate.xlsx` 的 I/O 与 `sleep` 一起在后台 task 里跑，不阻塞端点返回。
 4. **`asyncio.create_task` 的引用必须保留**：否则事件循环可能在请求返回前就 GC 掉 task，导致后台跑到一半被吞。实现里把 task 引用存到模块级 `set()` 里，等后台 task 完成后回调 `discard`。
+5. **v0.4 新增**：mock 模式下也必须把 4 类中间产物注册进 `archive_file`——前端列表「文件数」会因 mock 模式跑过而变成 5（1 PDF + 4 parse_*），但详情页 / 列表 ⋯ 下拉的「下载」入口能验证 v0.4 架构的完整性。
 
-`mock_parse_runner.py` 提供单个函数 `run_mock_pipeline(archive_id)`（内部自己 `SessionLocal()`）。`quota_api.py` 的 mock 分支 `async def` 调用 `asyncio.create_task(run_mock_pipeline(...))`，替代真正的 Worker 入口。
+### 8.2 real 模式（v0.4 新增）
 
-Worker 真正上线时，只需移除 `if QUOTA_PARSE_MOCK: ...` 分支并指向 `quota_parser.worker.serve_worker`——前端不动。
+`POST /parse` 端点不直接启动解析，而是写一条 `quota_parse_job` 记录（status='queued'）；由独立 `quota_parser_worker.py` 进程**单 worker 串行**消费：
+
+- 启动方式：`scripts/run_quota_parser_worker.sh`（仿 `serve.py` onlogon），常驻后台。
+- 轮询：`SELECT ... FROM quota_parse_job WHERE status='queued' ORDER BY enqueued_at LIMIT 1 FOR UPDATE SKIP LOCKED`。
+- 拉 PDF → 调 `quota_parser.run_quota_pipeline(archive_id, profile)`（subprocess，PATH 调 4 个 CLI skill）→ 写 `parse_job` status='done' / 'failed' → 注册 4 类 `archive_file` 行。
+- **MinerU 12GB 显存禁止并发**：`quota_parser_worker` 全局只启 1 个 worker；启动时 `fcntl.flock(LOCK_EX)` 占 `/var/run/quota_parser_worker.lock` 防止误启多 worker。
+- `parse_job` 表生命周期：queued → running → done / failed；`finished_at` 必填。
+- 失败分两类：transient（Worker 自动 retry 3 次，3 次仍失败 → failed_user） / failed_permanent（直接 failed_permanent）。
+
+前端 dev 环境若想调试队列：访问 §5.9 `GET /parse-queue?show_queue=1`。
 
 ---
 
@@ -835,15 +946,24 @@ Worker 真正上线时，只需移除 `if QUOTA_PARSE_MOCK: ...` 分支并指向
 
 - **v0.1**（本文档）：初稿，待与 `parser/SPEC.md` v0.2 核对。包含：7 个核心端点（§5.1–§5.7）、复用 `archive.status` 状态机、Mock 模式（§8，含 4 条硬约束）。
 - **v0.2**（中转）：新增 §3.1「按钮清单 + 状态矩阵」、§5.8 占位取消端点、UI 状态映射表加 `cancelled` 终态。
-- **v0.3**（本文档）：
+- **v0.3**：
   1. 删除 §5.8 取消端点、`cancelled` 终态、§3.1.1 #2 按钮（开始解析后不允许停止）。
   2. 状态枚举从 8 档收敛到 5 档（`未解析 / 解析中 / 待审核 / 已完成 / 解析失败`）。
   3. §3.1 按钮从 10 个砍到 9 个。
   4. 新增 §7.4「档案列表操作列集成解析」——状态徽章、智能图标、⋯ 下拉、删除二次确认 modal、解析中行级轮询。
-- **v0.4**（未来）：
+- **v0.3.1**（2026-07-28，筛选条实施批次，详细见 §14）：
+- **v0.4**（**本文档**）：
+  1. **§3.1.1 按钮从 9 扩到 10**：新增 #10「删除档案」；#8「重新解析」从「已完成」态移除，详情页「高级操作」折叠区内作为逃生口。
+  2. **§3.1.2 状态×按钮矩阵拆两列**：「列表行」（快入口）vs「详情页」（全功能 + #8 逃生口 + #10 删除档案）。
+  3. **§3.1.4 危险操作显式两类**：#9 删除解析结果 vs #10 删除档案；modal 标题、副标题、必填确认、间距、audit action 全部对齐。
+  4. **§5 端点从 7 扩到 10**：新增 §5.8 删除解析结果强化版、§5.9 GET /parse-queue、§5.10 DELETE /archives/{id}。
+  5. **§6.1 列表「文件数」语义澄清**：只数原件 PDF（`file_role` 限定 `main_document` / `priced_source`），不重复计算 4 类 parse_* 中间产物。
+  6. **§8 Mock 策略升级为双模式**：`QUOTA_PARSE_MODE=mock|real`；real 模式用 `quota_parser_worker.py` 独立进程 + `parse_job` DB 队列 + 单 worker 串行（**MinerU 12GB 显存禁止并发的硬约束**）；mock 模式仍走 `mock_parse_runner.py`。
+  7. **§7.1 详情页加「高级操作」折叠区**：#8/#9/#10 三按钮折叠后展示，与主流程按钮视觉隔离（按入湖纪律）。
+- **v0.5**（未来）：
   1. 加 PDF 页级 OCR 置信度视图（Manifest `metrics` 扩字段，对接后端新增的 `page_confidence[]`）。
   2. 「解析任务」tab 加批量操作（批量重新解析、批量下载）。
-- **v0.3.1**（2026-07-28，筛选条实施批次，详细见 §14）：
+  3. 真实 worker 启多 worker 优化（拆 GPU 显存约束后可考虑，每 worker 限定特定档案类型）。
   1. 后端 `/api/data-lake/quota/facets` 接受 `jurisdiction_code` 查询参数；主年份聚合 + 嵌套 `editions` 子查询都按省过滤。
   2. 前端 `_facetsParams()` helper：建筑工程定额 + 选中具体省份 → 透传 `jurisdiction_code`；`secondary="all"` 时不传（取所有省并集）。
   3. `set-primary` / `set-secondary` 处理器在切换时主动 `getFacets()` 重刷，避免后端 facets 缓存命中过期数据。
