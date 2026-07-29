@@ -1115,6 +1115,10 @@ def _ensure_quota_publication_set(
         existing_profile.publication_set_id = pub_set.publication_set_id
 
     session.flush()
+    # v0.3.3：补 commit。upload_quota_files 此前只 flush 不 commit，
+    # FastAPI dep get_db_session (database.py:761) 关 session 时会回滚未提交事务，
+    # 导致 PubSet + Profile 永久丢失。helper 自洽 commit 与 _ensure_quota_upload_source 一致。
+    session.commit()
     return pub_set
 
 
