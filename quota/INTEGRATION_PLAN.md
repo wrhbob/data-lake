@@ -1,4 +1,4 @@
-# quota_parser 集成 Plan（v0.4 · 2026-07-29 锁定）
+# quota_parser 集成 Plan（v0.5 · 2026-07-30 锁定）
 
 > 目标：把已有的 `quota_parser` Python 包（v0.3 冻结，见 [`parser/SPEC.md`](parser/SPEC.md)）
 > 嵌入 file-asset service，让用户在网站上触发、监控、下载、上传解析任务全流程。
@@ -805,34 +805,121 @@ $PY -c "from quota_parser import run_quota_pipeline, finalize_reviewed_xlsx; pri
 
 ## 8. 开放问题（待用户/运维确认）
 
-| # | 问题 | 推荐方案 | 阻塞哪步 |
+| # | 问题 | 决议 | 阻塞哪步 |
 |---|---|---|---|
-| 1 | `Archive.status` vs `parse_status` 命名冲突（cost_info 8 状态 vs quota 7 状态） | 新增独立 `parse_status` 字段（§2.1 方案 A） | step 1 |
-| 2 | MinIO bucket 名 `quota-extract` 是否与运维约定冲突 | 单点常量 `PARSE_BUCKET`，1 行可改；先用 `quota-extract` | step 2/3 |
-| 3 | `parse_task_id` 是否要唯一约束 | 不加（1 archive 1 run） | 无 |
-| 4 | QA 报告保留 `json` 还是只 `md` | 两者都保留，`?format=md` 切换 | step 3 |
-| 5 | archive 原 PDF sha256 是否要存到 Archive 表 | 暂不存（FileAsset.sha256 已有，跨表 join） | 无 |
-| 6 | web-frontend SPEC §6.1 中 `archive.status == parsing` 的表述是否要改为 `archive.parse_status == "parsing"` | 改（与方案 A 对齐） | step 4 后单独改 SPEC |
-| 7 | 前端解析区块何时做 | 批次 3（不在今天 4 步内） | 无 |
-| 8 | 中间产物（md/html/xlsx）已落 MinIO 后，再次解析能否复用上轮产物 | 不复用（每次重跑 OCR 保证最终产物是最新；如需可重入再加 content hash 缓存） | step 2 |
-| 9 | worker 回写 `parse_status` 后前端刷新机制 | 5-10s 轮询（沿用 mock 路径）；SSE/WebSocket 留待后续 | step 4 |
-| 10 | worker 跑在哪个 conda env（`file-asset` 还是新增 `quota-parser`） | 新增 `quota-parser` env（与 web 隔离，防 PaddleOCR/transformers 拖垮 uvicorn） | step 2 |
-| 11 | 失败可重试细分（`failed_user` vs `failed_permanent`） | 区分网络抖动/OOM → failed_user（自动重试 ≤2 次）；PDF 损坏/加密 → failed_permanent（人工决策） | step 2 |
-| 12 | 解析超时与 OOM 保护 | 单 PDF 软超时 30 分钟 / 硬超时 45 分钟；GPU OOM 触发由 minerU 容器自身重启 | step 2 |
-| 13 | intermediate ↔ final 反向溯源（QA 点行 → 原 PDF 页） | manifest.json 追加 `artifact_index`：`{page: int, block_id: str, md_offset: int}` | step 2 |
-| 14 | `manifest.json` 字段清单（参考 `cost_info` manifest） | archive_id / parser_version / profile_hash / artifact_keys / timing / pdf_sha256 / chain_hash | step 2 |
-| 15 | `trigger_quota_parse` 的 `body.profile` 语义 | 暂未定义（前端不传）；先固化默认 `profile=default`，第二批再开放给用户选 | step 4 |
-| 16 | worker 写 `archive_event` 走哪条路径 | 走 `register_quota_event` helper（拒绝绕过状态机的裸 INSERT） | step 2 |
-| 17 | 审计粒度（actor 区分 `user/system/worker`） | actor_type 枚举：`user` / `system` / `worker`；action 列表：`quota_parse_triggered` / `quota_parse_succeeded` / `quota_parse_failed` | step 2 |
-| 18 | 前端「开始解析」按钮点击幂等 | 点完立刻 `disabled + spinner`；后端 409 时前端区分「已在跑」vs「已成功」分别 toast | step 4 |
-| 19 | mock vs real 环境隔离（启动时强制打印） | `QUOTA_PARSE_MOCK` 在进程启动日志首行打印；生产误用 mock 必须告警 | step 2 |
-| 20 | 解析进度反馈（百分比/页码） | 第一版只显示「解析中」徽章；SSE 进度推送留后续批次 | step 4 |
-| 21 | 失败时前端展示 `parse_error_code` / `parse_error_message` | 详情页「失败原因」区块（折叠）；列表行 tooltip 简版 | step 4 |
-| 22 | 「重新解析」清理范围（`archive_event` 旧事件 / `outbox` 旧事件 / `crawl_lineage`） | 仅清 `parse_*` 字段 + 4 个 parse_* role 的 archive_file 行；旧事件保留（审计需要） | step 2 |
-| 23 | 7 个解析端点的真数据流回归（mock ≠ 真） | 端到端冒烟：1 份小 PDF 跑通 trigger → candidate.xlsx 下载 → reviewed 上传 → final 下载 | step 3 |
+| 1 | `Archive.status` vs `parse_status` 命名冲突（cost_info 8 状态 vs quota 7 状态） | ✅ 新增独立 `parse_status` 字段（§2.1 方案 A） | step 1 |
+| 2 | MinIO bucket 名 `quota-extract` 是否与运维约定冲突 | ✅ 单点常量 `PARSE_BUCKET`，1 行可改；先用 `quota-extract` | step 2/3 |
+| 3 | `parse_task_id` 是否要唯一约束 | ✅ 不加（1 archive 1 run） | 无 |
+| 4 | QA 报告保留 `json` 还是只 `md` | ✅ 两者都保留，`?format=md` 切换 | step 3 |
+| 5 | archive 原 PDF sha256 是否要存到 Archive 表 | ✅ 暂不存（FileAsset.sha256 已有，跨表 join） | 无 |
+| 6 | web-frontend SPEC §6.1 中 `archive.status == parsing` 的表述是否要改为 `archive.parse_status == "parsing"` | ✅ 改（与方案 A 对齐） | step 4 后单独改 SPEC |
+| 7 | 前端解析区块何时做 | ✅ 批次 3（不在今天 4 步内） | 无 |
+| 8 | 中间产物（md/html/xlsx）已落 MinIO 后，再次解析能否复用上轮产物 | ✅ 不复用（每次重跑 OCR 保证最终产物是最新；如需可重入再加 content hash 缓存） | step 2 |
+| 9 | worker 回写 `parse_status` 后前端刷新机制 | ✅ 5-10s 轮询（沿用 mock 路径）；SSE/WebSocket 留待后续 | step 4 |
+| 10 | worker 跑在哪个 conda env | ✅ **复用 `file-asset`**（OCR/MinerU 已在服务器，worker 只需 `requests` + `pydantic` 等轻量包） | step 2 |
+| 11 | 失败可重试细分 | ✅ **不重试**：解析脚本无 QA 输出；上传通信非 200 直接终止任务并报告用户 | step 2 |
+| 12 | 解析超时与 OOM 保护 | ✅ **无 OOM 监控**：MinerU 流式每 100 页 5 分钟落盘（+5 分钟 buffer = 10 分钟）；上轮产物落盘 10 分钟后本次未落盘 → 报超时错误 | step 2 |
+| 13 | intermediate ↔ final 反向溯源（QA 点行 → 原 PDF 页） | ❌ **不做**（无 QA → 块级索引用不上） | — |
+| 14 | `manifest.json` 字段清单 | ✅ 落 MinIO（与最终产物同位置）；字段：`archive_id / parser_version / profile / profile_hash / pdf_sha256 / artifact_keys / artifact_sha256 / timing / chain_hash` | step 2 |
+| 15 | `trigger_quota_parse` 的 `body.profile` 与省份字段透传 | ✅ 第一版只接 `profile=default`（422 拒绝其他值）；省份字段从 `archive.metadata_payload.province` 透传到 md→xlsx 阶段（详见 §9） | step 4 |
+| 16 | worker 写 `archive_event` 走哪条路径 | ✅ 走 `register_quota_event` helper（拒绝绕过状态机的裸 INSERT） | step 2 |
+| 17 | 审计粒度（actor 区分 `user/system/worker`） | ✅ actor_type 枚举：`user` / `system` / `worker`；action 列表：`quota_parse_triggered` / `quota_parse_succeeded` / `quota_parse_failed` | step 2 |
+| 18 | 前端「开始解析」按钮点击幂等 | ✅ 点完立刻 `disabled + spinner`；后端 409 时前端区分「已在跑」vs「已成功」分别 toast | step 4 |
+| 19 | mock vs real 环境隔离（启动时强制打印） | ✅ `QUOTA_PARSE_MOCK` 在进程启动日志首行打印；生产误用 mock 直接 raise 启动失败 | step 2 |
+| 20 | 解析进度反馈（百分比/页码） | ✅ 第一版只显示「解析中」徽章；SSE 进度推送留后续批次 | step 4 |
+| 21 | 失败时前端展示 `parse_error_code` / `parse_error_message` | ✅ 详情页「失败原因」区块（折叠）；列表行 tooltip 简版 | step 4 |
+| 22 | 「重新解析」清理范围 | ✅ 中间文件全清（md / html / candidate.xlsx / final.xlsx + 4 类 parse_* archive_file 行 + `parse_*` 13 字段）；`archive_event` 旧记录保留（审计需要） | step 2 |
+| 23 | 7 个解析端点的真数据流回归（mock ≠ 真） | ✅ 端到端冒烟：1 份小 PDF 跑通 trigger → candidate.xlsx 下载 → reviewed 上传 → final 下载 | step 3 |
 
 ---
 
-**锁版本**：v1（2026-07-28 讨论锁定）。
+## 9. #15 省份字段透传详细设计
 
-后续破坏性变更（拆 adapter 子包到独立子项目、改 `Archive.parse_status` 命名、加 DB 唯一约束等）必须走 v2。
+### 9.1 边界
+
+- **OCR 阶段不区分省份**：MinerU 容器无省份概念，只把 PDF 拆成 md / html。
+- **MD → XLSX 阶段才区分省份**：不同省份定额表头模板不同（四川 / 重庆 / 湖北 / 内蒙古）。
+- 省份字段来源：上传时已落地 `archive.metadata_payload.province`，整条链路读 DB。
+
+### 9.2 数据流
+
+```
+用户上传 PDF
+  ↓
+POST /api/data-lake/quota/upload   body: province=sc
+  ↓ Frontend 表单已带 province short code
+quota_api.upload_quota_files
+  ↓ 写 archive.metadata_payload.province = "sc"
+Archive row in DB
+  ↓
+用户点击「开始解析」
+  ↓ 前端不传 province（0 改动）
+POST /archives/{id}/parse   body={}
+  ↓
+trigger_quota_parse 读 archive.metadata_payload.province
+  ↓ 塞进 subprocess argv
+quota_parser_worker.py --province sc
+  ↓
+run_quota_pipeline(pdf_path, profile, province="sc")
+  ↓
+md_to_csv_v2(md, province="sc") → 走四川模板
+```
+
+### 9.3 落地方案
+
+**解析脚本侧**（`quota/parser/quota_parser/`）：
+
+```python
+# pipeline.py
+def run_quota_pipeline(pdf_path, profile, province=None):  # ← 新增 province
+    ocr_output = call_mineru(pdf_path)
+    candidate_xlsx = md_to_csv_v2(ocr_output.md, province=province)  # ← 透传
+    return ...
+
+# external/quota_md_to_csv_v2.py
+PROVINCE_TEMPLATES = {
+    "sc": "<四川模板：定额计价表头>",
+    "cq": "<重庆模板：清单计价表头>",
+    "hu": "<湖北模板：含税/除税双列>",
+    # ...
+    "default": "<通用模板>",
+}
+
+def md_to_csv_v2(md_text, *, province=None):
+    template = PROVINCE_TEMPLATES.get(province, PROVINCE_TEMPLATES["default"])
+    return _render_template(template, md_text)
+
+# worker.py
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--province", default=None)
+    args = parser.parse_args()
+    run_quota_pipeline(..., province=args.province)
+```
+
+**省份字段行为**：
+- province 不传 / `None` / `"default"` / 未知值 → 走 `default` 模板（不报错）
+- 已知省份（`sc` / `cq` / `hu`）→ 走对应模板
+- 路径 A **唯一例外**：final.xlsx 阶段 B 仍不区分省份（用户复核过后再由 finalize 输出）
+
+**web 端侧**（`file_asset_service/app/`）：
+
+- `quota_api.py:trigger_quota_parse` 读 `archive.metadata_payload.province` → subprocess `--province`
+- `quota_parser.py`（如有）`trigger_parse()` 透传 province
+- 前端 `parse-trigger` action **0 改动**
+
+### 9.4 改动清单
+
+| 文件 | 改动量 |
+|---|---|
+| `quota/parser/quota_parser/pipeline.py` | `run_quota_pipeline` 新增 `province` 参数 + 透传 |
+| `quota/parser/quota_parser/external/quota_md_to_csv_v2.py` | 加 `PROVINCE_TEMPLATES` 字典 + 按 province 选模板 |
+| `quota/parser/quota_parser/worker.py` | CLI 接收 `--province` |
+| `file_asset_service/app/quota_parser.py` | `trigger_parse()` 读 `archive.metadata_payload.province` 传 worker |
+| `file_asset_service/app/quota_api.py` | `trigger_quota_parse` 把 province 塞 subprocess argv |
+
+**前端：0 改动**。
+
+---
+
+**锁版本**：v1.1（2026-07-30 §8 全部 23 条锁定 + §9 #15 详细设计落定；与 v1 兼容，无破坏性变更）。
