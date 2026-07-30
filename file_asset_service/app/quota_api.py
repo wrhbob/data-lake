@@ -1779,17 +1779,24 @@ def get_qa_report(
 def delete_parse_result(
     response: Response,
     archive_id: str,
+    scope: str = "all",  # all | reviewed_only
     session: Session = Depends(get_db_session),
 ):
-    """删除解析结果：清 Archive.parse_* 字段（MinIO 产物留待运维 GC）。
+    """删除解析结果（v0.5 双语义）
+
+    scope=reviewed_only: 撤回审核（仅删 reviewed xlsx + manifest.json,保留 candidate）
+                         仅在 qa_passed / usable / done 状态可用
+    scope=all（默认）:    删除全部（清 MinIO 4 对象 + 4 类 archive_file + parse_* 13 列）
+                         任何状态可用(parse_status 非 NULL 时)
 
     web-frontend SPEC §3.1.4 危险操作 — 前端 modal 必填档案标题确认 + 审计。
-
-    注：今天 v0.3 不在 ObjectStore Protocol 里加 delete_object（避免破坏 S3ObjectStore）。
-    MinIO 上的 candidate.xlsx / final.xlsx 由运维按 archive lifecycle 定期清理；
-    这里只清 DB 侧产物指针（parse_* 13 列 + candidate_xlsx_key / final_xlsx_key）。
-    后续批次给 ObjectStore 加 delete_object 后，改为同步清理 MinIO。
     """
+    if scope not in ("all", "reviewed_only"):
+        raise HTTPException(
+            422,
+            detail=f"INVALID_SCOPE: scope={scope!r} not in ['all', 'reviewed_only']",
+        )
+
     archive = session.get(Archive, archive_id)
     if archive is None:
         raise HTTPException(404, detail="ARCHIVE_NOT_FOUND")
@@ -1801,7 +1808,7 @@ def delete_parse_result(
         from app.models import AuditLog
         audit = AuditLog(
             actor_type="api",
-            action="quota_parse_result_deleted",
+            action=f"quota_parse_result_deleted_{scope}",
             target_type="archive",
             target_id=archive.archive_id,
         )
@@ -1809,32 +1816,31 @@ def delete_parse_result(
     except Exception:
         pass
 
-    # 2. v0.5: 取消该 archive 的 active job（queued/running → cancelled）
-    # 让 worker 立即放掉这个 job,不再继续往 MinIO 写产物。
-    from app.quota_parser.service import cancel_active_jobs
-    cancelled = cancel_active_jobs(session, archive_id)
+    # 2. v0.5: 调 helper
+    from app.quota_parser.service import (
+        delete_all_parse_results,
+        delete_reviewed_only,
+    )
 
-    # 3. 清 Archive.parse_* 字段
-    archive.parse_status = None
-    archive.parse_profile = None
-    archive.parse_task_id = None
-    archive.parse_phase = None
-    archive.parse_parser_version = None
-    archive.parse_started_at = None
-    archive.parse_finished_at = None
-    archive.parse_metrics = None
-    archive.parse_warnings = None
-    archive.parse_error_code = None
-    archive.parse_error_message = None
-    archive.candidate_xlsx_key = None
-    archive.final_xlsx_key = None
+    try:
+        if scope == "reviewed_only":
+            result = delete_reviewed_only(session, archive)
+        else:
+            result = delete_all_parse_results(session, archive)
+    except ValueError as e:
+        session.rollback()
+        # reviewed_only 在不允许状态被调用 → 409
+        raise HTTPException(409, detail=str(e))
+
     session.commit()
 
     return _json_ok(response, {
         "deleted": True,
         "archive_id": archive_id,
-        "cancelled_jobs": cancelled,
-        "note": "MinIO 上的 candidate/final.xlsx 留待运维 GC",
+        "scope": scope,
+        "deleted_archive_file": result["deleted_archive_file"],
+        "deleted_minio_objects": result["deleted_minio"],
+        "new_status": result["new_status"],
     })
 
 

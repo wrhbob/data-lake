@@ -146,6 +146,8 @@
   // ⋯ 下拉项（按状态返回，普通项 + 危险项）
   // 普通项 icon / label / action；danger: true 渲染分隔条 + 红色
   // 删除档案 (#10) 在所有状态下都放 ⋯ 下拉危险区；删除解析结果 (#9) 仅 parsed/qa_passed/usable/failed_*
+  // v0.5 双语义：「撤回审核」(parse-revert-reviewed, scope=reviewed_only) 仅 done 态有,
+  //               「删除全部解析结果」(parse-delete-all, scope=all) 所有有解析结果的态都有
   const DROPDOWN_ITEMS = Object.freeze({
     pending: [
       { divider: true },
@@ -160,22 +162,25 @@
       { icon: "file-text",      label: "查看 Manifest", action: "parse-show-manifest" },
       { icon: "refresh-cw",     label: "重新解析",       action: "parse-trigger" },
       { divider: true },
-      { icon: "trash-2",        label: "删除解析结果",   action: "parse-delete", danger: true },
-      { icon: "trash-2",        label: "删除档案",       action: "archive-delete", danger: true },
+      { icon: "trash-2",        label: "删除全部解析结果", action: "parse-delete-all", danger: true },
+      { icon: "trash-2",        label: "删除档案",          action: "archive-delete", danger: true },
     ],
     done: [
       { icon: "file-text",   label: "查看 Manifest", action: "parse-show-manifest" },
       { icon: "check-circle", label: "查看 QA 报告", action: "parse-show-qa" },
       { divider: true },
-      { icon: "trash-2",     label: "删除解析结果",  action: "parse-delete", danger: true },
-      { icon: "trash-2",     label: "删除档案",      action: "archive-delete", danger: true },
+      // v0.5 新增：「撤回审核」(只删 reviewed xlsx,保留 candidate) — 走 scope=reviewed_only
+      { icon: "rotate-ccw",  label: "撤回审核",     action: "parse-revert-reviewed", danger: false },
+      // 「删除全部解析结果」 — 走 scope=all (默认)
+      { icon: "trash-2",     label: "删除全部解析结果", action: "parse-delete-all", danger: true },
+      { icon: "trash-2",     label: "删除档案",         action: "archive-delete", danger: true },
     ],
     failed: [
       { icon: "file-text",   label: "查看 Manifest", action: "parse-show-manifest" },
       { icon: "check-circle", label: "查看 QA 报告", action: "parse-show-qa" },
       { divider: true },
-      { icon: "trash-2",     label: "删除解析结果",  action: "parse-delete", danger: true },
-      { icon: "trash-2",     label: "删除档案",      action: "archive-delete", danger: true },
+      { icon: "trash-2",     label: "删除全部解析结果", action: "parse-delete-all", danger: true },
+      { icon: "trash-2",     label: "删除档案",          action: "archive-delete", danger: true },
     ],
   });
 
@@ -912,23 +917,36 @@
       ? '<div class="quota-delete-error" role="alert"><i data-lucide="alert-circle"></i><span>' +
         escapeHtml(d.error) + '</span></div>'
       : "";
+    // v0.5 双语义文案：scope='reviewed_only' → 「撤回审核」；scope='all' → 「删除全部解析结果」
+    var scope = d.scope || "all";
+    var isRevert = (scope === "reviewed_only");
+    var eyebrow = isRevert ? "可逆操作" : "危险操作";
+    var title = isRevert ? "撤回审核" : "删除全部解析结果";
+    var subtitle = isRevert
+      ? '此操作将删除 MinIO 上的 <code>final.xlsx</code> + <code>manifest.json</code>、' +
+        '<code>archive_file.parse_final_xlsx</code> 行，并把 <code>parse_status</code> 退回 ' +
+        '<code>candidate_ready</code>。<strong>candidate / markdown / html 保留</strong>，你可以重新上传 ' +
+        'reviewed.xlsx 重新走阶段 B。'
+      : '此操作将删除 MinIO 上的 markdown / html / candidate.xlsx / final.xlsx / manifest.json' +
+        ' 与 Archive <code>parse_*</code> 字段、<code>archive_file</code> 4 类 parse_* 行、关联 ' +
+        '<code>parse_job</code> 记录；<strong>原始 PDF 与档案元数据保留</strong>，回到未解析态可重新解析。';
+    var confirmIcon = isRevert ? "rotate-ccw" : "trash-2";
+    var confirmLabel = d.submitting
+      ? (isRevert ? "撤回中…" : "删除中…")
+      : (isRevert ? "确认撤回审核" : "确认删除全部解析结果");
     modal.innerHTML = `
       <form class="quota-delete-confirm-modal" data-quota-form="delete-parse">
         <header class="quota-delete-header">
           <div>
-            <p class="eyebrow">危险操作</p>
-            <h2>删除解析结果</h2>
+            <p class="eyebrow">${escapeHtml(eyebrow)}</p>
+            <h2>${escapeHtml(title)}</h2>
           </div>
           <button class="icon-button" type="button" data-quota-action="close-delete-parse" title="关闭">
             <i data-lucide="x"></i>
           </button>
         </header>
         <div class="quota-delete-body">
-          <p class="quota-delete-subtitle">
-            此操作将删除 MinIO 上的 markdown / html / candidate.xlsx / final.xlsx
-            与 Archive <code>parse_*</code> 字段、<code>archive_file</code> 4 类 parse_* 行、关联
-            <code>parse_job</code> 记录；<strong>原始 PDF 与档案元数据保留</strong>，回到未解析态可重新解析。
-          </p>
+          <p class="quota-delete-subtitle">${subtitle}</p>
           <p class="quota-delete-archive-title">档案：<strong>${escapeHtml(d.title || "—")}</strong></p>
           ${errorHtml}
         </div>
@@ -936,8 +954,8 @@
           <button class="secondary-button" type="button" data-quota-action="close-delete-parse">取消</button>
           <button class="primary-button quota-delete-confirm-btn" type="button"
             data-quota-action="submit-delete-parse">
-            <i data-lucide="trash-2"></i>
-            <span>${d.submitting ? "删除中…" : "确认删除解析结果"}</span>
+            <i data-lucide="${confirmIcon}"></i>
+            <span>${escapeHtml(confirmLabel)}</span>
           </button>
         </footer>
       </form>
@@ -946,11 +964,13 @@
 
   // 二次确认仅靠弹窗文案承载，弹窗内无输入项，点击确认按钮即提交后端
 
-  function openDeleteParseModal(archiveId, title) {
+  // scope: 'all'(默认) | 'reviewed_only'
+  function openDeleteParseModal(archiveId, title, scope) {
     state.deleteParse = {
       open: true,
       archiveId: archiveId || "",
       title: title || "",
+      scope: scope || "all",
       submitting: false,
       error: "",
     };
@@ -963,6 +983,7 @@
       open: false,
       archiveId: "",
       title: "",
+      scope: "all",
       submitting: false,
       error: "",
     };
@@ -1095,8 +1116,9 @@
     renderDeleteParseModal();
     refreshIcons();
     var archiveId = d.archiveId;
+    var scope = d.scope || "all";
     var p = (state.api && state.api.deleteParseResult)
-      ? state.api.deleteParseResult(archiveId)
+      ? state.api.deleteParseResult(archiveId, scope)
       : Promise.resolve({ status: "error", error: "deleteParseResult API 未配置" });
     Promise.resolve(p).then(function (resp) {
       // 成功：resp.status === "ready" && !resp.error
@@ -2238,8 +2260,20 @@
       render();
       return;
     }
-    // ── 危险操作：删除解析结果（行 ⋯ 下拉入口）────────────────────
-    if (action === "parse-delete") {
+    // ── 危险操作：撤回审核 (done-only, scope=reviewed_only) ──────────
+    if (action === "parse-revert-reviewed") {
+      var pdRevId = (el && el.dataset && el.dataset.archiveId) || "";
+      var pdRevRow = (state.archives.data || []).find(function (r) {
+        return encodeURIComponent(r.archive_id || "") === pdRevId;
+      });
+      var pdRevTitle = pdRevRow ? (pdRevRow.title || "") : "";
+      var pdRevRealId = pdRevId ? decodeURIComponent(pdRevId) : "";
+      state.dropdown = { open: false, archiveId: "", variant: "pending" };
+      openDeleteParseModal(pdRevRealId, pdRevTitle, "reviewed_only");
+      return;
+    }
+    // ── 危险操作：删除全部解析结果（所有有产物的状态都支持, scope=all）────
+    if (action === "parse-delete-all") {
       var pdDelId = (el && el.dataset && el.dataset.archiveId) || "";
       var pdDelRow = (state.archives.data || []).find(function (r) {
         return encodeURIComponent(r.archive_id || "") === pdDelId;
@@ -2247,7 +2281,7 @@
       var pdDelTitle = pdDelRow ? (pdDelRow.title || "") : "";
       var pdDelRealId = pdDelId ? decodeURIComponent(pdDelId) : "";
       state.dropdown = { open: false, archiveId: "", variant: "pending" };
-      openDeleteParseModal(pdDelRealId, pdDelTitle);
+      openDeleteParseModal(pdDelRealId, pdDelTitle, "all");
       return;
     }
     // ── 危险操作：删除档案（#10，行 ⋯ 下拉入口；按 SPEC §3.1.4 与 #9 严格区分）──

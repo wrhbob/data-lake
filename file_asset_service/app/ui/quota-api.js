@@ -254,11 +254,18 @@
         }),
       // 危险操作（SPEC-QA-001 §5.8 / §5.10）：
       // - deleteParseResult: 删除解析产物 + archive.parse_* + archive_file.parse_* + parse_job；
+      //   v0.5 双语义：scope='all'(默认,删全部) / 'reviewed_only'(仅撤回审核,保留 candidate)
       //   原 PDF 与档案元数据保留，回到未解析态可重新解析。
       // - deleteArchive: 删除档案本体 + 关联 archive_file + quota_archive_profile +
       //   parse_job；若所属资料体系是唯一分册则级联删体系本身（不可恢复）。
-      deleteParseResult: (archiveId) => {
+      // scope: 'all'(默认) | 'reviewed_only'
+      //   all          = 删全部解析结果,回到只剩原件 PDF
+      //   reviewed_only = 仅删 reviewed xlsx,退回 candidate_ready (仅 qa_passed/usable/done 可用)
+      deleteParseResult: (archiveId, scope) => {
         var path = ENDPOINTS.deleteParse.path.replace("{id}", encodeURIComponent(archiveId));
+        if (scope && scope !== "all") {
+          path += "?scope=" + encodeURIComponent(scope);
+        }
         return request(path, { method: ENDPOINTS.deleteParse.method });
       },
       deleteArchive: (archiveId) => {

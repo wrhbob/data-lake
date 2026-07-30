@@ -567,3 +567,176 @@ def cancel_active_jobs(session, archive_id: str) -> int:
         .values(status="cancelled", finished_at=_now())
     )
     return result.rowcount or 0
+
+
+# === v0.5 新增 — 解析结果删除（INTEGRATION_PLAN §3.2 双语义） ===
+
+# 哪些状态允许「撤回审核」(delete_reviewed_only)
+# 语义：已审核完成 → 退回 candidate_ready,允许重传 reviewed.xlsx
+_REVIEWED_REVERTIBLE_STATUSES = frozenset({"qa_passed", "usable", "done"})
+
+# 全部删除时可删除的 4 类 parse_* archive_file 行
+ALL_PARSE_FILE_ROLES = (
+    "parse_markdown",
+    "parse_html",
+    "parse_candidate_xlsx",
+    "parse_final_xlsx",
+)
+
+
+def _delete_minio_object(store, bucket: str, key: str) -> bool:
+    """删一个 MinIO 对象，吞 NoSuchKey（best-effort, 不抛错）。"""
+    try:
+        # boto3 delete_object 不存在的 key 不报错；网络/权限错才报
+        store.client.delete_object(Bucket=bucket, Key=key)
+        return True
+    except Exception as e:
+        logger.warning("delete MinIO %s/%s failed: %s", bucket, key, e)
+        return False
+
+
+def _delete_parse_archive_files(session, archive_id: str, roles: tuple[str, ...]) -> int:
+    """删指定 role 的 archive_file 行 + 对应 MinIO 对象 + 对应 file_asset 行。
+
+    Returns:
+        删除的 archive_file 行数
+    """
+    from sqlalchemy import select
+
+    from app.models import ArchiveFile, FileAsset
+
+    deleted_af = 0
+    # 先查 (archive_file, file_asset) 拿到所有要删的 MinIO 对象
+    rows = session.execute(
+        select(ArchiveFile, FileAsset)
+        .join(FileAsset, ArchiveFile.file_id == FileAsset.file_id, isouter=True)
+        .where(
+            ArchiveFile.archive_id == archive_id,
+            ArchiveFile.file_role.in_(roles),
+        )
+    ).all()
+    store = get_object_store()
+
+    file_ids_to_drop: set[str] = set()
+    for af, fa in rows:
+        # 1. 删 MinIO 对象
+        if fa is not None:
+            _delete_minio_object(store, fa.bucket, fa.object_key)
+            file_ids_to_drop.add(fa.file_id)
+        # 2. 删 archive_file 行
+        session.delete(af)
+        deleted_af += 1
+
+    # 3. 删孤儿 file_asset 行（按 (tenant_code, sha256) 不再被任何 archive_file 引用）
+    if file_ids_to_drop:
+        from sqlalchemy import delete as sa_delete
+
+        # 仅在 (file_id) 没有任何 archive_file 引用时才删,避免误删共享文件
+        referenced_ids = {
+            fid for (fid,) in session.execute(
+                select(ArchiveFile.file_id).where(ArchiveFile.file_id.in_(file_ids_to_drop))
+            ).all()
+        }
+        orphan_ids = file_ids_to_drop - referenced_ids
+        if orphan_ids:
+            session.execute(
+                sa_delete(FileAsset).where(FileAsset.file_id.in_(orphan_ids))
+            )
+    return deleted_af
+
+
+def delete_reviewed_only(session, archive: Archive) -> dict[str, int | str]:
+    """撤回审核（仅删 reviewed xlsx,保留 candidate）。
+
+    适用状态: qa_passed / usable / done
+    行为:
+      - 删 parse_final_xlsx archive_file + MinIO final.xlsx + file_asset
+      - 删 manifest.json（manifest 含 final_xlsx 引用,留它会误导）
+      - 清 archive.final_xlsx_key / parse_status='candidate_ready' / parse_phase='stage_a'
+      - 保留 candidate_xlsx_key + parse_markdown / parse_html（用户重新上传 reviewed.xlsx 即可走 stage_b）
+      - 同时 cancel 该 archive 的 active jobs（防御性,已完成态通常没 active job）
+
+    Returns:
+        {"deleted_archive_file": n, "deleted_minio": n, "new_status": "candidate_ready"}
+    """
+    if archive.parse_status not in _REVIEWED_REVERTIBLE_STATUSES:
+        raise ValueError(
+            f"delete_reviewed_only 仅在 {_REVIEWED_REVERTIBLE_STATUSES} 状态可用,"
+            f"当前 parse_status={archive.parse_status!r}"
+        )
+
+    # 1. cancel active jobs（防御性,正常 qa_passed 状态下没 job）
+    cancel_active_jobs(session, archive.archive_id)
+
+    # 2. 删 parse_final_xlsx 一行 + MinIO final.xlsx + manifest.json
+    deleted_af = _delete_parse_archive_files(
+        session, archive.archive_id, ("parse_final_xlsx",)
+    )
+    manifest_key = f"quota/{archive.archive_id}/manifest.json"
+    store = get_object_store()
+    _delete_minio_object(store, PARSE_BUCKET_REPORT, manifest_key)
+
+    # 3. 清 archive.final_xlsx_key + 退状态到 candidate_ready
+    archive.final_xlsx_key = None
+    archive.parse_status = "candidate_ready"
+    archive.parse_phase = "stage_a"
+    archive.parse_finished_at = None
+    archive.parse_error_code = None
+    archive.parse_error_message = None
+    # parse_metrics 保留(chunks_done 等数据对前端展示仍有价值)
+
+    return {
+        "deleted_archive_file": deleted_af,
+        "deleted_minio": deleted_af + 1,  # +1 = manifest.json
+        "new_status": "candidate_ready",
+    }
+
+
+def delete_all_parse_results(session, archive: Archive) -> dict[str, int | str]:
+    """删除全部解析结果(回到只剩原件 PDF)。
+
+    适用状态: 任何(只要 parse_status 非 NULL,否则 404 NOTHING_TO_DELETE)
+    行为:
+      - cancel active jobs
+      - 删 4 类 parse_* archive_file + MinIO 4 对象 + file_asset
+      - 删 manifest.json
+      - 清 archive.parse_* 13 列(candidate_xlsx_key / final_xlsx_key 都清)
+      - 清 archive.parse_metrics
+
+    Returns:
+        {"deleted_archive_file": n, "deleted_minio": n, "new_status": null}
+    """
+    if archive.parse_status is None:
+        raise ValueError("delete_all_parse_results: archive.parse_status 为空,无可删")
+
+    # 1. cancel active jobs
+    cancel_active_jobs(session, archive.archive_id)
+
+    # 2. 删 4 类 parse_* archive_file + MinIO 对象
+    deleted_af = _delete_parse_archive_files(session, archive.archive_id, ALL_PARSE_FILE_ROLES)
+
+    # 3. 删 manifest.json
+    manifest_key = f"quota/{archive.archive_id}/manifest.json"
+    store = get_object_store()
+    _delete_minio_object(store, PARSE_BUCKET_REPORT, manifest_key)
+
+    # 4. 清 archive.parse_* 13 列
+    archive.parse_status = None
+    archive.parse_profile = None
+    archive.parse_task_id = None
+    archive.parse_phase = None
+    archive.parse_parser_version = None
+    archive.parse_started_at = None
+    archive.parse_finished_at = None
+    archive.parse_metrics = None
+    archive.parse_warnings = None
+    archive.parse_error_code = None
+    archive.parse_error_message = None
+    archive.candidate_xlsx_key = None
+    archive.final_xlsx_key = None
+
+    return {
+        "deleted_archive_file": deleted_af,
+        "deleted_minio": deleted_af + 1,  # +1 = manifest.json
+        "new_status": None,
+    }
