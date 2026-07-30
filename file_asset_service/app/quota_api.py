@@ -8,6 +8,7 @@ All counts computed via SQL aggregation; no all-table Python-side counting.
 
 from datetime import date as date_type, datetime, timezone
 from pathlib import Path
+import os
 import re
 from uuid import uuid4
 
@@ -1461,12 +1462,17 @@ async def trigger_quota_parse(
     body: dict | None = None,
     session: Session = Depends(get_db_session),
 ):
-    """触发阶段 A 解析（异步后台跑）。
+    """触发阶段 A 解析（v0.5：入队不调度）。
 
-    QUOTA_PARSE_MOCK=1 → 后台 mock runner；否则 501（真 worker 尚未上线）。
-    重新解析走同一端点（web-frontend SPEC §3.1.3 共用端点决策）。
+    行为：
+      - 写 archive.parse_status='parsing' + parse_task_id
+      - INSERT 一条 quota_parse_job (status='queued', mock=is_parse_mock())
+      - 独立 worker 进程消费该 job（mock / real 按 metadata_payload["mock"] 分流）
+      - 不再 schedule_mock_a()（避免 asyncio 阻塞 8010 端口）
+      - 不再 501（worker 已上线,无论 mock/real 都成功入队）
     """
     from app.quota_parser import is_parse_mock, trigger_parse as _trigger
+    from app.quota_parser.service import enqueue_parse_job
 
     archive = session.get(Archive, archive_id)
     if archive is None:
@@ -1486,24 +1492,26 @@ async def trigger_quota_parse(
     elif isinstance(prov_cell, str):  # 防御：历史裸字符串
         province_value = prov_cell
 
+    # (a') v0.5 fix: 若 archive 没有 province,按 profile 推一个默认 short code
+    # (避免 pipeline.placeholder 分支因缺 xlsx_path 报 KeyError)
+    # profile='sichuan' → 'sc', 'chongqing' → 'cq'
+    if province_value is None:
+        _profile_for_prov = (profile or archive.parse_profile or "").lower()
+        if _profile_for_prov == "sichuan":
+            province_value = "sc"
+        elif _profile_for_prov == "chongqing":
+            province_value = "cq"
+        # 仍为 None 时,worker 走 run_quota_pipeline 的 default 分支（由 pipeline 决定行为）
+
     # (b) profile 白名单：仅 sichuan/chongqing；None = 沿用旧值
-    # 'default' 是 pipeline 内部 sentinel,不允许 HTTP 用户传 → 422 拒绝
     if profile is not None and profile not in {"sichuan", "chongqing"}:
         raise HTTPException(
             status_code=422,
             detail=f"INVALID_PROFILE: {profile!r}. 必须为 'sichuan' | 'chongqing' 或省略",
         )
 
-    # ── v0.5 fix: is_parse_mock 必须放在 _trigger() 之前 ──
-    # 否则 HTTPException(501) 抛出时,_trigger 已 commit 的 parse_status='parsing'
-    # 会卡死在 DB(因为 5xx 不回滚 SQLAlchemy session),档案无法重新触发。
-    # 提前检查:无 mock 模式能力则直接 501,不留副作用。
-    if not is_parse_mock():
-        raise HTTPException(
-            501,
-            detail="REAL_WORKER_NOT_IMPLEMENTED: set QUOTA_PARSE_MOCK=1 to use mock",
-        )
-
+    # (1) 推 archive.parse_status='parsing'（已有 _trigger）—— 必须在入队前 commit,
+    #     否则 enqueue_parse_job 找不到状态机上下文。
     try:
         archive = _trigger(archive, profile=profile, province=province_value)
     except ValueError as e:
@@ -1512,13 +1520,24 @@ async def trigger_quota_parse(
             raise HTTPException(422, detail=f"INVALID_PROFILE: {msg}")
         raise HTTPException(409, detail=f"ALREADY_PARSING_OR_DONE: {msg}")
 
+    # (2) INSERT quota_parse_job —— 同 archive 已有 active job → 409
+    try:
+        job = enqueue_parse_job(
+            session,
+            archive_id,
+            profile=profile or archive.parse_profile or "sichuan",
+            created_by=(body or {}).get("created_by"),
+            mock=is_parse_mock(),
+            ocr_api_url=os.environ.get("OCR_URL", "http://172.16.20.23:8000"),
+            province=province_value,
+        )
+    except ValueError as e:
+        # 回滚 archive.parse_status,避免状态机卡 'parsing'
+        session.rollback()
+        raise HTTPException(409, detail=f"ALREADY_PARSING_OR_DONE: {e}")
+
     session.commit()
     session.refresh(archive)
-
-    # 触发后台解析（mock 模式）
-    from app.mock_parse_runner import schedule_mock_a
-
-    schedule_mock_a(archive_id)
 
     from app.quota_parser.service import build_parse_section
 
@@ -1526,6 +1545,7 @@ async def trigger_quota_parse(
         "archive_id": archive.archive_id,
         "status": archive.status,
         "parse": build_parse_section(archive),
+        "job_id": job.job_id,  # v0.5 新增：前端可轮询
     })
 
 
@@ -1789,7 +1809,12 @@ def delete_parse_result(
     except Exception:
         pass
 
-    # 2. 清 Archive.parse_* 字段
+    # 2. v0.5: 取消该 archive 的 active job（queued/running → cancelled）
+    # 让 worker 立即放掉这个 job,不再继续往 MinIO 写产物。
+    from app.quota_parser.service import cancel_active_jobs
+    cancelled = cancel_active_jobs(session, archive_id)
+
+    # 3. 清 Archive.parse_* 字段
     archive.parse_status = None
     archive.parse_profile = None
     archive.parse_task_id = None
@@ -1808,6 +1833,7 @@ def delete_parse_result(
     return _json_ok(response, {
         "deleted": True,
         "archive_id": archive_id,
+        "cancelled_jobs": cancelled,
         "note": "MinIO 上的 candidate/final.xlsx 留待运维 GC",
     })
 
