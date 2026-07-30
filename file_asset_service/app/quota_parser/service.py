@@ -384,3 +384,183 @@ class InvalidReviewedXlsxError(Exception):
 
 class QuotaParserStageBError(Exception):
     """finalize_reviewed_xlsx 阶段 B 抛错（落 failed_user）。"""
+
+
+# === v0.5 新增 — worker 接入 helpers（INTEGRATION_PLAN §1.2.3 / §2.4） ===
+
+# 4 类 parse_* file_role — 与 ck_archive_file_role CheckConstraint + DB_SCHEMA.md §3.10 对齐
+PARSE_ARTIFACT_ROLES = (
+    "parse_markdown",
+    "parse_html",
+    "parse_candidate_xlsx",
+    "parse_final_xlsx",
+)
+
+
+def register_parse_artifact(
+    session,
+    archive_id: str,
+    role: str,
+    *,
+    bucket: str,
+    key: str,
+    sha256: str,
+    content_type: str,
+    size: int,
+):
+    """把 worker 产出的 md/html/xlsx 注册成 archive_file 一行。
+
+    Args:
+        session: SQLAlchemy session（caller 负责 commit）
+        archive_id: 档案 ID
+        role: 必须是 PARSE_ARTIFACT_ROLES 之一
+        bucket / key: MinIO 位置（与 Archive.candidate_xlsx_key 列同 key — 冗余存）
+        sha256: 产物 SHA-256（hex）
+        content_type / size: 给 FileAsset 行用
+
+    Returns:
+        ArchiveFile 行（已 flush，未 commit）
+
+    实现：按 sha256 复用 FileAsset（去重）+ 建/更新 ArchiveFile 行。
+    """
+    if role not in PARSE_ARTIFACT_ROLES:
+        raise ValueError(
+            f"register_parse_artifact: role={role!r} not in {PARSE_ARTIFACT_ROLES}"
+        )
+    from sqlalchemy import select
+
+    from app.models import Archive, ArchiveFile, FileAsset
+
+    # 0. 拿 archive.tenant_code（FileAsset.tenant_code NOT NULL，幂等 dedup key 也用得上）
+    archive = session.get(Archive, archive_id)
+    if archive is None:
+        raise ValueError(f"register_parse_artifact: archive {archive_id} 不存在")
+    tenant_code = archive.tenant_code
+
+    # 1. 建/复用 FileAsset（按 (tenant_code, sha256) 去重 — 与 UQ constraint 对齐）
+    fa = session.execute(
+        select(FileAsset).where(
+            FileAsset.tenant_code == tenant_code,
+            FileAsset.sha256 == sha256,
+        )
+    ).scalar_one_or_none()
+    if fa is None:
+        fa = FileAsset(
+            tenant_code=tenant_code,
+            sha256=sha256,
+            bucket=bucket,
+            object_key=key,
+            file_name=key.split("/")[-1],
+            mime_type=content_type,
+            file_size=size,
+        )
+        session.add(fa)
+        session.flush()  # 拿 fa.file_id
+
+    # 2. 建/更新 ArchiveFile 行（page_range='' 让 (archive_id, file_role) 唯一）
+    af = session.execute(
+        select(ArchiveFile).where(
+            ArchiveFile.archive_id == archive_id,
+            ArchiveFile.file_role == role,
+            ArchiveFile.page_range == "",
+        )
+    ).scalar_one_or_none()
+    if af is None:
+        af = ArchiveFile(
+            archive_id=archive_id,
+            file_id=fa.file_id,
+            file_role=role,
+            page_range="",
+            is_primary=False,
+            sort_order=200,  # 排在 main_document 之后
+            link_source="worker",
+            linked_by="quota_parser_worker",
+        )
+        session.add(af)
+    else:
+        af.file_id = fa.file_id
+        af.linked_by = "quota_parser_worker"
+    session.flush()
+    return af
+
+
+def enqueue_parse_job(
+    session,
+    archive_id: str,
+    *,
+    profile: str,
+    created_by: str | None = None,
+    mock: bool = False,
+    ocr_api_url: str | None = None,
+    province: str | None = None,
+):
+    """INSERT 一条 quota_parse_job (status='queued')。
+
+    Args:
+        session: SQLAlchemy session（caller 负责 commit）
+        archive_id: 档案 ID
+        profile: 'sichuan' / 'chongqing'
+        created_by: 触发用户
+        mock: 是否 mock 模式（worker 据此分流）
+        ocr_api_url / province: 透传到 worker 进程的 metadata
+
+    Returns:
+        QuotaParseJob（已 flush，未 commit）
+
+    Raises:
+        ValueError: 同 archive_id 已有 active job（status='queued'/'running'）
+                    → trigger 端点转 409
+    """
+    from sqlalchemy import select
+
+    from app.models import QuotaParseJob
+
+    if profile not in PROFILES:
+        raise ValueError(f"profile {profile!r} 不在注册表 {list(PROFILES)}")
+
+    active = session.execute(
+        select(QuotaParseJob).where(
+            QuotaParseJob.archive_id == archive_id,
+            QuotaParseJob.status.in_(["queued", "running"]),
+        )
+    ).scalar_one_or_none()
+    if active is not None:
+        raise ValueError(
+            f"archive {archive_id} 已有 active job {active.job_id} (status={active.status})"
+        )
+
+    job = QuotaParseJob(
+        archive_id=archive_id,
+        profile=profile,
+        status="queued",
+        created_by=created_by,
+        metadata_payload={
+            "mock": mock,
+            "ocr_api_url": ocr_api_url,
+            "province": province,
+        },
+    )
+    session.add(job)
+    session.flush()
+    return job
+
+
+def cancel_active_jobs(session, archive_id: str) -> int:
+    """把该 archive 的所有 active job 标 cancelled（POST /parse/delete 调）。
+
+    Returns:
+        受影响行数
+    """
+    from sqlalchemy import update
+
+    from app.models import QuotaParseJob
+
+    result = session.execute(
+        update(QuotaParseJob)
+        .where(
+            QuotaParseJob.archive_id == archive_id,
+            QuotaParseJob.status.in_(["queued", "running"]),
+        )
+        .values(status="cancelled", finished_at=_now())
+    )
+    return result.rowcount or 0

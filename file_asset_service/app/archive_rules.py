@@ -53,6 +53,13 @@ ARCHIVE_FILE_ROLES = {
     "appendix",
     "release_announcement",
     "other",
+    # v0.5 新增（INTEGRATION_PLAN §2.4 / DB_SCHEMA.md §3.10）：
+    # quota_parser worker 阶段 A/B 产出的 md/html/xlsx 对应 file_role
+    # 必须与 app.models.ArchiveFile CheckConstraint + DB schema 同步
+    "parse_markdown",
+    "parse_html",
+    "parse_candidate_xlsx",
+    "parse_final_xlsx",
 }
 
 PRICED_SOURCE_EXTENSIONS = {".zbx", ".cjz", ".cos", ".qtfx"}

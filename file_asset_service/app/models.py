@@ -567,6 +567,54 @@ class ArchiveEvent(Base):
     archive: Mapped[Archive] = relationship()
 
 
+# ── v0.5 新增（INTEGRATION_PLAN §1.2.2 / DB_SCHEMA.md §3.9） ──
+# 解析任务队列表 — web 端点 INSERT,worker 进程 SELECT ... FOR UPDATE SKIP LOCKED 抢单
+# sweeper 扫 last_heartbeat_at 标记超时 job
+class QuotaParseJob(Base):
+    __tablename__ = "quota_parse_job"
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('queued','running','done','failed','cancelled')",
+            name="ck_quota_parse_job_status",
+        ),
+        CheckConstraint(
+            "profile in ('sichuan','chongqing')",
+            name="ck_quota_parse_job_profile",
+        ),
+        CheckConstraint(
+            "attempt >= 0 AND attempt <= max_attempts",
+            name="ck_quota_parse_job_attempt",
+        ),
+    )
+
+    job_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    archive_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("archive.archive_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    profile: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued", index=True)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    worker_pid: Mapped[int | None] = mapped_column(Integer)
+    worker_hostname: Mapped[str | None] = mapped_column(String(128))
+    enqueued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # v0.5 新增（sweeper / 进度条）：
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    chunks_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    chunks_done: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # end
+    error_code: Mapped[str | None] = mapped_column(String(32))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    parse_task_id: Mapped[str | None] = mapped_column(String(64))
+    created_by: Mapped[str | None] = mapped_column(String(128))
+    metadata_payload: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
+
+    archive: Mapped["Archive"] = relationship()
+
+
 class Outbox(Base):
     __tablename__ = "outbox"
     __table_args__ = (
