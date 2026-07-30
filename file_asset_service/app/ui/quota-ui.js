@@ -75,7 +75,11 @@
   });
 
   function resolveUiStatus(row) {
-    var st = (row && row.status) || "registered";
+    // v0.4 Bug#1 修：5 态徽章由 parse_status 驱动（不是 row.status，row.status 是
+    // archive 生命周期 status='pending_tag'，不在 PARSE_STATUS_VARIANT 表里）。
+    // 后端 /archives 已透出 parse_status（list 端点修复见 quota_api.py list_quota_archives）。
+    // parse_status 为空（从未触发解析）→ 落 pending，UI 显示"未解析"。
+    var st = (row && (row.parse_status || row.status)) || "pending";
     // transient 在 parsing 上叠加，但不替换主徽章——留后续 banner 处理
     return PARSE_STATUS_VARIANT[st] || "pending";
   }
@@ -2644,6 +2648,167 @@
         render();
       }
     });
+
+    // ── Phase C: 解析 7 端点事件 ─────────────────────────────────
+    // handleAction 里 dispatchEvent 的 3 个事件原本只发声,这里接住 + 走真实后端
+    document.addEventListener("quota:parse-trigger", function (ev) {
+      var detail = (ev && ev.detail) || {};
+      handleParseTrigger(detail.archiveId);
+    });
+    document.addEventListener("quota:parse-action", function (ev) {
+      var detail = (ev && ev.detail) || {};
+      handleParseAction(detail.action, detail.archiveId);
+    });
+    document.addEventListener("quota:parse-upload-reviewed", function (ev) {
+      var detail = (ev && ev.detail) || {};
+      handleUploadReviewed(detail.archiveId);
+    });
+  }
+
+  // ── Phase C: 解析 handler 们 ─────────────────────────────────────────
+  // 状态机五态到前端提示语(对齐 quota-api.js §3 CAP)
+  var PARSE_ERR_MSG = {
+    unauthorized: "未授权:请检查登录态 / QUOTA_PARSE_MOCK 是否启用",
+    unavailable: "解析端点不可用(404):确认 backend 已部署该路由",
+    error: "解析请求失败:查看后端日志",
+  };
+
+  function _parseApiOrWarn() {
+    if (!state.parseApi) {
+      setToast("解析客户端未加载(quota-parse-api.js 没注册)");
+      return null;
+    }
+    return state.parseApi;
+  }
+
+  function handleParseTrigger(archiveId) {
+    var api = _parseApiOrWarn();
+    if (!api) return;
+    if (!archiveId) { setToast("缺少 archiveId"); return; }
+    setToast("已提交阶段 A,稍候查询状态…");
+    api.triggerParse(archiveId).then(function (res) {
+      if (res.status === CAP.READY) {
+        setToast("阶段 A 已启动,5-10s 后查产物");
+        // 阶段 A mock 默认 5-10s — 等 8s 后自动 reload
+        setTimeout(function () {
+          if (state.api && state.flags.archives) reloadArchives();
+        }, 8000);
+      } else {
+        setToast("触发失败: " + (PARSE_ERR_MSG[res.status] || res.error || res.status));
+      }
+    });
+  }
+
+  function handleParseAction(action, archiveId) {
+    var api = _parseApiOrWarn();
+    if (!api) return;
+    if (!archiveId) { setToast("缺少 archiveId"); return; }
+    if (action === "parse-download-candidate") {
+      api.downloadCandidate(archiveId).then(function (res) {
+        if (res.status === CAP.READY && res.blob) {
+          api.saveBlob(res.blob, res.filename || ("candidate-" + archiveId.slice(0, 8) + ".xlsx"));
+          setToast("candidate.xlsx 已下载");
+        } else {
+          setToast("下载失败: " + (res.error || res.status));
+        }
+      });
+      return;
+    }
+    if (action === "parse-download-final") {
+      api.downloadFinal(archiveId).then(function (res) {
+        if (res.status === CAP.READY && res.blob) {
+          api.saveBlob(res.blob, res.filename || ("final-" + archiveId.slice(0, 8) + ".xlsx"));
+          setToast("final.xlsx 已下载");
+        } else {
+          setToast("下载失败: " + (res.error || res.status));
+        }
+      });
+      return;
+    }
+    if (action === "parse-show-manifest") {
+      api.getManifest(archiveId).then(function (res) {
+        if (res.status === CAP.READY && res.data) {
+          openJsonModal("Manifest", res.data);
+        } else {
+          setToast("读 manifest 失败: " + (res.error || res.status));
+        }
+      });
+      return;
+    }
+    if (action === "parse-show-qa") {
+      api.getQaReport(archiveId).then(function (res) {
+        if (res.status === CAP.READY && res.data) {
+          openJsonModal("QA Report", res.data);
+        } else {
+          setToast("读 qa 报告失败: " + (res.error || res.status));
+        }
+      });
+      return;
+    }
+  }
+
+  function handleUploadReviewed(archiveId) {
+    var api = _parseApiOrWarn();
+    if (!api) return;
+    if (!archiveId) { setToast("缺少 archiveId"); return; }
+    // 动态创建 file input,选完即 POST
+    var input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".xlsx";
+    input.addEventListener("change", function () {
+      var file = input.files && input.files[0];
+      if (!file) return;
+      setToast("已上传 reviewed.xlsx,稍候查询 final…");
+      api.uploadReviewed(archiveId, file).then(function (res) {
+        if (res.status === CAP.READY) {
+          setToast("reviewed.xlsx 已接受,2-3s 后查 final");
+          setTimeout(function () {
+            if (state.api && state.flags.archives) reloadArchives();
+          }, 4500);
+        } else {
+          // 422 携带结构错误详情,这里直接显示后端 detail
+          var detail = (res.data && res.data.detail) || res.error || res.status;
+          setToast("上传失败: " + detail);
+        }
+      });
+    });
+    input.click();
+  }
+
+  // 极简 JSON / Markdown 弹窗(复用现有 quotaModal 容器风格)
+  function openJsonModal(title, payload) {
+    var modalId = "quotaParseViewerModal";
+    var existing = document.getElementById(modalId);
+    if (existing) { existing.remove(); }
+    var isMd = (typeof payload === "string");
+    var body = isMd
+      ? escapeHtml(payload)
+      : JSON.stringify(payload, null, 2);
+    var html =
+      '<div class="quota-modal-dialog">' +
+        '<header class="manual-upload-header">' +
+          '<div><p class="eyebrow">Parse Viewer</p><h2>' + escapeHtml(title) + '</h2></div>' +
+          '<button class="icon-button" type="button" data-action="close-parse-viewer" title="关闭"><span style="font-size:18px;">×</span></button>' +
+        '</header>' +
+        '<div class="manual-upload-body"><pre style="white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.5;max-height:60vh;overflow:auto;background:#fafafa;padding:12px;border-radius:6px;">' + body + '</pre></div>' +
+      '</div>';
+    var sec = document.createElement("section");
+    sec.id = modalId;
+    sec.className = "modal-backdrop quota-modal";
+    sec.setAttribute("aria-hidden", "false");
+    sec.innerHTML = html;
+    sec.addEventListener("click", function (ev) {
+      var t = ev.target;
+      if (t && t.closest && t.closest("[data-action=\"close-parse-viewer\"]")) sec.remove();
+      else if (t === sec) sec.remove();
+    });
+    document.body.appendChild(sec);
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>\"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c];
+    });
   }
 
   // ── 对外接口（由 app.js 注入调用）─────────────────────────────────────
@@ -2656,6 +2821,10 @@
         })
       : "production";
     state.api = Api ? Api.createQuotaApi({}) : null;
+    // Phase C：解析 7 端点 HTTP 客户端（独立于 quota-api.js,自己包 fetch wrapper）
+    state.parseApi = (typeof QuotaParseApi !== "undefined" && QuotaParseApi.createQuotaParseApi)
+      ? QuotaParseApi.createQuotaParseApi({})
+      : null;
     bindEvents();
     state.initialized = true;
   }
