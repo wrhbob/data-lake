@@ -814,6 +814,22 @@ $PY -c "from quota_parser import run_quota_pipeline, finalize_reviewed_xlsx; pri
 | 5 | archive 原 PDF sha256 是否要存到 Archive 表 | 暂不存（FileAsset.sha256 已有，跨表 join） | 无 |
 | 6 | web-frontend SPEC §6.1 中 `archive.status == parsing` 的表述是否要改为 `archive.parse_status == "parsing"` | 改（与方案 A 对齐） | step 4 后单独改 SPEC |
 | 7 | 前端解析区块何时做 | 批次 3（不在今天 4 步内） | 无 |
+| 8 | 中间产物（md/html/xlsx）已落 MinIO 后，再次解析能否复用上轮产物 | 不复用（每次重跑 OCR 保证最终产物是最新；如需可重入再加 content hash 缓存） | step 2 |
+| 9 | worker 回写 `parse_status` 后前端刷新机制 | 5-10s 轮询（沿用 mock 路径）；SSE/WebSocket 留待后续 | step 4 |
+| 10 | worker 跑在哪个 conda env（`file-asset` 还是新增 `quota-parser`） | 新增 `quota-parser` env（与 web 隔离，防 PaddleOCR/transformers 拖垮 uvicorn） | step 2 |
+| 11 | 失败可重试细分（`failed_user` vs `failed_permanent`） | 区分网络抖动/OOM → failed_user（自动重试 ≤2 次）；PDF 损坏/加密 → failed_permanent（人工决策） | step 2 |
+| 12 | 解析超时与 OOM 保护 | 单 PDF 软超时 30 分钟 / 硬超时 45 分钟；GPU OOM 触发由 minerU 容器自身重启 | step 2 |
+| 13 | intermediate ↔ final 反向溯源（QA 点行 → 原 PDF 页） | manifest.json 追加 `artifact_index`：`{page: int, block_id: str, md_offset: int}` | step 2 |
+| 14 | `manifest.json` 字段清单（参考 `cost_info` manifest） | archive_id / parser_version / profile_hash / artifact_keys / timing / pdf_sha256 / chain_hash | step 2 |
+| 15 | `trigger_quota_parse` 的 `body.profile` 语义 | 暂未定义（前端不传）；先固化默认 `profile=default`，第二批再开放给用户选 | step 4 |
+| 16 | worker 写 `archive_event` 走哪条路径 | 走 `register_quota_event` helper（拒绝绕过状态机的裸 INSERT） | step 2 |
+| 17 | 审计粒度（actor 区分 `user/system/worker`） | actor_type 枚举：`user` / `system` / `worker`；action 列表：`quota_parse_triggered` / `quota_parse_succeeded` / `quota_parse_failed` | step 2 |
+| 18 | 前端「开始解析」按钮点击幂等 | 点完立刻 `disabled + spinner`；后端 409 时前端区分「已在跑」vs「已成功」分别 toast | step 4 |
+| 19 | mock vs real 环境隔离（启动时强制打印） | `QUOTA_PARSE_MOCK` 在进程启动日志首行打印；生产误用 mock 必须告警 | step 2 |
+| 20 | 解析进度反馈（百分比/页码） | 第一版只显示「解析中」徽章；SSE 进度推送留后续批次 | step 4 |
+| 21 | 失败时前端展示 `parse_error_code` / `parse_error_message` | 详情页「失败原因」区块（折叠）；列表行 tooltip 简版 | step 4 |
+| 22 | 「重新解析」清理范围（`archive_event` 旧事件 / `outbox` 旧事件 / `crawl_lineage`） | 仅清 `parse_*` 字段 + 4 个 parse_* role 的 archive_file 行；旧事件保留（审计需要） | step 2 |
+| 23 | 7 个解析端点的真数据流回归（mock ≠ 真） | 端到端冒烟：1 份小 PDF 跑通 trigger → candidate.xlsx 下载 → reviewed 上传 → final 下载 | step 3 |
 
 ---
 
