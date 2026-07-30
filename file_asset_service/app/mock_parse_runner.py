@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
+import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -64,6 +66,64 @@ def _upload_bytes(bucket: str, key: str, data: bytes, *, content_type: str) -> N
     store.put_object(bucket, key, data, content_type=content_type)
 
 
+def _sha256_bytes(data: bytes) -> str:
+    """mock runner 独立 SHA-256（与 quota_parser.service._sha256_bytes 等价）。"""
+    h = hashlib.sha256()
+    h.update(data)
+    return h.hexdigest()
+
+
+def _build_mock_manifest(*, archive: Archive, phase: str, status: str,
+                          artifacts: list[dict[str, str]]) -> dict[str, Any]:
+    """构造符合 quota-parser-result/v1 schema 的 Manifest dict（mock 用）。
+
+    字段集与 quota_parser.service._reconstruct_manifest 对齐 — 前端零翻译。
+    """
+    from app.quota_parser.service import MANIFEST_SCHEMA
+
+    mp = archive.metadata_payload or {}
+    prov_cell = mp.get("province")
+    province_value: str | None = None
+    if isinstance(prov_cell, dict):
+        province_value = prov_cell.get("value")
+    elif isinstance(prov_cell, str):
+        province_value = prov_cell
+
+    metrics = dict(archive.parse_metrics or {})
+    metrics.setdefault("mock", True)
+    return {
+        "$schema": MANIFEST_SCHEMA,
+        "task_id": archive.parse_task_id or f"qp_mock_{archive.archive_id[:8]}",
+        "phase": phase,
+        "status": status,
+        "parser_version": archive.parse_parser_version or "0.2.0",
+        "profile": archive.parse_profile,
+        "province": province_value,
+        "ocr_api_url": "http://172.16.20.23:8000",
+        "source_pdf_sha256": None,
+        "candidate_xlsx_sha256": metrics.get("candidate_xlsx_sha256"),
+        "final_xlsx_sha256": metrics.get("final_xlsx_sha256"),
+        "artifacts": artifacts,
+        "metrics": metrics,
+        "warnings": archive.parse_warnings or [],
+    }
+
+
+def _upload_manifest(archive: Archive, manifest: dict[str, Any]) -> None:
+    """把 manifest dict 落 MinIO（cost-report 桶，key = quota/<aid>/manifest.json）。
+
+    v0.4 §8 #14：manifest.json 真落 MinIO，便于 audit / replay。
+    """
+    from app.quota_parser.service import PARSE_BUCKET_REPORT
+
+    key = f"quota/{archive.archive_id}/manifest.json"
+    payload = json.dumps(manifest, ensure_ascii=False, default=str).encode("utf-8")
+    _upload_bytes(
+        PARSE_BUCKET_REPORT, key, payload,
+        content_type="application/json; charset=utf-8",
+    )
+
+
 # === 阶段 A mock ===
 
 async def run_mock_pipeline_a(archive_id: str, *, candidate_seconds: float = MOCK_A_SECONDS) -> None:
@@ -93,6 +153,7 @@ async def run_mock_pipeline_a(archive_id: str, *, candidate_seconds: float = MOC
     # 3. 构造假 candidate.xlsx 并上传（复用 cost-extract 桶，key 前缀 quota/）
     fake_xlsx = _build_fake_xlsx(sheet_name="定额条目", rows=10, cols=10)
     candidate_key = f"quota/{archive_id}/candidate.xlsx"
+    candidate_sha = _sha256_bytes(fake_xlsx)
     _upload_bytes(
         "cost-extract",
         candidate_key,
@@ -115,6 +176,7 @@ async def run_mock_pipeline_a(archive_id: str, *, candidate_seconds: float = MOC
             "pages": 100,
             "ocr_seconds": int(candidate_seconds),
             "candidate_rows": 10,
+            "candidate_xlsx_sha256": candidate_sha,
             "warnings": 1,
             "mock": True,
         }
@@ -123,8 +185,18 @@ async def run_mock_pipeline_a(archive_id: str, *, candidate_seconds: float = MOC
         archive.parse_error_message = None
         archive.candidate_xlsx_key = candidate_key
         session.commit()
+        # v0.4 §8 #14: refresh 后再读 metadata_payload,避免 SQLAlchemy 缓存过期值
+        session.refresh(archive)
 
-    logger.info("mock_a done archive_id=%s status=parsed", archive_id)
+    # 5. v0.4 §8 #14: 写 manifest.json 到 cost-report 桶
+    mock_manifest = _build_mock_manifest(
+        archive=archive,
+        phase="stage_a", status="candidate_ready",
+        artifacts=[{"kind": "candidate_xlsx", "key": candidate_key}],
+    )
+    _upload_manifest(archive, mock_manifest)
+
+    logger.info("mock_a done archive_id=%s status=parsed manifest_uploaded=True", archive_id)
 
 
 def schedule_mock_a(archive_id: str) -> asyncio.Task:
@@ -161,13 +233,23 @@ async def run_mock_pipeline_b(archive_id: str, *, reviewed_bytes: bytes | None =
         logger.warning("mock_b cancelled archive_id=%s", archive_id)
         return
 
-    # 3. 构造假 final.xlsx 并上传（复用 cost-extract 桶，key 前缀 quota/）
-    fake_xlsx = _build_fake_xlsx(sheet_name="定额条目", rows=10, cols=10)
+    # 3. 落 final.xlsx。
+    # 关键:用户上传的 reviewed_bytes 是真产物,要原样落到 MinIO;只在没传 reviewed_bytes 时
+    # 才回退到占位假 xlsx(此前一直回退,导致 UI 下载 final.xlsx 看到的是 mock 占位而不是
+    # 用户实际审核后的内容,bug 修复前 user 体感是"上传没生效")。
+    if reviewed_bytes:
+        final_xlsx_bytes = reviewed_bytes
+        logger.info("mock_b: 使用用户上传的 reviewed_bytes (%d B)", len(reviewed_bytes))
+    else:
+        final_xlsx_bytes = _build_fake_xlsx(sheet_name="定额条目", rows=10, cols=10)
+        logger.info("mock_b: 未传 reviewed_bytes, 落占位假 xlsx (%d B)", len(final_xlsx_bytes))
+
     final_key = f"quota/{archive_id}/final.xlsx"
+    final_sha = _sha256_bytes(final_xlsx_bytes)
     _upload_bytes(
         "cost-extract",
         final_key,
-        fake_xlsx,
+        final_xlsx_bytes,
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
@@ -184,10 +266,32 @@ async def run_mock_pipeline_b(archive_id: str, *, reviewed_bytes: bytes | None =
         archive.parse_error_code = None
         archive.parse_error_message = None
         archive.final_xlsx_key = final_key
-        archive.parse_metrics = {**(archive.parse_metrics or {}), "final_xlsx_rows": 10, "mock": True}
+        archive.parse_metrics = {
+            **(archive.parse_metrics or {}),
+            "final_xlsx_sha256": final_sha,
+            "mock": True,
+            "from_reviewed_upload": bool(reviewed_bytes),
+        }
         session.commit()
+        # v0.4 §8 #14: refresh 后再读 metadata_payload,避免 SQLAlchemy 缓存过期值
+        session.refresh(archive)
 
-    logger.info("mock_b done archive_id=%s status=qa_passed", archive_id)
+    # 5. v0.4 §8 #14: 覆盖 manifest.json（phase=stage_b, status=qa_passed）
+    candidate_key = archive.candidate_xlsx_key
+    artifacts = [
+        a for a in [
+            {"kind": "candidate_xlsx", "key": candidate_key} if candidate_key else None,
+            {"kind": "final_xlsx", "key": final_key},
+        ] if a
+    ]
+    mock_manifest = _build_mock_manifest(
+        archive=archive,
+        phase="stage_b", status="qa_passed",
+        artifacts=artifacts,
+    )
+    _upload_manifest(archive, mock_manifest)
+
+    logger.info("mock_b done archive_id=%s status=qa_passed manifest_uploaded=True", archive_id)
 
 
 def schedule_mock_b(archive_id: str, *, reviewed_bytes: bytes | None = None) -> asyncio.Task:
