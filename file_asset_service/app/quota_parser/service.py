@@ -92,12 +92,15 @@ def _check_parse_status(value: str | None) -> str | None:
 
 # === 阶段 A：触发解析 ===
 
-def trigger_parse(archive: Archive, *, profile: str | None = None) -> Archive:
+def trigger_parse(archive: Archive, *, profile: str | None = None,
+                  province: str | None = None) -> Archive:
     """触发阶段 A：写 parse_status='parsing' + parse_task_id。
 
     Args:
-        archive: 已加载的 Archive 实例（caller 负责 session.commit()）
-        profile: 'sichuan' / 'chongqing' / None（None = 用档案已有的 profile）
+        archive:  已加载的 Archive 实例（caller 负责 session.commit()）
+        profile:  'sichuan' / 'chongqing' / None（None = 用档案已有的 profile）
+        province: v0.4 §9 #15 入参；可由 caller 从 metadata_payload 读回。
+                  若 metadata_payload 还没有 province,补一个 audit cell（不影响 profile）。
 
     Returns:
         更新后的 Archive 实例
@@ -133,6 +136,19 @@ def trigger_parse(archive: Archive, *, profile: str | None = None) -> Archive:
     # 重新解析时清掉旧 candidate / final key（web-frontend SPEC §3.1.3 决策）
     archive.candidate_xlsx_key = None
     archive.final_xlsx_key = None
+
+    # ── v0.4 §9 #15：province 透传 — 若 metadata_payload 还没有 province,补 audit cell ──
+    # idempotent：上传时已写过的不会覆盖；旧档案（无 province）这里补上后端可见性。
+    if province and isinstance(archive.metadata_payload, dict):
+        if "province" not in archive.metadata_payload:
+            from app.archive_rules import metadata_cell as _mc
+            archive.metadata_payload = {
+                **archive.metadata_payload,
+                "province": _mc(
+                    province,
+                    source_level="manual", tagged_by="api:trigger-parse",
+                ),
+            }
     return archive
 
 

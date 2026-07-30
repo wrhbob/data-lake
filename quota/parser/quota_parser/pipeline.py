@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util as _ilu
+import logging
 import os
 import sys
 import time
@@ -12,6 +13,7 @@ from typing import Any
 
 from .config import (
     PARSER_VERSION,
+    PROVINCE_DEFAULT_KEY,
     PROVINCE_KEYWORDS,
     PROVINCE_NAMES,
     QUOTA_CSV_FINALIZE_DIR,
@@ -32,6 +34,9 @@ from .exceptions import (
     WorkdirNotWritableError,
 )
 from .result import StageAResult, StageBResult
+
+
+_logger = logging.getLogger(__name__)
 
 
 def _sha256_file(path: Path) -> str:
@@ -104,7 +109,7 @@ def run_quota_pipeline(
     *,
     pdf_path: str,
     work_dir: str,
-    province: str,
+    province: str | None = None,
     ocr_api_url: str | None = None,
     profile: str | None = None,
     enable_chunking: bool = True,
@@ -115,7 +120,7 @@ def run_quota_pipeline(
     Args:
         pdf_path:     PDF 本地路径（Worker 由 MinIO 临时下载得到）
         work_dir:     任务独占目录（函数内部追加 task_id 子目录）
-        province:     'sc' | 'cq'
+        province:     'sc' | 'cq' | 'default' | None（None / 未知值 收敛到 'default'）
         ocr_api_url:  覆盖默认 OCR URL（None 用 config.get_ocr_api_url()）
         profile:      显式 Profile 名;None 时按 province 取默认
         enable_chunking: >100 页 PDF 自动分段 OCR
@@ -124,16 +129,24 @@ def run_quota_pipeline(
         StageAResult（含 candidate_xlsx_path / sha256 / qa_report paths）
 
     Raises:
-        UnsupportedProvinceError: 未知省份
         InvalidPageRangeError: PDF 页数异常
         WorkdirNotWritableError: workspace 创建失败
         ProfileExecutionError: Province 子脚本抛错
+
+    行为变更（v0.4 §9 #15）：
+        - province=None / 'default' / 未知省份 → 收敛到 PROVINCE_DEFAULT_KEY,
+          跳过省份抽取子步骤,直接写空 candidate.xlsx 占位。
+        - 不再抛 UnsupportedProvinceError（仅这一处移除；其余位置不变）。
     """
-    if province not in PROVINCE_KEYWORDS:
-        raise UnsupportedProvinceError(
-            f"未知省份: {province!r};"
-            f"已注册: {', '.join(PROVINCE_KEYWORDS.keys())}"
+    # ── v0.4 §9 #15: province 收敛 + 软校验 ──
+    normalized = (province or PROVINCE_DEFAULT_KEY).strip().lower()
+    if normalized not in PROVINCE_KEYWORDS:
+        _logger.warning(
+            "run_quota_pipeline: 未知 province=%r, 收敛到 %r",
+            province, PROVINCE_DEFAULT_KEY,
         )
+        normalized = PROVINCE_DEFAULT_KEY
+    province = normalized
 
     pdf_p = Path(pdf_path).resolve()
     if not pdf_p.exists():
@@ -175,14 +188,33 @@ def run_quota_pipeline(
         raise ProfileExecutionError(f"OCR 失败: {pdf_p}")
 
     # ── MD → candidate xlsx ──
-    extract_mod = _import_md_extract_module()
-    extract_info = extract_mod.process_md_file(
-        md_path=str(md_path),
-        work_dir=str(work_root / "candidate"),
-        province=province,
-        keep_csv=False,
-        run_finalize=True,
-    )
+    # v0.4 §9 #15: default sentinel 跳过省份抽取(extract_quota._load_province_module
+    # 对 'default' 抛 ValueError),直接产空 candidate.xlsx 占位。
+    if province == PROVINCE_DEFAULT_KEY:
+        candidate_xlsx = work_root / "candidate" / "empty_candidate.xlsx"
+        candidate_xlsx.parent.mkdir(parents=True, exist_ok=True)
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "定额条目"
+        placeholder = ["placeholder"] * 10
+        ws.append(placeholder)
+        wb.save(candidate_xlsx)
+        extract_info = {
+            "rows_count": 0, "sections_count": 0, "projects_count": 0,
+            "issues_count": 0, "n_chapters": 0, "preface_chars": 0,
+            "issues_md_path": None,
+            "warnings": ["province=default — placeholder candidate"],
+        }
+    else:
+        extract_mod = _import_md_extract_module()
+        extract_info = extract_mod.process_md_file(
+            md_path=str(md_path),
+            work_dir=str(work_root / "candidate"),
+            province=province,
+            keep_csv=False,
+            run_finalize=True,
+        )
 
     candidate_xlsx = Path(extract_info["xlsx_path"])
     candidate_sha = _sha256_file(candidate_xlsx)
