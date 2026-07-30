@@ -475,6 +475,17 @@ def get_quota_archive_detail(
         "title": archive.title,
         "domain_type": archive.domain_type,
         "status": archive.status,
+        # v0.4 Bug#1 第四层修:detail 端点也补 8 个 parse_* 字段(与 list 端点 L389-405 对齐)。
+        # 之前只有 status='pending_tag' 不在 PARSE_STATUS_VARIANT 表里,前端 resolveUiStatus
+        # 永远渲染"未解析"。修完后 detail 页能直接驱动 5 态徽章 + 文件下载按钮启用。
+        "parse_status": archive.parse_status,
+        "parse_phase": archive.parse_phase,
+        "parse_task_id": archive.parse_task_id,
+        "parse_started_at": archive.parse_started_at.isoformat() if archive.parse_started_at else None,
+        "parse_finished_at": archive.parse_finished_at.isoformat() if archive.parse_finished_at else None,
+        "parse_error_code": archive.parse_error_code,
+        "candidate_xlsx_key": archive.candidate_xlsx_key,
+        "final_xlsx_key": archive.final_xlsx_key,
         "business_key": archive.business_key,
         "region_code": archive.region_code,
         "publication_set_id": profile.publication_set_id if profile else None,
@@ -1579,6 +1590,26 @@ async def upload_reviewed_xlsx(
         raise HTTPException(
             409,
             detail=f"ARCHIVE_NOT_READY_FOR_REVIEW: parse_status={archive.parse_status}",
+        )
+
+    # ── 文件类型防御:filename 后缀必须 .xlsx(mime 放宽,允许 octet-stream / None) ──
+    # 静态审计 D 修复:之前没校验,POST 一个 text/html 也能进 mock_b,最终落 MinIO 当 xlsx
+    # 给前端,SheetJS / openpyxl 读不到内容。
+    fname = (file.filename or "").lower()
+    if not fname.endswith(".xlsx"):
+        raise HTTPException(
+            422,
+            detail=f"INVALID_FILE_TYPE: filename={file.filename!r}, 必须为 .xlsx 后缀",
+        )
+    if file.content_type not in (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/octet-stream",  # curl -F / 某些浏览器兜底
+        None,  # 缺失 mime(防御性,部分 multipart client 不带)
+    ):
+        raise HTTPException(
+            422,
+            detail=f"INVALID_FILE_MIME: content_type={file.content_type!r}, "
+                   f"必须为 spreadsheetml.sheet / octet-stream",
         )
 
     reviewed_bytes = await file.read()
