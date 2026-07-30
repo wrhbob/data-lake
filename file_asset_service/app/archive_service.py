@@ -253,6 +253,19 @@ def _serialize_archive_base(archive: Archive) -> dict[str, object]:
         "preview_status": archive.preview_status,
         "created_at": archive.created_at.isoformat(),
         "updated_at": archive.updated_at.isoformat(),
+        # v0.4 Bug#1 修：list 端点必须透出 parse_* 字段,前端 quota-ui.js:resolveUiStatus
+        # 直接读 row.parse_status 决定 5 态徽章(pending/parsing/review/done/failed)。
+        # 关键:前端打的是 /api/archives?domain_type=quota(不是 /api/data-lake/quota/archives),
+        # 所以必须改这个 **通用** 序列化层,而非 quota_api.py:list_quota_archives。
+        # 对 cost_info 域来说 parse_status 永远 None,字段冗余但无害;对 quota 域则必须透出。
+        "parse_status": archive.parse_status,
+        "parse_phase": archive.parse_phase,
+        "parse_task_id": archive.parse_task_id,
+        "parse_started_at": archive.parse_started_at.isoformat() if archive.parse_started_at else None,
+        "parse_finished_at": archive.parse_finished_at.isoformat() if archive.parse_finished_at else None,
+        "parse_error_code": archive.parse_error_code,
+        "candidate_xlsx_key": archive.candidate_xlsx_key,
+        "final_xlsx_key": archive.final_xlsx_key,
     }
 
 
@@ -449,7 +462,15 @@ def _archive_summary_rows(session: Session, archives: list[Archive], *, mirror: 
         primary_file = next((item for item in files if item[0].is_primary), files[0] if files else None)
         row = _serialize_archive_base(archive)
         _apply_source_config_metadata_fallback(row, sources_by_id.get(archive.source_id))
-        row["file_count"] = len(files)
+        # file_count = ArchiveFile 行数 + parse 产物 (candidate.xlsx / final.xlsx)
+        # Parse 产物存在 Archive.candidate_xlsx_key / final_xlsx_key,落 MinIO 但不挂 ArchiveFile。
+        # 用户期望:1 件 PDF + 1 candidate (阶段 A 完成) + 1 final (阶段 B 完成) → 最多 3。
+        # 其它域 (cost_info) parse_* 全 None,数字仍为 ArchiveFile 行数,行为不变。
+        parse_artifact_count = (
+            (1 if archive.candidate_xlsx_key else 0)
+            + (1 if archive.final_xlsx_key else 0)
+        )
+        row["file_count"] = len(files) + parse_artifact_count
         row["priced_source_count"] = sum(1 for mounted, _ in files if mounted.file_role == "priced_source")
         row["primary_file"] = (
             {

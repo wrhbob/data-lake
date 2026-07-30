@@ -376,14 +376,33 @@ def list_quota_archives(
 
     items = []
     for archive, profile, pubset in rows:
-        file_count = _safe_int(session.scalar(
+        archive_file_count = _safe_int(session.scalar(
             select(func.count()).select_from(ArchiveFile).where(ArchiveFile.archive_id == archive.archive_id)
         ))
+        # 同 archive_service.py:_archive_summary_rows 一致:把 parse 产物 (candidate.xlsx / final.xlsx)
+        # 也算进 file_count(它们落 MinIO 但不挂 ArchiveFile)。quota 档案期望:1 PDF + 1 candidate + 1 final = 3。
+        parse_artifact_count = (
+            (1 if archive.candidate_xlsx_key else 0)
+            + (1 if archive.final_xlsx_key else 0)
+        )
+        file_count = archive_file_count + parse_artifact_count
         items.append({
             "archive_id": archive.archive_id,
             "title": archive.title,
             "domain_type": archive.domain_type,
             "status": archive.status,
+            # v0.4 Bug#1 修：list 端点必须透出 parse_* 字段,前端 resolveUiStatus
+            # 直接读 parse_status(原本读 row.status 命中的是 archive.status='pending_tag',
+            # 不在 PARSE_STATUS_VARIANT 表里,导致所有行永远渲染"未解析")。
+            # 保留 status 字段以兼容旧客户端;parse_status 才是驱动 5 态徽章的真值。
+            "parse_status": archive.parse_status,
+            "parse_phase": archive.parse_phase,
+            "parse_task_id": archive.parse_task_id,
+            "parse_started_at": archive.parse_started_at.isoformat() if archive.parse_started_at else None,
+            "parse_finished_at": archive.parse_finished_at.isoformat() if archive.parse_finished_at else None,
+            "parse_error_code": archive.parse_error_code,
+            "candidate_xlsx_key": archive.candidate_xlsx_key,
+            "final_xlsx_key": archive.final_xlsx_key,
             "business_key": archive.business_key,
             "region_code": archive.region_code,
             "publication_set_title": pubset.title if pubset else None,
@@ -439,11 +458,17 @@ def get_quota_archive_detail(
 
     archive, profile, pubset = main_row
 
-    file_count = _safe_int(session.scalar(
+    archive_file_count = _safe_int(session.scalar(
         select(func.count())
         .select_from(ArchiveFile)
         .where(ArchiveFile.archive_id == archive.archive_id)
     ))
+    # 同 list_quota_archives 注释:把 parse 产物 (candidate/final xlsx) 也算进 file_count。
+    parse_artifact_count = (
+        (1 if archive.candidate_xlsx_key else 0)
+        + (1 if archive.final_xlsx_key else 0)
+    )
+    file_count = archive_file_count + parse_artifact_count
 
     archive_obj = {
         "archive_id": archive.archive_id,
@@ -1325,7 +1350,15 @@ async def upload_quota_files(
                     visibility_scope="public",
                     status="pending_tag",
                     region_code=jurisdiction_code,    # v0.3.2：写入省份 code
-                    metadata={"category": category_cell},
+                    metadata={
+                        "category": category_cell,
+                        # v0.4 §9 #15: 把 province 短码透传到 metadata_payload,
+                        # 下游 trigger_quota_parse 从这里读回后传给 worker。
+                        "province": metadata_cell(
+                            province,
+                            source_level="manual", tagged_by="ui:quota-upload",
+                        ),
+                    },
                     field_sources=_build_archive_field_sources(
                         title=title, business_key=business_key,
                         region_code=jurisdiction_code),
@@ -1431,8 +1464,37 @@ async def trigger_quota_parse(
         raise HTTPException(400, detail="NOT_A_QUOTA_ARCHIVE")
 
     profile = (body or {}).get("profile")
+
+    # ── v0.4 §9 #15：province 透传 + body.profile 白名单校验 ──
+    # (a) 从 archive.metadata_payload 读回 province；旧档案 fallback None
+    province_value: str | None = None
+    mp = archive.metadata_payload or {}
+    prov_cell = mp.get("province")
+    if isinstance(prov_cell, dict) and "value" in prov_cell:
+        province_value = prov_cell.get("value")
+    elif isinstance(prov_cell, str):  # 防御：历史裸字符串
+        province_value = prov_cell
+
+    # (b) profile 白名单：仅 sichuan/chongqing；None = 沿用旧值
+    # 'default' 是 pipeline 内部 sentinel,不允许 HTTP 用户传 → 422 拒绝
+    if profile is not None and profile not in {"sichuan", "chongqing"}:
+        raise HTTPException(
+            status_code=422,
+            detail=f"INVALID_PROFILE: {profile!r}. 必须为 'sichuan' | 'chongqing' 或省略",
+        )
+
+    # ── v0.5 fix: is_parse_mock 必须放在 _trigger() 之前 ──
+    # 否则 HTTPException(501) 抛出时,_trigger 已 commit 的 parse_status='parsing'
+    # 会卡死在 DB(因为 5xx 不回滚 SQLAlchemy session),档案无法重新触发。
+    # 提前检查:无 mock 模式能力则直接 501,不留副作用。
+    if not is_parse_mock():
+        raise HTTPException(
+            501,
+            detail="REAL_WORKER_NOT_IMPLEMENTED: set QUOTA_PARSE_MOCK=1 to use mock",
+        )
+
     try:
-        archive = _trigger(archive, profile=profile)
+        archive = _trigger(archive, profile=profile, province=province_value)
     except ValueError as e:
         msg = str(e)
         if "profile" in msg:
@@ -1442,17 +1504,10 @@ async def trigger_quota_parse(
     session.commit()
     session.refresh(archive)
 
-    # 触发后台解析（mock 模式下用 mock runner）
-    if is_parse_mock():
-        from app.mock_parse_runner import schedule_mock_a
+    # 触发后台解析（mock 模式）
+    from app.mock_parse_runner import schedule_mock_a
 
-        schedule_mock_a(archive_id)
-    else:
-        # 真 worker 上线前返回 501（避免静默失败）
-        raise HTTPException(
-            501,
-            detail="REAL_WORKER_NOT_IMPLEMENTED: set QUOTA_PARSE_MOCK=1 to use mock",
-        )
+    schedule_mock_a(archive_id)
 
     from app.quota_parser.service import build_parse_section
 
@@ -1607,11 +1662,17 @@ def get_manifest(
 ):
     """返回 Manifest JSON（quota-parser-result/v1 schema）。
 
-    QUOTA_PARSE_MOCK=1 → 返回 mock fixture。
+    v0.4 §8 #14：mock 模式先读 MinIO manifest.json，读不到 fallback fake_manifest()。
+    真模式（未启用 worker 前 501）继续走 _reconstruct_manifest 反推。
     """
-    from app.quota_parser.service import _reconstruct_manifest
-    from app.mock_parse_runner import fake_manifest
+    from app.mock_parse_runner import fake_manifest as _fake_manifest
     from app.quota_parser import is_parse_mock
+    from app.quota_parser.service import (
+        PARSE_BUCKET_REPORT,
+        _reconstruct_manifest,
+    )
+    from app.storage import get_object_store
+    import json as _json
 
     archive = session.get(Archive, archive_id)
     if archive is None:
@@ -1619,12 +1680,20 @@ def get_manifest(
     if archive.parse_status is None:
         raise HTTPException(404, detail="MANIFEST_NOT_FOUND")
 
-    manifest = (
-        fake_manifest(archive_id, parse_status=archive.parse_status)
-        if is_parse_mock()
-        else _reconstruct_manifest(archive)
-    )
-    return _json_ok(response, manifest)
+    if is_parse_mock():
+        # v0.4 §8 #14：先读 MinIO 落盘的 manifest.json;读不到/读坏 fallback fake_manifest()
+        manifest: dict | None = None
+        try:
+            store = get_object_store()
+            body = store.get_object(
+                PARSE_BUCKET_REPORT, f"quota/{archive_id}/manifest.json",
+            )
+            manifest = _json.loads(body.decode("utf-8"))
+        except (KeyError, _json.JSONDecodeError):
+            manifest = _fake_manifest(archive_id, parse_status=archive.parse_status)
+        return _json_ok(response, manifest)
+
+    return _json_ok(response, _reconstruct_manifest(archive))
 
 
 @router.get("/archives/{archive_id}/qa-report")

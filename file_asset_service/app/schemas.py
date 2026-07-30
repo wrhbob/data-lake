@@ -364,6 +364,17 @@ class ArchiveSummaryResponse(ArchiveResponse):
     file_count: int
     priced_source_count: int
     primary_file: ArchivePrimaryFileResponse | None = None
+    # v0.4 Bug#1 修：parse_* 字段从 quota 域扩到通用 ArchiveResponse。
+    # 主端点 /api/archives（main.py:1162）走 response_model=list[ArchiveSummaryResponse],
+    # 不在 schema 里的字段会被 Pydantic 过滤掉。cost_info 域 parse_status 永远 None,字段冗余但无害。
+    parse_status: str | None = None
+    parse_phase: str | None = None
+    parse_task_id: str | None = None
+    parse_started_at: str | None = None
+    parse_finished_at: str | None = None
+    parse_error_code: str | None = None
+    candidate_xlsx_key: str | None = None
+    final_xlsx_key: str | None = None
 
 
 class ArchiveDetailResponse(ArchiveResponse):
