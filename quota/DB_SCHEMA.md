@@ -487,6 +487,11 @@ ALTER TABLE archive_file ADD CONSTRAINT ck_archive_file_role CHECK (file_role IN
     'parse_markdown', 'parse_html', 'parse_candidate_xlsx', 'parse_final_xlsx'
 ));
 
+-- 5.3 状态：已跑 (2026-07-30)
+--   之前 v0.5 commit 改了 archive_rules.py:ARCHIVE_FILE_ROLES set 但漏跑本 ALTER,
+--   导致 worker 写入 parse_markdown 时被 DB CheckConstraint 拒绝 → IntegrityError → failed_permanent
+--   修复后跑了一次,DB 验证 28 个 role 全部生效。
+
 -- 5.4 新增 quota_parse_job 队列表（v0.4 web 集成 · MinerU 单 worker 串行）
 CREATE TABLE IF NOT EXISTS quota_parse_job (
     job_id           VARCHAR(36) PRIMARY KEY,

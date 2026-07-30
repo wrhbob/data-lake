@@ -68,6 +68,8 @@
     pending:  "pending",
     parsing:  "parsing",
     parsed:   "review",
+    // v0.5 pipeline 新状态：candidate.xlsx 已落 MinIO，等用户上传 reviewed.xlsx
+    candidate_ready: "review",
     qa_passed: "done",
     usable:   "done",
     failed_user: "failed",

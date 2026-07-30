@@ -1606,7 +1606,7 @@ async def upload_reviewed_xlsx(
         raise HTTPException(404, detail="ARCHIVE_NOT_FOUND")
     if archive.domain_type != "quota":
         raise HTTPException(400, detail="NOT_A_QUOTA_ARCHIVE")
-    if archive.parse_status != "parsed":
+    if archive.parse_status not in ("parsed", "candidate_ready"):
         raise HTTPException(
             409,
             detail=f"ARCHIVE_NOT_READY_FOR_REVIEW: parse_status={archive.parse_status}",

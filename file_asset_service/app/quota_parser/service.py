@@ -218,7 +218,8 @@ def upload_reviewed(
         QuotaParserStageBError: finalize_reviewed_xlsx 抛错（落 failed_user）
     """
     from app.models import Archive
-    from quota_parser import finalize_reviewed_xlsx
+    # v0.5 fix: 显式 import 真 pipeline 子模块，避免 sys.path 把 web adapter quota_parser 包当 quota_parser 真包
+    from quota_parser.pipeline import finalize_reviewed_xlsx
     from quota_parser.exceptions import (
         InvalidXlsxStructureError,
         ProfileExecutionError,
@@ -235,6 +236,8 @@ def upload_reviewed(
     with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
         tmp.write(reviewed_xlsx_bytes)
         reviewed_path = Path(tmp.name)
+
+    final_xlsx_path: Path | None = None  # 提前初始化,避免 validate 失败时 finally UnboundLocalError
 
     try:
         # 2. 结构校验
@@ -282,7 +285,7 @@ def upload_reviewed(
         return archive
     finally:
         # 清理 reviewed_path / final_xlsx_path
-        for p in (reviewed_path, final_xlsx_path if final_xlsx_path.exists() else None):
+        for p in (reviewed_path, final_xlsx_path):
             try:
                 if p and p.exists():
                     p.unlink()
