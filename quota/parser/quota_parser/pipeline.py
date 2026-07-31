@@ -9,7 +9,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import (
     PARSER_VERSION,
@@ -114,6 +114,7 @@ def run_quota_pipeline(
     profile: str | None = None,
     enable_chunking: bool = True,
     task_id: str | None = None,
+    on_chunk_done: Callable[[int, int, str], None] | None = None,
 ) -> StageAResult:
     """阶段 A: PDF → candidate xlsx（OCR + MD 抽取 + autofinalize 5 步）
 
@@ -175,10 +176,16 @@ def run_quota_pipeline(
 
     if enable_chunking and page_count > CHUNK_THRESHOLD_PAGES:
         parse_chunked = _load_mineru_function("parse_chunked.py", "parse_chunked")
-        info = parse_chunked(pdf_path=str(pdf_p), output_dir=str(ocr_dir))
+        info = parse_chunked(
+            pdf_path=str(pdf_p),
+            output_dir=str(ocr_dir),
+            on_chunk_done=on_chunk_done,
+        )
         md_path = Path(info["markdown_path"]) if info.get("markdown_path") else None
         result_json_path = Path(info["result_json_path"]) if info.get("result_json_path") else None
     else:
+        # v0.6 §#6 限制: 非 chunked 路径不传 on_chunk_done（parse_pdf 整体 < 2 min,
+        # 30 min 首 chunk 超时足够覆盖）。如果未来 parse_pdf 变慢,再补 on_chunk_done。
         parse_pdf = _load_mineru_function("parse_pdf.py", "parse_pdf")
         info = parse_pdf(pdf_path=str(pdf_p), output_dir=str(ocr_dir), api_url=api)
         md_path = Path(info["markdown_path"]) if info.get("markdown_path") else None
