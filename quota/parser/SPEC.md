@@ -286,7 +286,7 @@ sheet 名称和列结构来自现有 `extractors/_common/xlsx_writer.py` 行为�
 文件: candidate.xlsx / final.xlsx
 
 Sheet1 名: 定额条目
-  列数: 10（无 header；与现有 CSV schema 完全一致）
+  列数: 9（无 header；worker OCR candidate.xlsx 实际产出 8 列，人工审核补齐后才到 9 列；具体列序以 service.py finalize 列对齐表为准）
   列序: 类型 | 项目编码 | 名称 | 项目特征 | 计量单位 | 消耗量 | 基价/单价 | 验证 | 标准换算 | 标准换算来源
   行类型 enum: 段 | 定 | 工 | 料 | 配 | 机 | 综 | 主材
 
@@ -314,7 +314,7 @@ CSV 中间产物默认不落盘（`tempfile + atexit`），仅在命令行携带
 ```text
 - 文件能用 openpyxl 打开
 - 含一个名为"定额条目"的 sheet（必须位于第 1 位）
-- "定额条目" sheet 列数为 10
+- "定额条目" sheet 列数为 9（worker candidate.xlsx 实际 8 列；人工补齐后才到 9 列）
 ```
 
 不允许：
@@ -534,7 +534,7 @@ candidate.xlsx（已含 autofinalize 5 步结果 + 多 Sheet）
   → 保存为 reviewed.xlsx（用户本机操作，不在本项目脚本控制下）
   → 上传
   → save.reviewed_to_final.reviewed_to_final_xlsx()  (选项 B)
-      - 校验 Sheet1 "定额条目" 结构（10 列无 header、固定名、固定位）
+      - 校验 Sheet1 "定额条目" 结构（9 列无 header、固定名、固定位）
       - 用 reviewed.xlsx 的全部 sheet 顺序与命名原样写入 final.xlsx
       - reviewed.xlsx 比 candidate.xlsx 少的 sheet（除"定额条目"）用 candidate 原内容保底
       - 计算 SHA-256
@@ -542,7 +542,7 @@ candidate.xlsx（已含 autofinalize 5 步结果 + 多 Sheet）
 ```
 
 > **关键约束（选项 B）**：
-> - Sheet1 "定额条目" 名固定为 "定额条目"，列数为 10，列序固定。
+> - Sheet1 "定额条目" 名固定为 "定额条目"，列数为 9，列序固定。
 > - 其他 sheet（册说明 + 各章 A/B/C/...）完全信任人工，可任意修改、增删。
 > - 不重跑 autofinalize。
 
@@ -575,7 +575,7 @@ failed_user(需要用户介入)    : UnsupportedProvinceError / InvalidXlsxStruc
 
 ```text
 - 文件存在且能 openpyxl 打开
-- 必含 sheet = "定额条目"（且必须在第 1 位），含 10 列无 header
+- 必含 sheet = "定额条目"（且必须在第 1 位），含 9 列无 header
 - "定额条目" 行数与 candidate.xlsx 差异 > 15% → warning
 - "定额条目" type 列只能出现 段 / 定 / 工 / 料 / 配 / 机 / 综 / 主材
 - 段/定 行至少存在，若为 0 行 → warning

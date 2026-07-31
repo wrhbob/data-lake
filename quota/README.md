@@ -64,7 +64,7 @@
 格式由脚本确定性生成，暂不设置单独的格式人工审核阶段。脚本仍必须生成自动 QA 报告，检查例如：
 
 - XLSX 是否成功生成；
-- Sheet 和列结构是否正确（Sheet1「定额条目」必须存在、首列 sheet、10 列无 header）；
+- Sheet 和列结构是否正确（Sheet1「定额条目」必须存在、首列 sheet、9 列无 header；worker OCR candidate.xlsx 实际产出 8 列，人工审核补齐后才到 9 列）；
 - 输出行数是否异常；
 - 定额编码和定额行是否存在；
 - autofinalize 删除或修改的行数；
@@ -107,7 +107,8 @@
 
 reviewed XLSX 的约束（v0.2 选项 B）：
 
-- **唯一硬校验**：Sheet1 名必须为「定额条目」、列数必须为 10、列序固定、位于首列 sheet；其余 Sheet（册说明 + A/B/C...）完全信任人工结果；
+- **唯一硬校验**：Sheet1 名必须为「定额条目」、列数必须为 9、列序固定、位于首列 sheet；其余 Sheet（册说明 + A/B/C...）完全信任人工结果；
+  - 说明：worker OCR candidate.xlsx 实际产出 8 列，人工审核补齐 1 列后到标准 9 列；`validate_reviewed_xlsx`（service.py）和 `finalize_reviewed_xlsx`（pipeline.py）均按 9 列校验。
 - 除此之外，用户可以自由修改任意单元格内容（包括数值、文本、类型字段、字体格式）；
 - 用户可以增、删、调整行顺序；
 - 行数与 candidate XLSX 差异较大时只产生 warning，不阻断；

@@ -293,9 +293,12 @@ def finalize_reviewed_xlsx(
         )
 
     ws = wb["定额条目"]
-    if ws.max_column != 10:
+    # 人工审核补齐后的标准列数 = 9(worker OCR candidate.xlsx 实际产出是 8 列,
+    # 人工补齐 1 列后到 9 列;reviewed upload 入口 service.py 也按 9 列校验,
+    # finalize 此处保持一致)
+    if ws.max_column != 9:
         raise InvalidXlsxStructureError(
-            f"'定额条目' sheet 列数 = {ws.max_column}, 应为 10"
+            f"'定额条目' sheet 列数 = {ws.max_column}, 应为 9"
         )
 
     # reviewed → final 原样拷贝（仅 Sheet1 + 其他 sheet 内容）

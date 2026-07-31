@@ -634,7 +634,7 @@ Task ID:     qp_20260727_xxxx
 
 权威源：[parser/SPEC.md §6.1](../parser/SPEC.md)。前端渲染规则：
 
-- **Sheet1「定额条目」**（必须第 1 个 sheet，10 列，无 header 行）：
+- **Sheet1「定额条目」**（必须第 1 个 sheet，9 列，无 header 行；worker candidate.xlsx 实际 8 列，人工补齐后才到 9 列）：
 
   | 列 | 显示字段名 | 备注 |
   |---|---|---|
@@ -671,7 +671,7 @@ Task ID:     qp_20260727_xxxx
 | ZIP 中央目录必须含 `xl/workbook.xml` | `CORRUPT_XLSX` |
 | `xl/workbook.xml` 必须声明名为「定额条目」的 sheet | `MISSING_SHEET_QUOTA_ENTRIES` |
 | sheet「定额条目」必须位于 sheet 索引 0 | `SHEET_ORDER_WRONG`（必须第一个 sheet） |
-| sheet「定额条目」必须恰好 10 列（从 dimension / row 1 cell 数判断） | `COLUMN_COUNT_WRONG` |
+| sheet「定额条目」必须恰好 9 列（从 dimension / row 1 cell 数判断） | `COLUMN_COUNT_WRONG` |
 
 > 此校验**仅作提示**。后端按 parser/SPEC.md §6.2 用 openpyxl 重新校验——后端返回的 `INVALID_XLSX_STRUCTURE`（映射到 parser/SPEC.md §11 的 `failed_user`）才是权威。
 
