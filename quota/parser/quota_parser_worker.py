@@ -4,12 +4,19 @@
   - fcntl.flock 防运维双启（Windows 跳过，靠 DB FOR UPDATE SKIP LOCKED 兜底）
   - 主循环每 2s 抢一个 queued job
   - mock / real 分流（按 job.metadata_payload["mock"]）
-  - 每完成一个 MinerU chunk 写 last_heartbeat_at（sweeper 30/15 min 兜底用）
+  - chunk 完成时通过 callback 写 last_heartbeat_at + chunks_done
   - 完成后写 archive_file 4 行 + manifest.json + 更新 archive.parse_*
 
-sweeper（多一道保险）：
-  - 主循环每 60s 扫一次 WHERE status='running' 的 job
-  - 首 chunk 30min 未落盘 / 后续 chunk 15min 未推进 → 标 failed + archive.parse_status='failed_user'
+heartbeat 机制（v0.6 §#6）：
+  - parse_chunked 加 on_chunk_done callback，每个 chunk 完成（成功/失败）调一次
+  - worker._on_chunk_progress 内部调 _update_job_fields 刷心跳 + 推进 chunks_done
+  - 失败 chunk 不递增 chunks_done，但 last_heartbeat_at 必刷（sweeper 兜底需要）
+
+sweeper（v0.6 §#5）：
+  - v0.6 起独立进程 `quota_parser_sweeper.py`，不再嵌入 worker
+  - 主进程只管抢单 + 处理 job，心跳全靠 callback
+  - 每 60s 扫一次 status='running' 的 job，首 chunk 30min / 后续 15min 未推进 → 标 failed
+  - worker 与 sweeper 必须同机部署（共享 .env / 共享 DB 网络）
 
 入口：
   python -u quota/parser/quota_parser_worker.py
@@ -89,7 +96,6 @@ def main() -> int:
     else:
         logger.warning("Windows: 跳过 fcntl.flock，依赖 DB FOR UPDATE SKIP LOCKED 防双抢")
 
-    last_sweep_at = datetime.now(UTC)
     shutdown_requested = False
 
     def _on_sigterm(signum, frame):
@@ -104,12 +110,7 @@ def main() -> int:
         try:
             job = _claim_one_job()
             if job is None:
-                now = datetime.now(UTC)
-                if (now - last_sweep_at).total_seconds() >= SWEEPER_INTERVAL_SECONDS:
-                    n = _run_sweeper()
-                    if n:
-                        logger.warning("sweeper 标记 %d 个超时 job", n)
-                    last_sweep_at = now
+                # v0.6 §#5: sweeper 已独立成进程,worker 只管抢单 + 处理 job
                 time.sleep(POLL_INTERVAL_SECONDS)
                 continue
 
@@ -275,6 +276,8 @@ def _process_real_job(job) -> None:
             profile=job.profile,
             task_id=job.job_id,
             enable_chunking=True,
+            # v0.6 §#6: 用闭包把 job_id 注入,parse_chunked 看到的签名仍是 (int, int, str)
+            on_chunk_done=lambda idx, tot, st: _on_chunk_progress(job.job_id, idx, tot, st),
         )
     except Exception as e:
         logger.exception("run_quota_pipeline 失败 job_id=%s", job.job_id)
@@ -282,10 +285,8 @@ def _process_real_job(job) -> None:
                          message=f"pipeline: {type(e).__name__}: {e}")
         return
 
-    # 每次 chunk 完成 → heartbeat（pipeline 不暴露 chunk 钩子，按 result.chunks_done
-    # 至少写一次完成态；如要更细粒度，进 pipeline.py 加 hook）
-    chunks_done = chunks_total  # pipeline 一次性跑完所有 chunk
-    _update_job_fields(job.job_id, chunks_done=chunks_done)
+    # v0.6 §#6: chunks_done 由 callback 实时推进,此处不再一次性写
+    chunks_done = chunks_total   # 最终值给下游 archive.parse_metrics.chunks_done 用
 
     # 5. 上传 4 类产物到 MinIO + register_parse_artifact
     artifacts_meta: list[dict[str, str]] = []
@@ -419,6 +420,25 @@ def _run_sweeper() -> int:
 # ─────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────
+def _on_chunk_progress(job_id: str, i: int, total: int, status: str) -> None:
+    """parse_chunked chunk 完成回调 → 推进 chunks_done + 刷心跳。
+
+    - succeeded: chunks_done = i（前 i 段都完成）
+    - failed:    chunks_done 不递增，但 last_heartbeat_at 必须刷（sweeper 兜底需要）
+
+    用 _update_job_fields 一次性写两个字段（它总会写 last_heartbeat_at=now）。
+    内部异常被吞掉,不让 heartbeat 写失败污染 pipeline。
+    """
+    new_chunks_done: int | None = i if status == "succeeded" else None
+    try:
+        _update_job_fields(job_id, chunks_done=new_chunks_done)
+        logger.info("心跳写完成 job_id=%s chunk=%d/%d status=%s",
+                    job_id, i, total, status)
+    except Exception as e:
+        logger.warning("心跳写失败 job_id=%s chunk=%d/%d status=%s: %s",
+                       job_id, i, total, status, e)
+
+
 def _update_job_fields(job_id: str, *, chunks_total: int | None = None,
                        chunks_done: int | None = None) -> None:
     from sqlalchemy import text
