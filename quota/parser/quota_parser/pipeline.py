@@ -211,6 +211,7 @@ def run_quota_pipeline(
             "rows_count": 0, "sections_count": 0, "projects_count": 0,
             "issues_count": 0, "n_chapters": 0, "preface_chars": 0,
             "issues_md_path": None,
+            "xlsx_path": str(candidate_xlsx),  # v0.7 fix: 占位路径也要给下游 line 226 读
             "warnings": ["province=default — placeholder candidate"],
         }
     else:
