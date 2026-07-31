@@ -68,6 +68,56 @@ LOCKFILE = Path(os.environ.get(
 logger = logging.getLogger("quota_parser_worker")
 
 
+# ─────────────────────────────────────────────────────────
+# DB schema 自检（防 v0.5 那次「改了 ARCHIVE_FILE_ROLES 但漏跑 ALTER」再发生）
+# ─────────────────────────────────────────────────────────
+def _check_archive_file_role_schema() -> tuple[bool, set[str], set[str], set[str]]:
+    """比对 Python 侧 ARCHIVE_FILE_ROLES 与 PG 侧 ck_archive_file_role CheckConstraint。
+
+    Returns:
+        (ok, only_in_python, only_in_db, common)
+        ok=True 表示两侧集合一致,可继续启动;ok=False 应 fail-fast 退出。
+
+    Raises:
+        不抛异常:DB 连不上 / constraint 不存在 → 返回 ok=True 并打印 warning (不阻断启动)
+                  这样开发环境 / 临时 DB schema 漂移不会让 worker 完全起不来。
+    """
+    try:
+        from app.archive_rules import ARCHIVE_FILE_ROLES  # Python 侧 28 个 role
+    except Exception as e:
+        logger.warning("schema 自检: 加载 ARCHIVE_FILE_ROLES 失败 (%s),跳过", e)
+        return True, set(), set(), set()
+
+    try:
+        from sqlalchemy import text
+        from app.database import get_engine
+        with get_engine().connect() as c:
+            rows = c.execute(text("""
+                SELECT pg_get_constraintdef(oid)
+                FROM pg_constraint
+                WHERE conname = 'ck_archive_file_role'
+            """)).all()
+        if not rows:
+            logger.warning("schema 自检: ck_archive_file_role 不存在,跳过 (新库?)")
+            return True, set(), set(), set()
+        # pg_get_constraintdef 返回类似:
+        # CHECK (((file_role)::text = ANY ((ARRAY['main_document'::varchar, ...])::text[])))
+        # 用正则抽 'role'::varchar 子串
+        import re
+        roles_in_db = set(re.findall(r"'([a-z_]+)'::character varying", rows[0][0]))
+        roles_in_db |= set(re.findall(r"'([a-z_]+)'::varchar", rows[0][0]))
+    except Exception as e:
+        logger.warning("schema 自检: 读 DB 失败 (%s),跳过", e)
+        return True, set(), set(), set()
+
+    py_set = set(ARCHIVE_FILE_ROLES)
+    only_in_py = py_set - roles_in_db
+    only_in_db = roles_in_db - py_set
+    common = py_set & roles_in_db
+    ok = not only_in_py and not only_in_db
+    return ok, only_in_py, only_in_db, common
+
+
 def main() -> int:
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -79,6 +129,26 @@ def main() -> int:
         "quota_parser_worker 启动 pid=%d host=%s mock=%s",
         os.getpid(), socket.gethostname(), mock_mode,
     )
+
+    # DB schema 自检: 防止代码改了 ARCHIVE_FILE_ROLES 但漏跑 ALTER 的事再发生
+    # (v0.5 2026-07-30 教训:f576393 commit 写完 SQL 但实际没跑 → worker 写
+    #  parse_markdown 时被 PG CheckConstraint 拒收 → 整 job failed_permanent)
+    schema_ok, only_py, only_db, common = _check_archive_file_role_schema()
+    if schema_ok:
+        logger.warning(
+            "schema 自检 ✅: ARCHIVE_FILE_ROLES (%d) ↔ ck_archive_file_role 一致",
+            len(common),
+        )
+    else:
+        logger.error(
+            "schema 自检 ❌: ARCHIVE_FILE_ROLES 与 ck_archive_file_role 不一致!\n"
+            "  Python 侧有,DB 侧缺: %s\n"
+            "  DB 侧有,Python 侧缺: %s\n"
+            "  → 跑 scripts/verify_db_schema.py 看修复 SQL,或参考 quota/DB_SCHEMA.md §5.3\n"
+            "  → worker 拒绝启动,避免后续写 archive_file 时撞 CheckViolation",
+            sorted(only_py), sorted(only_db),
+        )
+        return 2  # 退出码 2 = schema 不一致 (区别于 flock 占用退出码 1)
 
     # fcntl flock — Windows 跳过
     flock_fd = None
