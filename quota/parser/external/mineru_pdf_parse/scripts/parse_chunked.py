@@ -155,16 +155,60 @@ def submit_task(pdf: Path, api_url: str, backend: str, effort: str) -> str:
     return r.json()["task_id"]
 
 
-def poll_task(task_id: str, api_url: str, label: str, poll_interval: int = 15):
-    """轮询直到任务完成/失败。返回最终 info dict。"""
+class PollTaskLost(Exception):
+    """task 在 minerU 端连续 N 次 404，视为 task 已丢失（minerU OOM / 容器重启 / 后端 bug）。
+
+    v0.7 引入 — 病因未知，先在客户端阻断死循环，由 caller（worker）捕获后标 failed_permanent。
+    """
+
+
+class PollTaskTimeout(Exception):
+    """poll 总时长超过阈值，放弃等待。"""
+
+
+def poll_task(
+    task_id: str,
+    api_url: str,
+    label: str,
+    poll_interval: int = 15,
+    max_consecutive_404: int = 3,
+    max_total_seconds: int = 1800,
+):
+    """轮询直到任务完成/失败。
+
+    v0.7 防死循环（症状层）：
+      - 连续 max_consecutive_404 次 HTTP 404 → raise PollTaskLost
+        （默认 15s × 3 = 45s 内 3 次 404,视为 task 在 minerU 端不存在）
+      - 总耗时超过 max_total_seconds → raise PollTaskTimeout
+        （默认 1800s = 30min,对齐 sweeper 阈值）
+      - 网络瞬断（ConnectionError / Timeout）/ 其他 HTTPError（5xx）不计入 404 计数,只 print + continue
+    返回最终 info dict。
+    """
     url = f"{api_url}/tasks/{task_id}"
     t0 = time.time()
+    consecutive_404 = 0
     while True:
         try:
             r = requests.get(url, timeout=10)
             r.raise_for_status()
             info = r.json()
+            consecutive_404 = 0  # 成功拿到响应 → 重置计数
+        except requests.exceptions.HTTPError as e:
+            # 只对 404 计数 + 持续判断;其他 HTTPError（5xx）按瞬断处理
+            if getattr(r, "status_code", None) == 404:
+                consecutive_404 += 1
+                print(f"  ⚠ poll 404 ({consecutive_404}/{max_consecutive_404}): {e}")
+                if consecutive_404 >= max_consecutive_404:
+                    raise PollTaskLost(
+                        f"task {task_id} 在 minerU 端连续 {max_consecutive_404} 次 404,"
+                        f"视为 task 丢失（病因未知,可能是 minerU OOM / 容器重启 / 后端 bug）"
+                    )
+            else:
+                print(f"  ⚠ poll HTTPError {getattr(r, 'status_code', '?')}: {e}")
+            time.sleep(poll_interval)
+            continue
         except Exception as e:
+            # 网络瞬断 / JSON 解析失败 → 不计入 404
             print(f"  ⚠ poll error: {e}")
             time.sleep(poll_interval)
             continue
@@ -174,6 +218,10 @@ def poll_task(task_id: str, api_url: str, label: str, poll_interval: int = 15):
         print(f"  [{label}] {elapsed:>5d}s  status={status}")
         if status in ("completed", "failed"):
             return info
+        if elapsed > max_total_seconds:
+            raise PollTaskTimeout(
+                f"task {task_id} poll 超时 {max_total_seconds}s 仍未完成"
+            )
         time.sleep(poll_interval)
 
 
