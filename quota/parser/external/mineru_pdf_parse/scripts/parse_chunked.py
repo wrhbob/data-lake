@@ -37,7 +37,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import fitz          # PyMuPDF
 import requests
@@ -262,8 +262,17 @@ def parse_chunked(
     idle_timeout_s: int = 300,
     poll_interval_s: int = 15,
     wait_between_chunks_s: int = 5,
+    on_chunk_done: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, Any]:
     """Worker 调用入口。>100 页 PDF 自动分段。
+
+    Args:
+        on_chunk_done: 可选回调,签名 on_chunk_done(chunk_index, chunk_count, status) -> None.
+            - chunk_index: 1-based
+            - chunk_count: 总段数
+            - status: "succeeded" | "failed"
+            回调内异常被 parse_chunked 捕获并 print,不影响 OCR 主流程。
+            None = 旧行为（不调）— 向后兼容所有现有调用方。
 
     返回 dict:
         {
@@ -327,6 +336,13 @@ def parse_chunked(
             render_chunk(result_path, chunk_pdf, render_script)
             chunk_status = "succeeded"
 
+            # v0.6 §#6: chunk 粒度回调 — 驱动 sweeper 30/15min 兜底
+            if on_chunk_done is not None:
+                try:
+                    on_chunk_done(i, chunk_count, "succeeded")
+                except Exception as _cb_err:
+                    print(f"  ⚠ on_chunk_done 回调异常 (chunk {i} succeeded): {_cb_err}")
+
             if i < chunk_count:
                 print(f"  💤 等待 {wait_between_chunks_s}s 让显存释放...")
                 time.sleep(wait_between_chunks_s)
@@ -344,6 +360,12 @@ def parse_chunked(
                 "seconds": time.time() - chunk_started,
                 "error": chunk_error,
             })
+            # v0.6 §#6: 失败 chunk 也写一次心跳（chunks_done 不递增，但 heartbeat 刷）
+            if on_chunk_done is not None:
+                try:
+                    on_chunk_done(i, chunk_count, chunk_status)
+                except Exception as _cb_err:
+                    print(f"  ⚠ on_chunk_done 回调异常 (chunk {i} {chunk_status}): {_cb_err}")
 
     # 3. 合并
     md_path: Path | None = None
