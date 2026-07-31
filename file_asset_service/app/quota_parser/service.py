@@ -188,11 +188,11 @@ def validate_reviewed_xlsx(reviewed_path: Path) -> None:
                 column_index=None,
             )
         ws = wb["定额条目"]
-        # 校验列数 = 10
-        if ws.max_column is None or ws.max_column != 10:
+        # 校验列数 = 9 (人工审核补齐后的标准列数;worker OCR 实际产出是 8 列,不校验)
+        if ws.max_column is None or ws.max_column != 9:
             raise InvalidReviewedXlsxError(
                 "COLUMN_COUNT_WRONG",
-                f"「定额条目」必须 10 列，当前 {ws.max_column}",
+                f"「定额条目」必须 9 列，当前 {ws.max_column}",
                 sheet="定额条目",
                 column_index=ws.max_column,
             )
