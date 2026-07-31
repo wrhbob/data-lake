@@ -293,11 +293,11 @@ bash file_asset_service/scripts/run_quota_parser_sweeper.sh stop  2>/dev/null ||
 WPID=$(cat logs/web.pid 2>/dev/null)
 [ -n "$WPID" ] && kill "$WPID" 2>/dev/null || true
 
-# 2) 兜底:用 taskkill 杀所有 python.exe(Windows 上 launcher + 子进程都可能残留)
+# 2) 兜底:用 taskkill 杀残留 python.exe（不带 //F = SIGTERM, 让 psycopg2 正常 close）
 #    先 tasklist 看一眼,确认没有别的项目 python 在跑,再 taskkill
 tasklist //FI "IMAGENAME eq python.exe"
-#    如果只剩本项目相关的,直接:
-taskkill //IM python.exe //F 2>&1 | head -10
+#    默认 SIGTERM（不带 //F）—— 让 psycopg2 发 FIN, PG 端连接正常关闭
+taskkill //IM python.exe 2>&1 | head -10
 
 # 3) 清空所有 pidfile(即便进程已死)
 rm -f logs/web.pid logs/worker.pid logs/sweeper.pid
@@ -306,11 +306,55 @@ rm -f logs/web.pid logs/worker.pid logs/sweeper.pid
 netstat -ano | grep ":8010.*LISTENING" || echo "8010 无人监听 ✅"
 tasklist //FI "IMAGENAME eq python.exe"
 #   预期输出:"没有运行的任务匹配指定标准"
+
+# 5) ⭐ 清 PG 端僵尸连接（2026-07-31 教训补充）
+#    如果步骤 2 里有用过 taskkill //IM python.exe //F (SIGKILL),
+#    或者进程是被 Python 之外的信号杀死的, PG 端 TCP 连接会残留
+#    (idle in transaction 1+ 小时), 阻塞下次 init_db 的 migrate_blob_columns.
+#    症状: web 起不来, init_db 卡在 migrate_blob_columns, DB 端健康, sweeper/worker 正常.
+#    必须从本机 psycopg2 连接主动 pg_terminate_backend() 这些 zombie.
+PY=/d/miniconda3/envs/file-asset/python.exe
+"$PY" -u -c "
+import os, sys
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv('.env', override=False)
+sys.path.insert(0, 'file_asset_service')
+from app.database import get_engine
+from sqlalchemy import text
+
+with get_engine().connect() as c:
+    my_ip = c.execute(text('SELECT inet_client_addr()')).scalar()
+    rows = c.execute(text('''
+        SELECT pid, state, now() - xact_start AS xact_age, substring(query, 1, 60) AS q
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND pid <> pg_backend_pid()
+          AND COALESCE(client_addr, inet('127.0.0.1')) = COALESCE(:my_ip, inet('127.0.0.1'))
+          AND (
+            state IN ('idle in transaction', 'idle in transaction (aborted)')
+            OR (state = 'active' AND wait_event_type = 'Lock' AND now() - state_change > interval '1 min')
+          )
+        ORDER BY xact_start NULLS LAST
+    '''), {'my_ip': my_ip}).all()
+    if not rows:
+        print(f'本机({my_ip}) 无 zombie PG 连接 ✅')
+    else:
+        print(f'本机({my_ip}) stale PG 连接 {len(rows)} 个, 准备 pg_terminate_backend:')
+        for r in rows:
+            print(f'  pid={r.pid:>5} state={r.state:<28} xact_age={r.xact_age}  q={r.q}')
+        for r in rows:
+            ok = c.execute(text('SELECT pg_terminate_backend(:p)'), {'p': r.pid}).scalar()
+            print(f'  pg_terminate_backend({r.pid}) -> {ok}')
+"
+#   预期: stale 连接数清零, 下次 web 启动 init_db 顺利过 migrate_blob_columns
 ```
 
-> ⚠️ **Windows 进程模型注意点**：worker/web 启动后 spawn 一个 reloader 子进程（pid 不同）。脚本里看到的 `pid=1515` 是 launcher，ps 看到的是 `pid=21112`。kill launcher 通常会让子进程跟着退出，但**应急情况**用 `taskkill //IM python.exe //F` 兜底。
+> ⚠️ **Windows 进程模型注意点**：worker/web 启动后 spawn 一个 reloader 子进程（pid 不同）。脚本里看到的 `pid=1515` 是 launcher，ps 看到的是 `pid=21112`。kill launcher 通常会让子进程跟着退出，但**应急情况**用 `taskkill //IM python.exe` 兜底（默认 SIGTERM，不要带 //F）。
 >
 > ⚠️ **不要**用 `kill -9` / `taskkill //F` 杀当前 Claude Code 自己跑着的 python 子进程（可能是其他工具的子进程，会破坏用户的 session）。
+>
+> ⚠️ **杀 web/worker 用 SIGKILL 的副作用**（2026-07-31 教训）：`taskkill //IM python.exe //F` 是 SIGKILL，psycopg2 没机会发 FIN 包，**PG 端 TCP 连接残留**（TCP keepalive 默认 7200s 才超时）。症状：下一次 web 启动，`init_db()` 卡在 `migrate_blob_columns` 永远不出，DB 端健康，sweeper/worker 正常。**必须**跑 §8 步骤 5 清掉本机 zombie PG 连接。**优先**用 `taskkill //IM python.exe`（不带 //F，默认 SIGTERM）让 psycopg2 优雅关闭。
 
 ### 9. 启动失败排查清单
 
@@ -321,3 +365,4 @@ tasklist //FI "IMAGENAME eq python.exe"
 | web 启动后 `curl /docs` 500 | 看 `logs/web.log`,大概率是 `.env` 没加载（`get_settings()` 报 `database_url=...`） |
 | 端口 8010 已被占用 | `netstat -ano | grep ":8010"` → 找到占用 pid → `taskkill //PID <pid> //F` |
 | sweeper "另一个 sweeper 已占 lockfile" | `/tmp/quota_parser_sweeper.lock` 残留,删掉重启（Windows 跳过 flock,不会撞这条） |
+| **web 启动后 init_db 卡住不退出（无 `[serve] shared NAS database ready`）** | **PG 端僵尸连接阻塞锁**：本机 client_addr 有 idle in transaction 1min+ 或 active wait=Lock。跑 §8 步骤 5 主动 `pg_terminate_backend()` 清掉, 再重启 web。诊断 SQL: `SELECT pid, state, now()-xact_start AS xact_age, wait_event_type FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND (state LIKE 'idle in transaction%' OR wait_event_type = 'Lock');` |

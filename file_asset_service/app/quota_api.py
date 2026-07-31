@@ -1045,6 +1045,16 @@ _UPLOAD_PROVINCE_MAP: dict[str, tuple[str, str, str | None, str]] = {
 _VALID_PROVINCE_CODES = set(_UPLOAD_PROVINCE_MAP.keys())
 _VALID_PROFILES = {"sichuan", "chongqing"}
 
+# v0.7 闸口: 「新增档案」上传 (POST /upload) 只允许有真实 extractor 的省份.
+# _UPLOAD_PROVINCE_MAP / _VALID_PROVINCE_CODES 仍保留 32 省,给 review/重登记路径
+# (L1105 取 jurisdiction_code 元数据) 用. 但走 pipeline 真解析的省份只有以下两个:
+#   - sc → 四川 extractor (extractors/sc/)
+#   - cq → 重庆 extractor (extractors/cq/)
+# 其他省份若放任上传,run_quota_pipeline 会把 province 收敛到 PROVINCE_DEFAULT_KEY,
+# 写出 empty_candidate.xlsx 占位 (0 行), 形成「解析成功但无产物」的僵尸档案.
+# 故在 upload 入口直接 422 拒绝,避免资源浪费.
+_EXTRACTABLE_PROVINCES = frozenset({"sc", "cq"})
+
 
 def _decode_upload_filename(raw: str | None) -> str:
     """修复 Windows curl 把 UTF-8 文件名以 GBK 字节送进 Content-Disposition 后的乱码。
@@ -1250,6 +1260,19 @@ async def upload_quota_files(
         raise HTTPException(
             422,
             detail=f"INVALID_PROVINCE: {province}. 必须为 {sorted(_VALID_PROVINCE_CODES)} 之一",
+        )
+    # v0.7 闸口: 32 省里只有 sc/cq 有真实 extractor; 其余省份上传后会被 pipeline 收敛到 default 占位
+    # (empty_candidate.xlsx 0 行), 变成僵尸档案. 在 upload 入口直接拒绝,不让进档.
+    if province not in _EXTRACTABLE_PROVINCES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"PROVINCE_NOT_EXTRACTABLE: {province}. "
+                f"当前可解析省份: {sorted(_EXTRACTABLE_PROVINCES)}. "
+                f"其他省份的 PDF 在 quota_md_to_csv_v2/extractors/ 下暂无 extractor, "
+                f"上传后会落为占位档案(0 行), 故暂不开放入库. "
+                f"如需支持,联系后端在 extractors/{{province}}/ 落地 extractor + 同步更新 _EXTRACTABLE_PROVINCES."
+            ),
         )
     if year is None or year < 1900 or year > 2100:
         raise HTTPException(422, detail=f"INVALID_YEAR: {year}（必须 1900-2100 整数）")
@@ -1502,6 +1525,31 @@ async def trigger_quota_parse(
         elif _profile_for_prov == "chongqing":
             province_value = "cq"
         # 仍为 None 时,worker 走 run_quota_pipeline 的 default 分支（由 pipeline 决定行为）
+
+    # (a'') v0.7 fix: 多层兜底, 即使 metadata_payload.province 缺失 + profile=None,
+    # 也能从 archive.biz_key / archive.region_code 推出 short code.
+    # 2026-07-31 教训: upload 路径 (quota_api.py:/upload) 只构造了 category_cell,
+    # 没构造 province_cell, 导致历史 archive (如 a5f716b0 重庆装饰工程第二册 2018)
+    # metadata 里 province 永远是 None, 走 pipeline default 分支 → 0 行 empty xlsx.
+    # 而 biz_key 形如 'quota:manual-upload:cq:2018:...' 自带省份简写;
+    # region_code = GB/T 2260 (500000=重庆, 510000=四川), 也可反查 _UPLOAD_PROVINCE_MAP.
+    if province_value is None and archive.business_key:
+        _biz_parts = (archive.business_key or "").split(":")
+        # 期望 ['quota', 'manual-upload', 'cq', '2018', '<slug>']
+        if (len(_biz_parts) >= 3
+                and _biz_parts[0] == "quota"
+                and _biz_parts[1] == "manual-upload"):
+            _candidate = _biz_parts[2]
+            if _candidate in _EXTRACTABLE_PROVINCES:
+                province_value = _candidate
+
+    if province_value is None and archive.region_code:
+        # region_code 是 GB/T 2260 jurisdiction_code (6 位), 反查 _UPLOAD_PROVINCE_MAP
+        # tuple: (jurisdiction_code, label, default_profile, jurisdiction_level)
+        for _k, _v in _UPLOAD_PROVINCE_MAP.items():
+            if _v[0] == archive.region_code and _k in _EXTRACTABLE_PROVINCES:
+                province_value = _k
+                break
 
     # (b) profile 白名单：仅 sichuan/chongqing；None = 沿用旧值
     if profile is not None and profile not in {"sichuan", "chongqing"}:

@@ -443,8 +443,20 @@ def _process_real_job(job) -> None:
 # ─────────────────────────────────────────────────────────
 # Sweeper — 30/15 分钟兜底
 # ─────────────────────────────────────────────────────────
+# v0.7 新增 ENQUEUE_TIMEOUT：兜底"queued 太久没人 claim"（worker 死了 / DB 锁 / 启动顺序错位等）
+# 2026-07-31 教训：worker 在 15:29 死了,15:35 enqueue 的 job 卡 queued 17 分钟无人 claim → archive.parse_status 永久卡 'parsing'.
+# sweeper 原只扫 status='running',queued 完全不在视野内.
+ENQUEUE_TIMEOUT = timedelta(minutes=30)  # 与 FIRST_CHUNK_TIMEOUT 对齐
+
+
 def _run_sweeper() -> int:
-    """扫超时 running job → 标 failed + archive.parse_status='failed_user'。"""
+    """扫两类超时 → 标 failed + archive.parse_status='failed_user'。
+
+    v0.7 扩展:
+      1. status='running' 且 last_heartbeat 超过 FIRST/SUBSEQUENT_CHUNK_TIMEOUT → parse_timeout
+      2. status='queued' 且 enqueued_at 超过 ENQUEUE_TIMEOUT (30min) → enqueue_timeout
+         （worker 死了/缺席/启动错位的兜底）
+    """
     from sqlalchemy import text
 
     from app.database import get_session_factory
@@ -452,6 +464,7 @@ def _run_sweeper() -> int:
     now = datetime.now(UTC)
     n_marked = 0
     with get_session_factory()() as session:
+        # ── (1) 兜底 running 超时（v0.6 行为）
         rows = session.execute(text("""
             SELECT job_id, archive_id, started_at, last_heartbeat_at, chunks_done
             FROM quota_parse_job WHERE status='running'
@@ -482,6 +495,39 @@ def _run_sweeper() -> int:
             )
             n_marked += 1
             logger.error("sweeper 标 job %s (archive %s) parse_timeout", job_id, archive_id)
+
+        # ── (2) v0.7 兜底 queued 太久没人 claim
+        queued_cutoff = now - ENQUEUE_TIMEOUT
+        queued_rows = session.execute(
+            text("""SELECT job_id, archive_id, enqueued_at
+                    FROM quota_parse_job
+                    WHERE status='queued' AND enqueued_at < :cutoff"""),
+            {"cutoff": queued_cutoff},
+        ).all()
+        for qrow in queued_rows:
+            qjob_id, qarc_id, qenq = qrow
+            msg = (f"sweeper: queued job enqueued_at={qenq.isoformat()} "
+                   f"< {ENQUEUE_TIMEOUT} 没人 claim, 视为 worker 缺席")
+            session.execute(
+                text("""UPDATE quota_parse_job
+                        SET status='failed', error_code='enqueue_timeout',
+                            error_message=:msg, finished_at=:now
+                        WHERE job_id=:job_id"""),
+                {"msg": msg, "now": now, "job_id": qjob_id},
+            )
+            session.execute(
+                text("""UPDATE archive
+                        SET parse_status='failed_user',
+                            parse_error_code='enqueue_timeout',
+                            parse_error_message=:msg,
+                            parse_finished_at=:now
+                        WHERE archive_id=:archive_id"""),
+                {"msg": msg, "now": now, "archive_id": qarc_id},
+            )
+            n_marked += 1
+            logger.error("sweeper 标 queued job %s (archive %s) enqueue_timeout",
+                         qjob_id, qarc_id)
+
         if n_marked:
             session.commit()
     return n_marked

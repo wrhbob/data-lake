@@ -370,41 +370,14 @@
     return html;
   }
 
-  // ── 上传弹窗省份白名单（与后端 file_asset_service/app/quota_api.py:_UPLOAD_PROVINCE_MAP 同步）──
-  // 31 省级单位 + 深圳 = 32 条；value=省简称短码（与后端 _VALID_PROVINCE_CODES 一致）
+  // ── 上传弹窗省份白名单（v0.7 收缩: 只列有真实 extractor 的省份）──
+  // 完整 32 省字典在后端 _UPLOAD_PROVINCE_MAP 仍保留 (供 review/重登记路径取元数据),
+  // 但「新增档案」上传 (POST /api/data-lake/quota/upload) 只允许有 extractor 的省份,
+  // 否则会落入 pipeline 默认占位, 写 0 行空 xlsx. 与后端 _EXTRACTABLE_PROVINCES 对齐.
+  // 增量省份: 在 quota_md_to_csv_v2/extractors/{province}/ 落地 extractor + 同步更新 _EXTRACTABLE_PROVINCES.
   const QUOTA_UPLOAD_PROVINCES = Object.freeze([
     { code: "sc",  label: "四川省" },
     { code: "cq",  label: "重庆市" },
-    { code: "bj",  label: "北京市" },
-    { code: "tj",  label: "天津市" },
-    { code: "hb",  label: "河北省" },
-    { code: "sx",  label: "山西省" },
-    { code: "nm",  label: "内蒙古自治区" },
-    { code: "ln",  label: "辽宁省" },
-    { code: "jl",  label: "吉林省" },
-    { code: "hl",  label: "黑龙江省" },
-    { code: "sh",  label: "上海市" },
-    { code: "js",  label: "江苏省" },
-    { code: "zj",  label: "浙江省" },
-    { code: "ah",  label: "安徽省" },
-    { code: "fj",  label: "福建省" },
-    { code: "jx",  label: "江西省" },
-    { code: "sd",  label: "山东省" },
-    { code: "yu",  label: "河南省" },
-    { code: "hu",  label: "湖北省" },
-    { code: "xi",  label: "湖南省" },
-    { code: "gd",  label: "广东省" },
-    { code: "gx",  label: "广西壮族自治区" },
-    { code: "hi",  label: "海南省" },
-    { code: "gz",  label: "贵州省" },
-    { code: "yn",  label: "云南省" },
-    { code: "xz",  label: "西藏自治区" },
-    { code: "snx", label: "陕西省" },
-    { code: "gs",  label: "甘肃省" },
-    { code: "qh",  label: "青海省" },
-    { code: "nx",  label: "宁夏回族自治区" },
-    { code: "xj",  label: "新疆维吾尔自治区" },
-    { code: "sz",  label: "深圳市" },
   ]);
 
   function renderUploadProvinceOptions(selectedCode) {
