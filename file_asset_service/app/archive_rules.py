@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 
-from app.assets import file_extension
 from app.normalization import normalize_key_text, normalize_source_url
+# v0.7 fix: file_extension 改成惰性 import, 打破循环依赖 (archive_rules -> assets -> models).
+# 之前顶层 from app.assets import file_extension 会导致 models.py 想 import ARCHIVE_FILE_ROLES
+# 时撞上循环链: models → archive_rules → assets → models. 现在只在 _infer_archive_file_role
+# 函数体里 import, 打破循环.
 
 ARCHIVE_STATUSES = {
     "discovered",
@@ -274,6 +277,8 @@ def infer_archive_file_role(
     domain_type: str | None = None,
 ) -> str:
     item_role = source_item_role or ""
+    # 惰性 import: 打破 models ↔ archive_rules ↔ assets 循环依赖
+    from app.assets import file_extension
     ext = file_extension(file_name)
     normalized_name = normalize_key_text(file_name)
     if ext in PRICED_SOURCE_EXTENSIONS:

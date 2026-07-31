@@ -33,6 +33,7 @@ from app.quota_taxonomy import (
     QUOTA_SYSTEM_TYPES,
     sql_in_clause,
 )
+from app.archive_rules import ARCHIVE_FILE_ROLES  # v0.7 fix: ck_archive_file_role 改用动态 sql_in_clause
 
 
 def utcnow() -> datetime:
@@ -496,16 +497,13 @@ class Archive(Base):
 class ArchiveFile(Base):
     __tablename__ = "archive_file"
     __table_args__ = (
+        # v0.7 fix: 改成动态 sql_in_clause, 自动跟随 archive_rules.ARCHIVE_FILE_ROLES.
+        # 历史硬编码 24 个 role 漏了 v0.5 新增的 4 个 parse_* (parse_markdown/parse_html/
+        # parse_candidate_xlsx/parse_final_xlsx), 导致 quota_parser worker 的
+        # register_parse_artifact 写入 parse_markdown 等产物时 CheckViolation.
+        # 现在所有 28 个 role 单一来源 = ARCHIVE_FILE_ROLES, 不会再分叉.
         CheckConstraint(
-            "file_role in ("
-            "'main_document', 'attachment', 'priced_source', 'qingdan_package', "
-            "'drawing', 'geological', 'tender_doc', "
-            "'web_snapshot', 'zip_package', 'preview', "
-            "'quota_db', 'bill_standard', 'quota_supplement', 'quota_interpretation', "
-            "'atlas_document', 'standard_document', 'scan_image', "
-            "'policy_document', 'policy_attachment', 'cover', "
-            "'table_of_contents', 'appendix', 'release_announcement', 'other'"
-            ")",
+            sql_in_clause("file_role", ARCHIVE_FILE_ROLES),
             name="ck_archive_file_role",
         ),
         CheckConstraint("representation_role in ('primary', 'secondary')", name="ck_archive_representation_role"),
