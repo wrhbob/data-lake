@@ -180,3 +180,144 @@ pip install -e ".[dev]"
 python serve.py                          # 启动开发服务器
 python -m pytest tests/ -x -v            # 运行测试
 ```
+
+---
+
+## 服务运维 SOP（启动 / 停止 / 彻底杀干净）
+
+> 适用于本机开发 + 单机部署。**所有命令必须在仓库根目录 `d:\工程造价学习\data_lake0714\data_lake0714` 下执行**。
+
+### 1. 三个进程的角色
+
+| 进程 | 角色 | 启动入口 | 端口 | 是否常驻 |
+|---|---|---|---|---|
+| **sweeper** | 独立扫孤儿 running job（30/15 min 超时阈值） | `quota/parser/quota_parser_sweeper.py` | — | 是 |
+| **worker** | 常驻消费 `QuotaParseJob`，调 minerU OCR + 跑 pipeline | `quota/parser/quota_parser_worker.py` | — | 是 |
+| **web** | FastAPI + uvicorn，对外 HTTP 服务 | `file_asset_service/serve.py` | **8010** | 是 |
+
+### 2. Python 环境
+
+**必须**用 `file-asset` conda 环境（不是 DLSE）。解释器路径：
+
+```
+/d/miniconda3/envs/file-asset/python.exe
+```
+
+### 3. PID 文件 + 日志约定
+
+```
+logs/
+├── sweeper.pid / sweeper.log.<YYYYMMDD_HHMMSS>
+├── worker.pid  / worker.log.<YYYYMMDD_HHMMSS>
+└── web.pid     / web.log                       ← web 没有专用启动脚本,需手起
+```
+
+### 4. 启动顺序（**重要：sweeper → worker → web**）
+
+```
+sweeper → worker → web
+```
+
+**为什么这个顺序**：sweeper 必须在 worker 之前活着 — 它会吸收 worker 启动/重启期间遗留的孤儿 running job（`last_heartbeat_at` 超时判定）。如果 sweeper 后启，worker 已经 claim 的 job 在它眼里没人兜底。
+
+### 5. 启动 SOP
+
+```bash
+ROOT="/d/工程造价学习/data_lake0714/data_lake0714"
+cd "$ROOT"
+
+# 1) sweeper — 后台守护,常驻
+bash file_asset_service/scripts/run_quota_parser_sweeper.sh
+#   → 写 logs/sweeper.pid
+#   → log → logs/sweeper.log.<TS>
+
+# 2) worker — 后台守护,常驻
+bash file_asset_service/scripts/run_quota_parser_worker.sh
+#   启动时会跑 schema 自检:
+#     一致 → 日志输出 "schema 自检 ✅: ARCHIVE_FILE_ROLES (28) ↔ ck_archive_file_role 一致"
+#     不一致 → fail-fast 退出码 2（参考 quota/DB_SCHEMA.md §5.3 / scripts/verify_db_schema.py）
+#   → 写 logs/worker.pid
+#   → log → logs/worker.log.<TS>
+
+# 3) web — nohup 后台(没有专用脚本)
+PY=/d/miniconda3/envs/file-asset/python.exe
+nohup "$PY" -u file_asset_service/serve.py > logs/web.log 2>&1 &
+echo $! > logs/web.pid
+#   → 端口 8010 (FILE_ASSET_PORT 环境变量可改)
+```
+
+### 6. 验证服务是否真活着
+
+```bash
+ROOT="/d/工程造价学习/data_lake0714/data_lake0714"
+cd "$ROOT"
+
+# 进程状态
+bash file_asset_service/scripts/run_quota_parser_sweeper.sh status
+bash file_asset_service/scripts/run_quota_parser_worker.sh status
+[ -f logs/web.pid ] && kill -0 "$(cat logs/web.pid)" 2>/dev/null && echo "web alive pid=$(cat logs/web.pid)"
+
+# HTTP 探活
+curl -sS -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:8010/docs
+
+# 端口监听
+netstat -ano | grep ":8010.*LISTENING"
+
+# python.exe 残留清单
+tasklist //FI "IMAGENAME eq python.exe"
+```
+
+### 7. 标准停止（优雅退出）
+
+```bash
+ROOT="/d/工程造价学习/data_lake0714/data_lake0714"
+cd "$ROOT"
+
+bash file_asset_service/scripts/run_quota_parser_worker.sh stop    # worker
+bash file_asset_service/scripts/run_quota_parser_sweeper.sh stop  # sweeper
+
+# web: 没有 stop 脚本,手杀
+WPID=$(cat logs/web.pid 2>/dev/null)
+[ -n "$WPID" ] && kill "$WPID" && rm -f logs/web.pid
+```
+
+### 8. 彻底杀干净（应急 / 重启前兜底）
+
+```bash
+ROOT="/d/工程造价学习/data_lake0714/data_lake0714"
+cd "$ROOT"
+
+# 1) 优雅停（即使已死也不报错）
+bash file_asset_service/scripts/run_quota_parser_worker.sh stop    2>/dev/null || true
+bash file_asset_service/scripts/run_quota_parser_sweeper.sh stop  2>/dev/null || true
+WPID=$(cat logs/web.pid 2>/dev/null)
+[ -n "$WPID" ] && kill "$WPID" 2>/dev/null || true
+
+# 2) 兜底:用 taskkill 杀所有 python.exe(Windows 上 launcher + 子进程都可能残留)
+#    先 tasklist 看一眼,确认没有别的项目 python 在跑,再 taskkill
+tasklist //FI "IMAGENAME eq python.exe"
+#    如果只剩本项目相关的,直接:
+taskkill //IM python.exe //F 2>&1 | head -10
+
+# 3) 清空所有 pidfile(即便进程已死)
+rm -f logs/web.pid logs/worker.pid logs/sweeper.pid
+
+# 4) 验证真的全死
+netstat -ano | grep ":8010.*LISTENING" || echo "8010 无人监听 ✅"
+tasklist //FI "IMAGENAME eq python.exe"
+#   预期输出:"没有运行的任务匹配指定标准"
+```
+
+> ⚠️ **Windows 进程模型注意点**：worker/web 启动后 spawn 一个 reloader 子进程（pid 不同）。脚本里看到的 `pid=1515` 是 launcher，ps 看到的是 `pid=21112`。kill launcher 通常会让子进程跟着退出，但**应急情况**用 `taskkill //IM python.exe //F` 兜底。
+>
+> ⚠️ **不要**用 `kill -9` / `taskkill //F` 杀当前 Claude Code 自己跑着的 python 子进程（可能是其他工具的子进程，会破坏用户的 session）。
+
+### 9. 启动失败排查清单
+
+| 现象 | 排查 |
+|---|---|
+| worker 启动后立刻退出,exit code 2 | `ARCHIVE_FILE_ROLES` 与 DB `ck_archive_file_role` 不一致。看 `logs/worker.log.<TS>` 第一行,跑 `python scripts/verify_db_schema.py` 看修复 SQL |
+| worker 启动后 claim job,但 OCR 卡死 | 看 `logs/worker.log.<TS>` 是否 `poll 404 (N/3): ...`,N 到 3 会自动 `PollTaskLost` 退出（v0.7+） |
+| web 启动后 `curl /docs` 500 | 看 `logs/web.log`,大概率是 `.env` 没加载（`get_settings()` 报 `database_url=...`） |
+| 端口 8010 已被占用 | `netstat -ano | grep ":8010"` → 找到占用 pid → `taskkill //PID <pid> //F` |
+| sweeper "另一个 sweeper 已占 lockfile" | `/tmp/quota_parser_sweeper.lock` 残留,删掉重启（Windows 跳过 flock,不会撞这条） |
