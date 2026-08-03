@@ -56,6 +56,11 @@ ROOT = Path(__file__).resolve().parent.parent.parent  # .../data_lake0714
 sys.path.insert(0, str(ROOT / "file_asset_service"))    # → from app.database import ...
 sys.path.insert(0, str(ROOT / "quota" / "parser"))      # → from quota_parser.pipeline import ...
 
+# F5 修复 (2026-08-03): worker 完成后清理 work_root（成功 + 失败都 rmtree）。
+# 候选产物已上传 MinIO + candidate_xlsx_key 写入 DB, 本地副本不需要。
+# 失败也清：之前每个 job 残留 ~40MB, 累计会堆爆 D:\tmp。
+from quota_parser.cleanup import cleanup_workspace
+
 # ── 超时阈值 ──
 # F4 修复 (2026-08-03): SUBSEQUENT_CHUNK_TIMEOUT 必须 ≥ poll_task.max_total_seconds
 # (30 min, 见 external/mineru_pdf_parse/scripts/parse_chunked.py:175),
@@ -367,6 +372,8 @@ def _process_real_job(job) -> None:
         logger.exception("run_quota_pipeline 失败 job_id=%s", job.job_id)
         _mark_job_failed(job, error_code="failed_permanent",
                          message=f"pipeline: {type(e).__name__}: {e}")
+        # F5: 失败也清 work_root（用户要求不保留 7 天，直接 rmtree）。
+        cleanup_workspace(work_root, success=True)
         return
 
     # v0.6 §#6: chunks_done 由 callback 实时推进,此处不再一次性写
@@ -453,6 +460,9 @@ def _process_real_job(job) -> None:
     logger.info("real job done job_id=%s archive_id=%s status=%s",
                 job.job_id, job.archive_id, result.status)
 
+    # F5: 成功后清 work_root（产物已在 MinIO + DB）。
+    cleanup_workspace(work_root, success=True)
+
 
 # ─────────────────────────────────────────────────────────
 # Sweeper — 30/15 分钟兜底
@@ -461,6 +471,17 @@ def _process_real_job(job) -> None:
 # 2026-07-31 教训：worker 在 15:29 死了,15:35 enqueue 的 job 卡 queued 17 分钟无人 claim → archive.parse_status 永久卡 'parsing'.
 # sweeper 原只扫 status='running',queued 完全不在视野内.
 ENQUEUE_TIMEOUT = timedelta(minutes=30)  # 与 FIRST_CHUNK_TIMEOUT 对齐
+
+
+def _sweeper_cleanup_job_work_root(job_id: str) -> None:
+    """F5: sweeper 标 failed 后清对应 job 的 work_root。worker 自己清不了
+    (死/卡住), 由 sweeper 兜底。cleanup_workspace 对不存在路径直接 return, 无副作用。
+    """
+    work_root_base = Path(os.environ.get(
+        "QUOTA_PARSER_WORK_ROOT", "/tmp/quota_parser_work"
+    ))
+    work_root = work_root_base / job_id
+    cleanup_workspace(work_root, success=True)
 
 
 def _run_sweeper() -> int:
@@ -509,6 +530,8 @@ def _run_sweeper() -> int:
             )
             n_marked += 1
             logger.error("sweeper 标 job %s (archive %s) parse_timeout", job_id, archive_id)
+            # F5: sweeper 标超时失败后清 work_root（worker 已死/卡住, 不可能自己清）。
+            _sweeper_cleanup_job_work_root(job_id)
 
         # ── (2) v0.7 兜底 queued 太久没人 claim
         queued_cutoff = now - ENQUEUE_TIMEOUT
@@ -541,6 +564,9 @@ def _run_sweeper() -> int:
             n_marked += 1
             logger.error("sweeper 标 queued job %s (archive %s) enqueue_timeout",
                          qjob_id, qarc_id)
+            # F5: enqueue_timeout 也要清 work_root（任务从未真正启动, 不存在中间产物, 但
+            # 也无意义保留）。cleanup_workspace 对不存在路径直接 return, 无副作用。
+            _sweeper_cleanup_job_work_root(qjob_id)
 
         if n_marked:
             session.commit()
