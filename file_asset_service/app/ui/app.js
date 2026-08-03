@@ -1589,6 +1589,7 @@ function splitSheetMetaAndArticle(html) {
 }
 
 // 把 <article> HTML 塞进 DOM,挂好 IntersectionObserver 监听底部 sentinel。
+// append=true 时**不动滚动位置**(保持当前阅读位置),append=false 时 reset 跳顶。
 function mountXlsxArticle(articleHtml, { append }) {
   const canvas = $("#viewerCanvas");
   if (!append) {
@@ -1602,13 +1603,17 @@ function mountXlsxArticle(articleHtml, { append }) {
     const oldTbody = oldArticle?.querySelector("tbody");
     const newTbody = newArticle?.querySelector("tbody");
     if (!oldTbody || !newTbody) {
-      // 兜底:无法续接 → 整体替换
+      // 兜底:无法续接 → 整体替换(走整页替换路径,后续会 reset)
       canvas.innerHTML = articleHtml;
+      resetViewerScroll();
+      setupXlsxLoadMoreObserver();
       return;
     }
     while (newTbody.firstChild) oldTbody.appendChild(newTbody.firstChild);
   }
-  resetViewerScroll();
+  if (!append) {
+    resetViewerScroll();
+  }
   // sentinel: <tbody> 末尾插一行占位 (带 xlsx-load-more-sentinel class)
   setupXlsxLoadMoreObserver();
 }
