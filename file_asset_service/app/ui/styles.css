@@ -3796,7 +3796,9 @@ a.rail-button {
 }
 .quota-header-titles h1 {
   margin: 2px 0 6px;
-  font-size: 20px;
+  /* 与 .page-header h1（信息价档案台）对齐：之前 20px 偏小 */
+  font-size: 30px;
+  line-height: 1.15;
 }
 .quota-summary {
   color: var(--muted);
