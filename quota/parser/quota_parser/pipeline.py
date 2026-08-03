@@ -39,6 +39,58 @@ from .result import StageAResult, StageBResult
 _logger = logging.getLogger(__name__)
 
 
+def _resolve_province(province: object) -> str:
+    """把任意形态的 province 输入收敛到 PROVINCE_KEYWORDS 里的 short code.
+
+    v0.8 修复（7-31 重庆事故根因）：
+        原代码只用 strip().lower(), 任何非 sc/cq 字符串都静默收敛到 'default',
+        落到占位分支产出 0 行 empty_candidate.xlsx (用户看到"成功"但无数据).
+        修复后: 识别不出就抛 UnsupportedProvinceError, 让 worker 标 failed_user.
+
+    接受:
+      - short code:  sc / cq
+      - 中文名:      四川 / 重庆 (PROVINCE_NAMES 反向)
+      - 关键词:      川建 / 重庆 (PROVINCE_KEYWORDS 元组反查)
+
+    不接受 (抛 UnsupportedProvinceError):
+      - None / 空字符串 / 纯空白
+      - 英文别名 (Sichuan / chongqing 等)
+      - 数字码 (500000 / 510000 等)
+      - 任意其他字符串
+    """
+    if province is None:
+        raise UnsupportedProvinceError("province 必填, 得到 None")
+    s = str(province).strip()
+    if not s:
+        raise UnsupportedProvinceError("province 必填, 得到空字符串")
+
+    # 1. 已是 short code (排除 default sentinel)
+    if s in PROVINCE_KEYWORDS and s != PROVINCE_DEFAULT_KEY:
+        return s
+
+    # 2. 中文名反查 (PROVINCE_NAMES 是 {short_code: 中文名} 单层映射)
+    for short_code, cn_name in PROVINCE_NAMES.items():
+        if s == cn_name:
+            return short_code
+
+    # 3. PROVINCE_KEYWORDS 元组关键词反查 (sc 还含 '川建')
+    for short_code, keywords in PROVINCE_KEYWORDS.items():
+        if short_code == PROVINCE_DEFAULT_KEY:
+            continue
+        if s in keywords:
+            return short_code
+
+    # 全部不匹配 — 抛错, 不落占位
+    accepted = (
+        f"short codes: {[k for k in PROVINCE_KEYWORDS.keys() if k != PROVINCE_DEFAULT_KEY]}; "
+        f"中文名: {list(PROVINCE_NAMES.values())}; "
+        f"关键词: {[(k, v) for k, v in PROVINCE_KEYWORDS.items() if k != PROVINCE_DEFAULT_KEY]}"
+    )
+    raise UnsupportedProvinceError(
+        f"未知 province={province!r}. 接受: {accepted}"
+    )
+
+
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -139,15 +191,18 @@ def run_quota_pipeline(
           跳过省份抽取子步骤,直接写空 candidate.xlsx 占位。
         - 不再抛 UnsupportedProvinceError（仅这一处移除；其余位置不变）。
     """
-    # ── v0.4 §9 #15: province 收敛 + 软校验 ──
-    normalized = (province or PROVINCE_DEFAULT_KEY).strip().lower()
-    if normalized not in PROVINCE_KEYWORDS:
-        _logger.warning(
-            "run_quota_pipeline: 未知 province=%r, 收敛到 %r",
-            province, PROVINCE_DEFAULT_KEY,
-        )
-        normalized = PROVINCE_DEFAULT_KEY
-    province = normalized
+    # ── v0.8 修复: province 收敛 + 硬校验 ──
+    # 旧代码 (v0.4 §9 #15) 用 strip().lower() 软收敛,任何非 sc/cq 都落 'default'
+    # 占位 → 0 行 empty_candidate.xlsx (7-31 重庆事故根因).
+    # 新代码用 _resolve_province 三阶段反查 (short code / 中文名 / 关键词),
+    # 识别不出就抛 UnsupportedProvinceError → worker 标 failed_user.
+    try:
+        province = _resolve_province(province)
+    except UnsupportedProvinceError:
+        # pipeline 顶层会包成 ProfileExecutionError 抛给 worker,
+        # worker 在 _process_real_job 的 except 里捕获 → _mark_job_failed (failed_user)
+        # 这里只需重新抛出,保留原始错误信息.
+        raise
 
     pdf_p = Path(pdf_path).resolve()
     if not pdf_p.exists():
