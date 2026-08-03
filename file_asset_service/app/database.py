@@ -1,11 +1,14 @@
 from collections.abc import Generator
 import json
+import logging
 import os
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy import inspect, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
+
+logger = logging.getLogger(__name__)
 
 from app.archive_rules import ARCHIVE_FILE_ROLES
 from app.config import get_settings
@@ -374,16 +377,42 @@ def migrate_archive_file_columns(engine: Engine) -> None:
             text("CREATE INDEX IF NOT EXISTS ix_archive_file_representation_role ON archive_file (representation_role)")
         )
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_archive_file_fetch_status ON archive_file (fetch_status)"))
-        if engine.dialect.name == "postgresql":
-            connection.execute(text("ALTER TABLE archive_file DROP CONSTRAINT IF EXISTS ck_archive_file_role"))
-            connection.execute(
-                text(f"ALTER TABLE archive_file ADD CONSTRAINT ck_archive_file_role CHECK ({archive_file_role_check_sql()})")
-            )
+    # F-M3 根治 (2026-08-03): 把 ck_archive_file_role 同步挪到独立函数,
+    # 自身 try/except 隔离, 不再依赖手动 ALTER。web 启动 / worker 启动都会调。
+    sync_archive_file_role_constraint(engine)
 
 
 def archive_file_role_check_sql() -> str:
     quoted_roles = ", ".join(f"'{role}'" for role in sorted(ARCHIVE_FILE_ROLES))
     return f"file_role in ({quoted_roles})"
+
+
+def sync_archive_file_role_constraint(engine: Engine) -> int | None:
+    """幂等同步 ck_archive_file_role CheckConstraint 到 Python 侧 ARCHIVE_FILE_ROLES。
+
+    行为:
+      - DROP IF EXISTS + ADD (从 sorted(ARCHIVE_FILE_ROLES) 重建 CHECK)
+      - 仅 PG (SQLite 由模型层自己管)
+      - 异常被吞, 不阻断其他迁移 (F-M3 教训: 28/24 不一致会反复踩到)
+      - 返回新的 role 数, 失败返回 None
+
+    调用方: init_db (web 启动) / worker 启动时自检前都可调一次。
+    任何进程入口跑一次都能自愈 DB 与 Python 的漂移, 不依赖手动 ALTER。
+    """
+    if engine.dialect.name != "postgresql":
+        return None
+    expected_count = len(ARCHIVE_FILE_ROLES)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE archive_file DROP CONSTRAINT IF EXISTS ck_archive_file_role"))
+            conn.execute(
+                text(f"ALTER TABLE archive_file ADD CONSTRAINT ck_archive_file_role CHECK ({archive_file_role_check_sql()})")
+            )
+        logger.info("ck_archive_file_role 已同步 (%d roles)", expected_count)
+        return expected_count
+    except Exception as e:
+        logger.warning("ck_archive_file_role 同步失败 (%s) — 继续启动, 后续写入可能被 CheckViolation 拒绝", e)
+        return None
 
 
 def migrate_archive_event_columns(engine: Engine) -> None:

@@ -152,6 +152,8 @@ def main() -> int:
     # DB schema 自检: 防止代码改了 ARCHIVE_FILE_ROLES 但漏跑 ALTER 的事再发生
     # (v0.5 2026-07-30 教训:f576393 commit 写完 SQL 但实际没跑 → worker 写
     #  parse_markdown 时被 PG CheckConstraint 拒收 → 整 job failed_permanent)
+    # F-M3 根治 (2026-08-03): 不一致时不直接 fail-fast, 先自动 sync 一次再重检。
+    # 任何进程入口都能自愈 DB 与 Python 的漂移, 不依赖手动 ALTER / web 先启动。
     schema_ok, only_py, only_db, common = _check_archive_file_role_schema()
     if schema_ok:
         logger.warning(
@@ -159,15 +161,30 @@ def main() -> int:
             len(common),
         )
     else:
-        logger.error(
-            "schema 自检 ❌: ARCHIVE_FILE_ROLES 与 ck_archive_file_role 不一致!\n"
+        logger.warning(
+            "schema 自检 ❌: ARCHIVE_FILE_ROLES 与 ck_archive_file_role 不一致, 自动 sync 一次\n"
             "  Python 侧有,DB 侧缺: %s\n"
-            "  DB 侧有,Python 侧缺: %s\n"
-            "  → 跑 scripts/verify_db_schema.py 看修复 SQL,或参考 quota/DB_SCHEMA.md §5.3\n"
-            "  → worker 拒绝启动,避免后续写 archive_file 时撞 CheckViolation",
+            "  DB 侧有,Python 侧缺: %s",
             sorted(only_py), sorted(only_db),
         )
-        return 2  # 退出码 2 = schema 不一致 (区别于 flock 占用退出码 1)
+        try:
+            from app.database import get_engine, sync_archive_file_role_constraint
+            sync_archive_file_role_constraint(get_engine())
+        except Exception as e:
+            logger.error("自动 sync 失败 (%s) — worker 仍尝试启动, 后续写入可能被 CheckViolation 拒绝", e)
+
+        # 重检一次, 看 sync 是否真生效
+        schema_ok2, only_py2, only_db2, common2 = _check_archive_file_role_schema()
+        if schema_ok2:
+            logger.warning("自动 sync 后 schema 自检 ✅: %d ↔ ck_archive_file_role 一致", len(common2))
+        else:
+            logger.error(
+                "自动 sync 后仍不一致, worker 拒绝启动\n"
+                "  Python 侧有,DB 侧缺: %s\n"
+                "  → 跑 scripts/verify_db_schema.py 看修复 SQL",
+                sorted(only_py2),
+            )
+            return 2  # sync 也不顶用才退出 (区别于 flock 占用退出码 1)
 
     # fcntl flock — Windows 跳过
     flock_fd = None
