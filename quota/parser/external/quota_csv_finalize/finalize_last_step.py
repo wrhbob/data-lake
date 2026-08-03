@@ -11,8 +11,10 @@ finalize_last_step.py — 给 v2 多 sheet xlsx 套上分组大纲 + 段行合�
 行为：
   1. 读「定额条目」sheet 的所有行
   2. 段行加粗 + 段行 C-D 列合并
-  3. 四级嵌套分组：大类包含所有 A.X，中类包含所有 A.X.Y，小类包含其定额，
-     定额行本身作为 outline_level=4 的分组
+  3. 自适应层数嵌套分组（v0.3 backport 自 to_xlsx.py）：
+     - 段 group outline_level = sec_id 的点数 + 1（A→1, A.1→2, A.1.1→3, A.1.1.1→4 ...）
+     - 定额 group outline_level = 父段 depth + 1
+       （定额嵌套在所属段之下，把下属工料机折起来）
   4. 把已格式化的「定额条目」sheet 写回；其它 sheet（册说明 / 章）保持不动
   5. 默认原地覆盖写入（与同 pipeline 中其它 4 步一致）
 
@@ -91,6 +93,13 @@ def process_xlsx(input_path: Path, output_path: Path | None = None) -> dict:
     ws.sheet_properties.outlinePr.summaryBelow = False
     total_rows = len(rows)
 
+    # 0. 先解除所有已存在的合并区域,避免循环写 cell 时碰到 MergedCell 只读
+    #    (前 4 步 finalize 可能合并过 C:D 列等;后面会在第 2 步按"段行 C-D 合并"重新合并)
+    #    v0.3 backport 自 to_xlsx.py L100-104
+    pre_existing_merges = list(ws.merged_cells.ranges)
+    for rng in pre_existing_merges:
+        ws.unmerge_cells(str(rng))
+
     # 1. 数据写回 + 段行加粗
     bold_font = Font(bold=True)
     for r_idx, row in enumerate(rows, start=1):
@@ -130,18 +139,31 @@ def process_xlsx(input_path: Path, output_path: Path | None = None) -> dict:
     for i in range(len(sections)):
         sections[i]["end_row"] = find_end_row(sections, i, total_rows)
 
-    # 5. 定额结束位置
+    # 5. 定额结束位置 + 父段关联
+    #    v0.3 backport 自 to_xlsx.py: 同时记录 parent_sec, 让定额 group
+    #    能用 parent_sec.depth + 1 (自适应) 而不是硬编码 4
     for i, q in enumerate(quotas):
         if i + 1 < len(quotas):
             q["end_row"] = quotas[i + 1]["row"] - 1
         else:
             q["end_row"] = total_rows
+        parent_sec = None
         for sec in reversed(sections):
             if sec["row"] <= q["row"]:
-                q["end_row"] = min(q["end_row"], sec["end_row"])
+                parent_sec = sec
                 break
+        if parent_sec is not None:
+            q["parent_row"] = parent_sec["row"]
+            q["parent_depth"] = parent_sec["depth"]
+            q["end_row"] = min(q["end_row"], parent_sec["end_row"])
+        else:
+            # 没找到父段,fallback: 当成 level=1 (与 to_xlsx.py 一致)
+            q["parent_row"] = None
+            q["parent_depth"] = 0
 
     # 6. 分组区间
+    #    段 group level = sec.depth
+    #    定额 group level = parent_sec.depth + 1 (自适应, 嵌套在父段之下)
     groups: list[tuple[int, int, int]] = []
 
     for sec in sections:
@@ -154,7 +176,7 @@ def process_xlsx(input_path: Path, output_path: Path | None = None) -> dict:
         start = q["row"] + 1
         end = q["end_row"]
         if start <= end:
-            groups.append((start, end, 4))
+            groups.append((start, end, q["parent_depth"] + 1))
 
     # 低 level 先（Excel 嵌套语义）
     groups.sort(key=lambda x: x[2])
