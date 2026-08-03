@@ -3847,16 +3847,12 @@ a.rail-button {
   gap: 16px;
   margin-bottom: 18px;
 }
-.quota-header-titles {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-}
 .quota-header-titles h1 {
-  margin: 2px 0 6px;
-  /* 与 .page-header h1（信息价档案台）对齐：之前 20px 偏小 */
+  /* 与 .page-header h1（信息价档案台）margin 一致 */
+  margin: 4px 0 0;
   font-size: 30px;
   line-height: 1.15;
+  letter-spacing: 0;
 }
 .quota-summary {
   color: var(--muted);
