@@ -1780,13 +1780,18 @@ def get_artifact_preview(
     archive_id: str,
     role: str,
     sheet: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=2000),
     session: Session = Depends(get_db_session),
 ):
-    """预览 candidate / final xlsx（HTML 单 sheet）。
+    """预览 candidate / final xlsx（HTML 单 sheet，可分页）。
 
     - role ∈ {parse_candidate_xlsx, parse_final_xlsx}
     - sheet: 0-based sheet index，默认 0
-    - 响应头 X-Sheet-Names / X-Sheet-Count / X-Sheet-Index 给前端渲染 sheet tab
+    - offset: 从 sheet 第 offset+1 行开始（0-based skip）
+    - limit: 返回几行（默认 200，已知规格：每张表 ≤ 10000 行）
+    - 响应头 X-Sheet-Count / X-Sheet-Index 给前端渲染 sheet tab
+    - sheet meta JSON 注入 HTML body 顶部 <script type="application/json" id="xlsx-sheet-meta">
     """
     from io import BytesIO
 
@@ -1835,15 +1840,22 @@ def get_artifact_preview(
         content=data,
         file_ext="xlsx",
         sheet_index=sheet,
+        row_offset=offset,
+        row_limit=limit,
     )
-    # 方案 E：sheet 名是中文，HTTP header 强制 latin-1 编码会 UnicodeEncodeError。
-    # 改用 HTML body 顶部 <script type="application/json"> 注入，前端用 JSON.parse 读。
-    # X-Sheet-Count / X-Sheet-Index 仍是 ASCII 数字，保留为 header。
+    # 方案 E：sheet 名是中文,HTTP header 强制 latin-1 编码会 UnicodeEncodeError。
+    # 改用 HTML body 顶部 <script type="application/json"> 注入,前端用 JSON.parse 读。
+    # X-Sheet-Count / X-Sheet-Index 仍是 ASCII 数字,保留为 header。
     import json as _json
     sheet_meta_script = (
         '<script id="xlsx-sheet-meta" type="application/json">'
         + _json.dumps(
-            {"names": sheet_names, "index": sheet},
+            {
+                "names": sheet_names,
+                "index": sheet,
+                "row_offset": offset,
+                "row_limit": limit,
+            },
             ensure_ascii=False,
         )
         + "</script>"
@@ -1855,6 +1867,8 @@ def get_artifact_preview(
         headers={
             "X-Sheet-Count": str(len(sheet_names)),
             "X-Sheet-Index": str(sheet),
+            "X-Row-Offset": str(offset),
+            "X-Row-Limit": str(limit),
         },
     )
 

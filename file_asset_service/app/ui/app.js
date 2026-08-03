@@ -1497,13 +1497,18 @@ function downloadUrl(file) {
   return `/api/file-assets/${encodeURIComponent(file.file_id)}/download`;
 }
 
-function previewUrl(file, sheet = 0) {
+function previewUrl(file, sheet = 0, opts = {}) {
   if (!file?.file_id) return "";
   if (file.__virtual) {
-    return `/api/data-lake/quota/archives/${encodeURIComponent(file.archive_id)}/artifacts/${file.file_role}/preview?sheet=${sheet}`;
+    const offset = Number.isFinite(opts.offset) ? opts.offset : 0;
+    const limit = Number.isFinite(opts.limit) ? opts.limit : XLSX_PAGE_SIZE;
+    return `/api/data-lake/quota/archives/${encodeURIComponent(file.archive_id)}/artifacts/${file.file_role}/preview?sheet=${sheet}&offset=${offset}&limit=${limit}`;
   }
   return `/api/file-assets/${encodeURIComponent(file.file_id)}/preview`;
 }
+
+// 方案 B：xlsx 分页加载。段大小 200 行,翻到底 IntersectionObserver 触发下一段。
+const XLSX_PAGE_SIZE = 200;
 
 let activePdfViewer = null;
 let pdfViewerLoadToken = 0;
@@ -1523,6 +1528,8 @@ function resetSheetTabs() {
   currentSheetFileId = null;
   currentSheetIndex = 0;
   currentSheetNames = [];
+  // 方案 B：切文件 → 分页状态重置,旧 sentinel 释放
+  resetXlsxPageState();
 }
 
 function renderSheetTabsHtml() {
@@ -1555,6 +1562,143 @@ function parseSheetNamesFromHtml(html) {
   } catch {
     return [];
   }
+}
+
+// 方案 B:xlsx 分页加载状态 + IntersectionObserver 接管翻到底加载。
+// 单一 in-flight 状态机:currentXlsxPageState 持有 file/offset/limit/total/loading。
+// append=false 走首段(整体塞 DOM);append=true 走续段(只追加 <tr> 列表)。
+let currentXlsxPageState = null;
+let xlsxLoadMoreObserver = null;
+
+function resetXlsxPageState() {
+  if (xlsxLoadMoreObserver) {
+    xlsxLoadMoreObserver.disconnect();
+    xlsxLoadMoreObserver = null;
+  }
+  currentXlsxPageState = null;
+}
+
+// 提取 <article>...</article> 节点之间的 tbody HTML 字符串,
+// 抽出 <script id="xlsx-sheet-meta"> 后返回 {sheetMeta, articleHtml}。
+function splitSheetMetaAndArticle(html) {
+  const metaMatch = html.match(/<script id="xlsx-sheet-meta"[^>]*>[\s\S]*?<\/script>/i);
+  const sheetMeta = metaMatch ? JSON.parse(metaMatch[0].replace(/^<script[^>]*>/, "").replace(/<\/script>$/, "")) : null;
+  let articleHtml = html;
+  if (metaMatch) articleHtml = html.replace(metaMatch[0], "").trim();
+  return { sheetMeta, articleHtml };
+}
+
+// 把 <article> HTML 塞进 DOM,挂好 IntersectionObserver 监听底部 sentinel。
+function mountXlsxArticle(articleHtml, { append }) {
+  const canvas = $("#viewerCanvas");
+  if (!append) {
+    canvas.innerHTML = articleHtml;
+  } else {
+    // 续段:把 <article> 内的 <tbody> 提出来,逐 tr 追加到现有 tbody 末尾。
+    const tmp = document.createElement("div");
+    tmp.innerHTML = articleHtml;
+    const newArticle = tmp.querySelector("article.excel-preview");
+    const oldArticle = canvas.querySelector("article.excel-preview");
+    const oldTbody = oldArticle?.querySelector("tbody");
+    const newTbody = newArticle?.querySelector("tbody");
+    if (!oldTbody || !newTbody) {
+      // 兜底:无法续接 → 整体替换
+      canvas.innerHTML = articleHtml;
+      return;
+    }
+    while (newTbody.firstChild) oldTbody.appendChild(newTbody.firstChild);
+  }
+  resetViewerScroll();
+  // sentinel: <tbody> 末尾插一行占位 (带 xlsx-load-more-sentinel class)
+  setupXlsxLoadMoreObserver();
+}
+
+function setupXlsxLoadMoreObserver() {
+  if (!currentXlsxPageState || currentXlsxPageState.done) return;
+  const canvas = $("#viewerCanvas");
+  const article = canvas.querySelector("article.excel-preview");
+  if (!article) return;
+  const tbody = article.querySelector("tbody");
+  if (!tbody) return;
+  // 移除旧 sentinel
+  tbody.querySelectorAll("tr.xlsx-load-more-sentinel").forEach((n) => n.remove());
+  // 还有更多行? 追加 sentinel
+  const total = currentXlsxPageState.total;
+  const reached = total !== null && currentXlsxPageState.offset + currentXlsxPageState.limit >= total;
+  if (reached) {
+    currentXlsxPageState.done = true;
+    return;
+  }
+  const sentinel = document.createElement("tr");
+  sentinel.className = "xlsx-load-more-sentinel";
+  sentinel.innerHTML = `<td colspan="99"><span class="xlsx-load-more-text">${currentXlsxPageState.loading ? "加载中…" : "滚动到底自动加载下一段"}</span></td>`;
+  tbody.appendChild(sentinel);
+  if (xlsxLoadMoreObserver) xlsxLoadMoreObserver.disconnect();
+  xlsxLoadMoreObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting && !currentXlsxPageState.loading && !currentXlsxPageState.done) {
+          fetchXlsxPage(state.selectedFileId, /*append*/ true);
+        }
+      }
+    },
+    { root: canvas.closest(".viewer-canvas-host") || null, threshold: 0 },
+  );
+  xlsxLoadMoreObserver.observe(sentinel);
+}
+
+function fetchXlsxPage(selectedFileId, append) {
+  const state = currentXlsxPageState;
+  if (!state || state.loading) return;
+  state.loading = true;
+  if (append) {
+    const sentinel = $("#viewerCanvas").querySelector("tr.xlsx-load-more-sentinel .xlsx-load-more-text");
+    if (sentinel) sentinel.textContent = "加载中…";
+  }
+  fetch(previewUrl(state.file, currentSheetIndex, { offset: state.offset, limit: state.limit }))
+    .then((response) => {
+      if (!response.ok) throw Object.assign(new Error("PREVIEW_FAILED"), { status: response.status });
+      const idxHeader = parseInt(response.headers.get("X-Sheet-Index") || "0", 10);
+      if (!Number.isNaN(idxHeader)) currentSheetIndex = idxHeader;
+      const offsetHeader = parseInt(response.headers.get("X-Row-Offset") || "0", 10);
+      const limitHeader = parseInt(response.headers.get("X-Row-Limit") || "200", 10);
+      return response.text().then((html) => ({ html, offsetHeader, limitHeader }));
+    })
+    .then(({ html, offsetHeader, limitHeader }) => {
+      if (state.selectedFileId !== selectedFileId) return;
+      const { sheetMeta, articleHtml } = splitSheetMetaAndArticle(html);
+      // 总行数 / sheet 名 (只在首段:
+      //  - 首段没有解析过 sheet 元数据
+      //  - 续段 sheetMeta 重复但不影响)
+      if (sheetMeta) {
+        if (Array.isArray(sheetMeta.names) && sheetMeta.names.length > 0) {
+          state.sheetNames = sheetMeta.names;
+          currentSheetNames = sheetMeta.names;
+          const host = document.querySelector("#viewerTools .sheet-tabs-host");
+          if (host) host.innerHTML = renderSheetTabsHtml();
+        }
+        const article = new DOMParser().parseFromString(articleHtml, "text/html").querySelector("article.excel-preview");
+        const sr = article?.getAttribute("data-source-rows");
+        if (sr) state.total = parseInt(sr, 10);
+      }
+      state.offset = offsetHeader + limitHeader;
+      state.loading = false;
+      mountXlsxArticle(articleHtml, { append });
+    })
+    .catch((err) => {
+      if (state.selectedFileId !== selectedFileId) return;
+      state.loading = false;
+      const message = err?.status === 404
+        ? "文件已丢失，请联系管理员"
+        : "该 Excel 原件暂不能在线预览，可下载原件查看。";
+      $("#viewerCanvas").innerHTML = `
+        <article class="web-page source-only">
+          <h2>${escapeHtml(state.file.file_name)}</h2>
+          <p>${escapeHtml(message)}</p>
+        </article>
+      `;
+      resetViewerScroll();
+    });
 }
 
 function destroyActivePdfViewer() {
@@ -4312,41 +4456,18 @@ function renderViewerCanvas(item, file) {
     const selectedFileId = file.file_id;
     $("#viewerCanvas").innerHTML = `<div class="empty-state"><strong>正在加载预览</strong><span>${escapeHtml(file.file_name)}</span></div>`;
     resetViewerScroll();
-    fetch(previewUrl(file, currentSheetIndex))
-      .then((response) => {
-        if (!response.ok) throw Object.assign(new Error("PREVIEW_FAILED"), { status: response.status });
-        // 防御：服务端返回的 sheet index 可能与我们请求的不同
-        const idxHeader = parseInt(response.headers.get("X-Sheet-Index") || "0", 10);
-        if (!Number.isNaN(idxHeader)) currentSheetIndex = idxHeader;
-        return response.text();
-      })
-      .then((html) => {
-        if (state.selectedFileId !== selectedFileId) return;
-        // 方案 E：sheet 名是中文,HTTP header 强制 latin-1 → UnicodeEncodeError。
-        // 后端把 <script type="application/json" id="xlsx-sheet-meta"> 嵌在 HTML 顶部,
-        // 用 type="application/json" 防误执行,textContent 读取 + JSON.parse。
-        const sheetNames = parseSheetNamesFromHtml(html);
-        if (sheetNames.length > 0) {
-          currentSheetNames = sheetNames;
-          const host = document.querySelector("#viewerTools .sheet-tabs-host");
-          if (host) host.innerHTML = renderSheetTabsHtml();
-        }
-        $("#viewerCanvas").innerHTML = html;
-        resetViewerScroll();
-      })
-      .catch((err) => {
-        if (state.selectedFileId !== selectedFileId) return;
-        const message = err?.status === 404
-          ? "文件已丢失，请联系管理员"
-          : "该 Excel 原件暂不能在线预览，可下载原件查看。";
-        $("#viewerCanvas").innerHTML = `
-          <article class="web-page source-only">
-            <h2>${escapeHtml(file.file_name)}</h2>
-            <p>${escapeHtml(message)}</p>
-          </article>
-        `;
-        resetViewerScroll();
-      });
+    // 方案 B：分页加载。第一段 offset=0, limit=200。后续由 IntersectionObserver
+    // 监听底部 sentinel 触发 fetchXlsxPage(append=true)。
+    currentXlsxPageState = {
+      file,
+      offset: 0,
+      limit: XLSX_PAGE_SIZE,
+      total: null,
+      loading: false,
+      done: false,
+      sheetNames: [],
+    };
+    fetchXlsxPage(selectedFileId, /*append*/ false);
     return;
   }
   if (canPreviewZipInline(item, file)) {
@@ -4712,7 +4833,8 @@ function handleClick(event) {
     const file = selectedFile(state.selectedArchive);
     if (!file) return;
     currentSheetIndex = idx;
-    // 重画 tabs 容器 + 重抓预览
+    // 方案 B：切 sheet 时 offset 必须重置,新 sheet 行数独立。
+    resetXlsxPageState();
     const host = document.querySelector("#viewerTools .sheet-tabs-host");
     if (host) host.innerHTML = renderSheetTabsHtml();
     renderViewerCanvas(state.selectedArchive, file);

@@ -2426,6 +2426,19 @@ a.rail-button {
   font-weight: 600;
 }
 
+/* 方案 B：xlsx 分页加载底部 sentinel */
+.xlsx-load-more-sentinel td {
+  text-align: center;
+  padding: 16px 8px;
+  color: #6b7785;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.02);
+  border-top: 1px dashed rgba(0, 0, 0, 0.1);
+}
+.xlsx-load-more-sentinel .xlsx-load-more-text {
+  display: inline-block;
+}
+
 .tool-button {
   min-width: 0;
   min-height: var(--control-height);

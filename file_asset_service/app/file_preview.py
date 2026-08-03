@@ -49,11 +49,16 @@ def render_excel_preview_html(
     max_rows: int = MAX_PREVIEW_ROWS,
     max_cols: int = MAX_PREVIEW_COLS,
     sheet_index: int = 0,
+    row_offset: int = 0,
+    row_limit: int | None = None,
 ) -> str:
+    # 方案 B：分页加载。后端一次解析 [row_offset, row_offset+row_limit) 这段。
+    # row_limit None 走 max_rows(向后兼容)。
+    effective_max = row_offset + (row_limit if row_limit is not None else max_rows)
     preview = _excel_rows(
         content=content,
         file_ext=file_ext,
-        max_rows=max_rows,
+        max_rows=effective_max,
         max_cols=max_cols,
         sheet_index=sheet_index,
     )
@@ -71,14 +76,22 @@ def render_excel_preview_html(
             display_html=preview.display_html,
         )
         for row_index, row in enumerate(preview.rows, start=1)
+        if row_index > row_offset
     )
-    truncated_note = " · 已截取前200行/60列，下载看完整" if truncated else ""
+    # 方案 B：分页加载时不再显示"已截取"的旧提示。整段加载完成后,
+    # 前端通过 data-total-rows / data-row-offset 自行决定是否显示 sentinel。
+    col_truncated = preview.source_cols > max_cols
+    truncated_note = " · 已截取前60列，下载看完整" if col_truncated else ""
     has_merged = "1" if preview.merge_spans else "0"
     source_layout = "1" if preview.col_widths or preview.cell_styles else "0"
     colgroup = _render_colgroup(preview.col_widths)
     table_style = _table_style(preview)
+    # 当前段渲染的行数（1-based 全局 row_index, 用来给前端续接 DOM）
+    actual_rows = sum(
+        1 for row_index in range(1, len(preview.rows) + 1) if row_index > row_offset
+    )
     return f"""
-<article class="excel-preview" data-preview-mode="ephemeral" data-file-processing="0" data-source-cols="{preview.source_cols}" data-rendered-cols="{preview.rendered_cols}" data-merged="{has_merged}" data-source-layout="{source_layout}">
+<article class="excel-preview" data-preview-mode="ephemeral" data-file-processing="0" data-source-cols="{preview.source_cols}" data-rendered-cols="{preview.rendered_cols}" data-merged="{has_merged}" data-source-layout="{source_layout}" data-row-offset="{row_offset}" data-row-count="{actual_rows}" data-source-rows="{preview.source_rows}">
   <div class="formula-bar">{escape(file_name)} · {escape(preview.sheet_name)}{truncated_note}</div>
   <div class="excel-table-wrap">
     <table{table_style}>
