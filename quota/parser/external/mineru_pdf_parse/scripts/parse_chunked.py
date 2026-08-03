@@ -384,12 +384,9 @@ def parse_chunked(
             render_chunk(result_path, chunk_pdf, render_script)
             chunk_status = "succeeded"
 
-            # v0.6 §#6: chunk 粒度回调 — 驱动 sweeper 30/15min 兜底
-            if on_chunk_done is not None:
-                try:
-                    on_chunk_done(i, chunk_count, "succeeded")
-                except Exception as _cb_err:
-                    print(f"  ⚠ on_chunk_done 回调异常 (chunk {i} succeeded): {_cb_err}")
+            # v0.6 §#6: chunk 粒度回调由 finally 块统一处理（成功后 chunk_status="succeeded"）
+            # 这里不再单独调用,避免与 finally 块形成双调用导致 chunks_done 被冗余写两次。
+            # F10 修复: 2026-08-03 fanggu 任务暴露的 on_chunk_done 双调用问题。
 
             if i < chunk_count:
                 print(f"  💤 等待 {wait_between_chunks_s}s 让显存释放...")
