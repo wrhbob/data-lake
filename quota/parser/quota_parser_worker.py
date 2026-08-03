@@ -57,8 +57,22 @@ sys.path.insert(0, str(ROOT / "file_asset_service"))    # → from app.database 
 sys.path.insert(0, str(ROOT / "quota" / "parser"))      # → from quota_parser.pipeline import ...
 
 # ── 超时阈值 ──
-FIRST_CHUNK_TIMEOUT = timedelta(minutes=30)
-SUBSEQUENT_CHUNK_TIMEOUT = timedelta(minutes=15)
+# F4 修复 (2026-08-03): SUBSEQUENT_CHUNK_TIMEOUT 必须 ≥ poll_task.max_total_seconds
+# (30 min, 见 external/mineru_pdf_parse/scripts/parse_chunked.py:175),
+# 否则 sweeper 会在 minerU poll 自身的 30 min 边界之前误杀正在跑的 chunk,
+# 触发 parse_timeout 但 minerU task 实际仍在跑 (资源浪费 + UI 误报).
+# 之前 15 min 与 poll_task 30 min 注释\"对齐 sweeper 阈值\"自相矛盾.
+#
+# 取值:
+#   FIRST_CHUNK_TIMEOUT         = 35 min (30 + 5 min 缓冲: chunk 完成→result fetch→下个 chunk 启动延迟)
+#   SUBSEQUENT_CHUNK_TIMEOUT    = 35 min (与 first 对齐: 任一 chunk 都有同等宽容度)
+#   poll_task.max_total_seconds = 30 min (在 parse_chunked.py:175, 不动)
+#
+# sweeper 是 kill-on-timeout, 35 min 是\"sweeper 最晚动手时间\"; 任务实际运行时间由 minerU 自己的
+# max_total_seconds=30 min 决定. 真正\"卡死 job\"会先被 poll_task 抛 PollTaskTimeout → worker 收到
+# → 走 _mark_job_failed(failed_permanent), 与 sweeper 兜底是双层互补.
+FIRST_CHUNK_TIMEOUT = timedelta(minutes=35)
+SUBSEQUENT_CHUNK_TIMEOUT = timedelta(minutes=35)
 SWEEPER_INTERVAL_SECONDS = 60
 POLL_INTERVAL_SECONDS = 2
 LOCKFILE = Path(os.environ.get(
