@@ -466,11 +466,20 @@ def _archive_summary_rows(session: Session, archives: list[Archive], *, mirror: 
         # Parse 产物存在 Archive.candidate_xlsx_key / final_xlsx_key,落 MinIO 但不挂 ArchiveFile。
         # 用户期望:1 件 PDF + 1 candidate (阶段 A 完成) + 1 final (阶段 B 完成) → 最多 3。
         # 其它域 (cost_info) parse_* 全 None,数字仍为 ArchiveFile 行数,行为不变。
+        # 2026-08-03: 排除 worker 写出的中间产物 (parse_markdown/parse_html 是 OCR 阶段产物,
+        # parse_candidate_xlsx/parse_final_xlsx 与 archive.candidate/final_xlsx_key 同一份,
+        # 已计入 parse_artifact_count, 避免重复)。其它域不受影响(它们的 ArchiveFile
+        # 不会有这 4 个 role)。
+        _UI_EXCLUDED_FILE_ROLES = frozenset([
+            "parse_markdown", "parse_html",
+            "parse_candidate_xlsx", "parse_final_xlsx",
+        ])
+        visible_archive_files = [f for f in files if f[0].file_role not in _UI_EXCLUDED_FILE_ROLES]
         parse_artifact_count = (
             (1 if archive.candidate_xlsx_key else 0)
             + (1 if archive.final_xlsx_key else 0)
         )
-        row["file_count"] = len(files) + parse_artifact_count
+        row["file_count"] = len(visible_archive_files) + parse_artifact_count
         row["priced_source_count"] = sum(1 for mounted, _ in files if mounted.file_role == "priced_source")
         row["primary_file"] = (
             {

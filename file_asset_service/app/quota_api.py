@@ -378,7 +378,21 @@ def list_quota_archives(
     items = []
     for archive, profile, pubset in rows:
         archive_file_count = _safe_int(session.scalar(
-            select(func.count()).select_from(ArchiveFile).where(ArchiveFile.archive_id == archive.archive_id)
+            select(func.count())
+            .select_from(ArchiveFile)
+            .where(
+                ArchiveFile.archive_id == archive.archive_id,
+                # 2026-08-03: UI 过滤 parse_markdown / parse_html 两个中间产物 role,
+                # 它们是 worker 写出的 OCR/MD 中间产物, 不进用户可见 file_count。
+                # 同时排除 parse_candidate_xlsx / parse_final_xlsx —— 它们与 archive 表的
+                # candidate_xlsx_key / final_xlsx_key 是同一份文件, 已在 parse_artifact_count
+                # 里计数 (避免重复)。用户期望: 已完成=3 (PDF+candidate+final),
+                # 待审核=2 (PDF+candidate), 解析中=1 (PDF only)。
+                ArchiveFile.file_role.notin_([
+                    "parse_markdown", "parse_html",
+                    "parse_candidate_xlsx", "parse_final_xlsx",
+                ]),
+            )
         ))
         # 同 archive_service.py:_archive_summary_rows 一致:把 parse 产物 (candidate.xlsx / final.xlsx)
         # 也算进 file_count(它们落 MinIO 但不挂 ArchiveFile)。quota 档案期望:1 PDF + 1 candidate + 1 final = 3。
@@ -462,7 +476,15 @@ def get_quota_archive_detail(
     archive_file_count = _safe_int(session.scalar(
         select(func.count())
         .select_from(ArchiveFile)
-        .where(ArchiveFile.archive_id == archive.archive_id)
+        .where(
+            ArchiveFile.archive_id == archive.archive_id,
+            # 2026-08-03: 同 list 端点, 过滤 parse_markdown / parse_html 中间产物,
+            # 同时排除 parse_candidate_xlsx / parse_final_xlsx 避免与 candidate/final_key 重复。
+            ArchiveFile.file_role.notin_([
+                "parse_markdown", "parse_html",
+                "parse_candidate_xlsx", "parse_final_xlsx",
+            ]),
+        )
     ))
     # 同 list_quota_archives 注释:把 parse 产物 (candidate/final xlsx) 也算进 file_count。
     parse_artifact_count = (
