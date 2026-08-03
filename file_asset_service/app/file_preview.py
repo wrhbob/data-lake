@@ -48,12 +48,14 @@ def render_excel_preview_html(
     file_ext: str,
     max_rows: int = MAX_PREVIEW_ROWS,
     max_cols: int = MAX_PREVIEW_COLS,
+    sheet_index: int = 0,
 ) -> str:
     preview = _excel_rows(
         content=content,
         file_ext=file_ext,
         max_rows=max_rows,
         max_cols=max_cols,
+        sheet_index=sheet_index,
     )
     truncated = preview.source_rows > len(preview.rows) or preview.source_cols > max_cols
     table_rows = "\n".join(
@@ -377,10 +379,14 @@ def _excel_rows(
     file_ext: str,
     max_rows: int,
     max_cols: int,
+    sheet_index: int = 0,
 ) -> ExcelPreviewData:
     if file_ext == "xlsx":
         workbook = load_workbook(BytesIO(content), read_only=False, data_only=True)
-        sheet = workbook.worksheets[0]
+        if sheet_index < 0 or sheet_index >= len(workbook.worksheets):
+            sheet = workbook.worksheets[0]
+        else:
+            sheet = workbook.worksheets[sheet_index]
         source_rows = sheet.max_row or 0
         source_cols = sheet.max_column or 0
         row_count = min(source_rows, max_rows)

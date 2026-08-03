@@ -1775,6 +1775,90 @@ def get_final_xlsx(
     )
 
 
+@router.get("/archives/{archive_id}/artifacts/{role}/preview")
+def get_artifact_preview(
+    archive_id: str,
+    role: str,
+    sheet: int = Query(0, ge=0),
+    session: Session = Depends(get_db_session),
+):
+    """预览 candidate / final xlsx（HTML 单 sheet）。
+
+    - role ∈ {parse_candidate_xlsx, parse_final_xlsx}
+    - sheet: 0-based sheet index，默认 0
+    - 响应头 X-Sheet-Names / X-Sheet-Count / X-Sheet-Index 给前端渲染 sheet tab
+    """
+    from io import BytesIO
+
+    from app.file_preview import render_excel_preview_html
+    from app.quota_parser import PARSE_BUCKET_CANDIDATE
+    from app.storage import get_object_store
+    from openpyxl import load_workbook
+
+    if role not in ("parse_candidate_xlsx", "parse_final_xlsx"):
+        raise HTTPException(400, detail=f"INVALID_ROLE: {role}")
+
+    archive = session.get(Archive, archive_id)
+    if archive is None:
+        raise HTTPException(404, detail="ARCHIVE_NOT_FOUND")
+
+    if role == "parse_candidate_xlsx":
+        key = archive.candidate_xlsx_key
+        if not key:
+            raise HTTPException(404, detail="CANDIDATE_NOT_READY")
+        display_name = f"{archive.title}-candidate.xlsx"
+    else:
+        key = archive.final_xlsx_key
+        if not key:
+            raise HTTPException(404, detail="FINAL_NOT_READY")
+        display_name = f"{archive.title}-final.xlsx"
+
+    store = get_object_store()
+    data = store.get_object(PARSE_BUCKET_CANDIDATE, key)
+
+    # 取所有 sheet 名 + 校验 sheet index
+    wb = load_workbook(BytesIO(data), read_only=True, data_only=True)
+    try:
+        sheet_names = list(wb.sheetnames)
+    finally:
+        wb.close()
+    if not sheet_names:
+        raise HTTPException(404, detail="XLSX_HAS_NO_SHEETS")
+    if sheet >= len(sheet_names):
+        raise HTTPException(
+            400,
+            detail=f"SHEET_OUT_OF_RANGE: requested={sheet}, max={len(sheet_names) - 1}",
+        )
+
+    html = render_excel_preview_html(
+        file_name=display_name,
+        content=data,
+        file_ext="xlsx",
+        sheet_index=sheet,
+    )
+    # 方案 E：sheet 名是中文，HTTP header 强制 latin-1 编码会 UnicodeEncodeError。
+    # 改用 HTML body 顶部 <script type="application/json"> 注入，前端用 JSON.parse 读。
+    # X-Sheet-Count / X-Sheet-Index 仍是 ASCII 数字，保留为 header。
+    import json as _json
+    sheet_meta_script = (
+        '<script id="xlsx-sheet-meta" type="application/json">'
+        + _json.dumps(
+            {"names": sheet_names, "index": sheet},
+            ensure_ascii=False,
+        )
+        + "</script>"
+    )
+    body = sheet_meta_script + html
+    return Response(
+        content=body,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "X-Sheet-Count": str(len(sheet_names)),
+            "X-Sheet-Index": str(sheet),
+        },
+    )
+
+
 @router.get("/archives/{archive_id}/manifest")
 def get_manifest(
     response: Response,

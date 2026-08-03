@@ -2387,6 +2387,45 @@ a.rail-button {
   white-space: nowrap;
 }
 
+.sheet-tabs-host {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.sheet-tabs {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  max-width: 60vw;
+  overflow-x: auto;
+  padding: 2px 4px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.sheet-tab {
+  border: 0;
+  background: transparent;
+  color: #dce6ee;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sheet-tab:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.sheet-tab.active {
+  background: #f8fafc;
+  color: #111820;
+  font-weight: 600;
+}
+
 .tool-button {
   min-width: 0;
   min-height: var(--control-height);

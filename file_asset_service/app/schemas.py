@@ -379,6 +379,11 @@ class ArchiveSummaryResponse(ArchiveResponse):
 
 class ArchiveDetailResponse(ArchiveResponse):
     files: list[ArchiveFileResponse]
+    # list 端点 (ArchiveSummaryResponse) v0.4 已补上 candidate_xlsx_key / final_xlsx_key,
+    # detail 端点 Pydantic 严格按 schema 过滤,补上这两字段否则前端 archiveFiles() 拿不到
+    # virtual entries 合成条件(len>1),附件池 sidebar 永远 display:none。
+    candidate_xlsx_key: str | None = None
+    final_xlsx_key: str | None = None
 
 
 class ArchiveFromIngestEventResponse(ArchiveDetailResponse):

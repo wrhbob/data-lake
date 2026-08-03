@@ -1490,11 +1490,18 @@ function defaultViewerFile(item) {
 
 function downloadUrl(file) {
   if (!file?.file_id) return "";
+  if (file.__virtual) {
+    const path = file.file_role === "parse_candidate_xlsx" ? "candidate.xlsx" : "final.xlsx";
+    return `/api/data-lake/quota/archives/${encodeURIComponent(file.archive_id)}/${path}`;
+  }
   return `/api/file-assets/${encodeURIComponent(file.file_id)}/download`;
 }
 
-function previewUrl(file) {
+function previewUrl(file, sheet = 0) {
   if (!file?.file_id) return "";
+  if (file.__virtual) {
+    return `/api/data-lake/quota/archives/${encodeURIComponent(file.archive_id)}/artifacts/${file.file_role}/preview?sheet=${sheet}`;
+  }
   return `/api/file-assets/${encodeURIComponent(file.file_id)}/preview`;
 }
 
@@ -1503,6 +1510,52 @@ let pdfViewerLoadToken = 0;
 let pdfViewerModulePromise = null;
 const LARGE_PDF_FAST_PREVIEW_THRESHOLD = 64 * 1024 * 1024;
 const pdfLinearizationCache = new Map();
+
+// Sheet tab state (xlsx multi-sheet preview)
+// - currentSheetFileId: 当前在哪个文件上切 sheet（换文件就重置）
+// - currentSheetIndex: 当前显示的 sheet 序号（0-based）
+// - currentSheetNames: 当前文件的 sheet 名列表（首次预览响应头 X-Sheet-Names 填充）
+let currentSheetFileId = null;
+let currentSheetIndex = 0;
+let currentSheetNames = [];
+
+function resetSheetTabs() {
+  currentSheetFileId = null;
+  currentSheetIndex = 0;
+  currentSheetNames = [];
+}
+
+function renderSheetTabsHtml() {
+  if (currentSheetNames.length === 0) return "";
+  return `
+    <div class="sheet-tabs" role="tablist" aria-label="Excel sheet tabs">
+      ${currentSheetNames
+        .map(
+          (name, i) => `
+        <button class="sheet-tab ${i === currentSheetIndex ? "active" : ""}"
+                type="button" role="tab"
+                data-action="select-sheet" data-sheet-index="${i}"
+                aria-selected="${i === currentSheetIndex ? "true" : "false"}">${escapeHtml(name)}</button>
+      `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+// 方案 E:从 HTML body 顶部的 <script type="application/json" id="xlsx-sheet-meta">
+// 读 sheet 名(JSON 数组)。type="application/json" 浏览器不会执行,安全。
+function parseSheetNamesFromHtml(html) {
+  const match = html.match(/<script[^>]*id="xlsx-sheet-meta"[^>]*>([\s\S]*?)<\/script>/i);
+  if (!match) return [];
+  try {
+    const parsed = JSON.parse(match[1]);
+    const names = Array.isArray(parsed?.names) ? parsed.names : [];
+    return names.filter((n) => typeof n === "string" && n.length > 0);
+  } catch {
+    return [];
+  }
+}
 
 function destroyActivePdfViewer() {
   pdfViewerLoadToken += 1;
@@ -1743,7 +1796,31 @@ function fileType(file) {
 }
 
 function archiveFiles(item) {
-  return [...(item.files || [])].map(normalizeFile).filter(Boolean).sort((a, b) => (a.sort_order || 100) - (b.sort_order || 100));
+  const real = [...(item.files || [])].map(normalizeFile).filter(Boolean);
+  const virtual = [];
+  if (item?.candidate_xlsx_key) {
+    virtual.push({
+      file_id: `candidate:${item.archive_id}`,
+      file_role: "parse_candidate_xlsx",
+      file_ext: "xlsx",
+      file_name: `${item.title || item.archive_id}-candidate.xlsx`,
+      sort_order: 50,
+      __virtual: true,
+      archive_id: item.archive_id,
+    });
+  }
+  if (item?.final_xlsx_key) {
+    virtual.push({
+      file_id: `final:${item.archive_id}`,
+      file_role: "parse_final_xlsx",
+      file_ext: "xlsx",
+      file_name: `${item.title || item.archive_id}-final.xlsx`,
+      sort_order: 51,
+      __virtual: true,
+      archive_id: item.archive_id,
+    });
+  }
+  return [...real, ...virtual].sort((a, b) => (a.sort_order || 100) - (b.sort_order || 100));
 }
 
 function archiveSource(item) {
@@ -4096,6 +4173,7 @@ function renderViewerShell(item) {
   $("#viewerTools").innerHTML = `
     ${files.length > 1 ? `<span>${files.length} 个附件</span>` : ""}
     ${summary ? `<span class="viewer-mirror-summary">${escapeHtml(summary)}</span>` : ""}
+    <div class="sheet-tabs-host">${renderSheetTabsHtml()}</div>
     <button class="tool-button" type="button" data-action="mirror-archive" ${disabled}>
       <i data-lucide="folder-sync"></i>
       <span>${state.mirrorExporting ? "导出中" : "导出NAS"}</span>
@@ -4113,6 +4191,15 @@ function renderViewerShell(item) {
 function renderViewer(item) {
   if (!item) return;
   const file = selectedFile(item);
+  // 文件切换 → sheet tab 状态重置（仅 xlsx 家族文件保留 sheet 状态）
+  const isXlsx = file && (file.__virtual || ["xls", "xlsx"].includes(file.file_ext));
+  if (!isXlsx) {
+    resetSheetTabs();
+  } else if (currentSheetFileId !== file.file_id) {
+    currentSheetFileId = file.file_id;
+    currentSheetIndex = 0;
+    currentSheetNames = [];
+  }
   const type = fileType(file);
   $("#viewerIcon").className = `file-avatar ${type.className}`;
   $("#viewerIcon").innerHTML = `<i data-lucide="${type.icon}"></i>`;
@@ -4225,27 +4312,40 @@ function renderViewerCanvas(item, file) {
     const selectedFileId = file.file_id;
     $("#viewerCanvas").innerHTML = `<div class="empty-state"><strong>正在加载预览</strong><span>${escapeHtml(file.file_name)}</span></div>`;
     resetViewerScroll();
-    fetch(previewUrl(file))
+    fetch(previewUrl(file, currentSheetIndex))
       .then((response) => {
-        if (!response.ok) throw new Error("PREVIEW_FAILED");
+        if (!response.ok) throw Object.assign(new Error("PREVIEW_FAILED"), { status: response.status });
+        // 防御：服务端返回的 sheet index 可能与我们请求的不同
+        const idxHeader = parseInt(response.headers.get("X-Sheet-Index") || "0", 10);
+        if (!Number.isNaN(idxHeader)) currentSheetIndex = idxHeader;
         return response.text();
       })
       .then((html) => {
-        if (state.selectedFileId === selectedFileId) {
-          $("#viewerCanvas").innerHTML = html;
-          resetViewerScroll();
+        if (state.selectedFileId !== selectedFileId) return;
+        // 方案 E：sheet 名是中文,HTTP header 强制 latin-1 → UnicodeEncodeError。
+        // 后端把 <script type="application/json" id="xlsx-sheet-meta"> 嵌在 HTML 顶部,
+        // 用 type="application/json" 防误执行,textContent 读取 + JSON.parse。
+        const sheetNames = parseSheetNamesFromHtml(html);
+        if (sheetNames.length > 0) {
+          currentSheetNames = sheetNames;
+          const host = document.querySelector("#viewerTools .sheet-tabs-host");
+          if (host) host.innerHTML = renderSheetTabsHtml();
         }
+        $("#viewerCanvas").innerHTML = html;
+        resetViewerScroll();
       })
-      .catch(() => {
-        if (state.selectedFileId === selectedFileId) {
-          $("#viewerCanvas").innerHTML = `
-            <article class="web-page source-only">
-              <h2>${escapeHtml(file.file_name)}</h2>
-              <p>该 Excel 原件暂不能在线预览，可下载原件查看。</p>
-            </article>
-          `;
-          resetViewerScroll();
-        }
+      .catch((err) => {
+        if (state.selectedFileId !== selectedFileId) return;
+        const message = err?.status === 404
+          ? "文件已丢失，请联系管理员"
+          : "该 Excel 原件暂不能在线预览，可下载原件查看。";
+        $("#viewerCanvas").innerHTML = `
+          <article class="web-page source-only">
+            <h2>${escapeHtml(file.file_name)}</h2>
+            <p>${escapeHtml(message)}</p>
+          </article>
+        `;
+        resetViewerScroll();
       });
     return;
   }
@@ -4606,6 +4706,18 @@ function handleClick(event) {
     renderViewer(state.selectedArchive);
   }
   if (action.dataset.action === "mirror-archive") mirrorSelectedArchive();
+  if (action.dataset.action === "select-sheet") {
+    const idx = parseInt(action.dataset.sheetIndex || "0", 10);
+    if (Number.isNaN(idx) || idx === currentSheetIndex) return;
+    const file = selectedFile(state.selectedArchive);
+    if (!file) return;
+    currentSheetIndex = idx;
+    // 重画 tabs 容器 + 重抓预览
+    const host = document.querySelector("#viewerTools .sheet-tabs-host");
+    if (host) host.innerHTML = renderSheetTabsHtml();
+    renderViewerCanvas(state.selectedArchive, file);
+    return;
+  }
   if (action.dataset.action === "select-zip-entry") {
     const file = selectedFile(state.selectedArchive);
     const manifest = state.zipPreview.manifest;
