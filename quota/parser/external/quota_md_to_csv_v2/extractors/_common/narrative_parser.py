@@ -115,7 +115,11 @@ def parse_narrative(md_text: str) -> dict:
         lines, scan_start, len(lines), PREFACE_TITLE_RE,
     )
     if back_preface_start is None:
-        warnings.append("`## 目录` 之后未找到 `## 总说明` / `## 册说明`;back_preface 为空")
+        # 2026-08-03 修复: 给 back_preface_end 兜底 None, 否则 L129 会抛 UnboundLocalError.
+        # 7-31 教训: "## 目录" 之后无 "## 总说明/册说明" 是合法结构 (OCR 抖动 / 部分 PDF 排版),
+        # 应当跳过 preface 抽取, 继续 _scan_chapters; xlsx_writer 会创建空 "册说明" sheet + 留空章 sheet.
+        back_preface_end = None
+        warnings.append("`## 目录` 之后未找到 `## 总说明` / `## 册说明`;back_preface 为空,跳过册说明抽取")
     else:
         # back_preface 内容:从 back_preface_start 开始,直到第一个"章入口"
         back_preface_end = _find_chapter_entry(lines, start=back_preface_start + 1)
@@ -125,8 +129,8 @@ def parse_narrative(md_text: str) -> dict:
         back_preface = _join_lines(lines, back_preface_start + 1, back_preface_end)
 
     # 4) 章节扫描
-    # 起点:back_preface_end(若 back_preface 有) 或 toc_idx+1(若没有)
-    chapters = _scan_chapters(lines, start=back_preface_end or scan_start)
+    # 起点:back_preface_end(若 back_preface 有) 或 scan_start(toc 后 or 文件首)
+    chapters = _scan_chapters(lines, start=back_preface_end if back_preface_end is not None else scan_start)
 
     # 5) preface = front + back
     preface = _combine_preface(front_preface, back_preface)
