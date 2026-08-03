@@ -238,6 +238,19 @@ def run_quota_pipeline(
         )
         md_path = Path(info["markdown_path"]) if info.get("markdown_path") else None
         result_json_path = Path(info["result_json_path"]) if info.get("result_json_path") else None
+        # ── F10 修复: 部分 chunk 失败被当成功的根因 ──
+        # parse_chunked 用 zip(chunks, result_paths) 合并 → 失败的 chunk 被静默跳过,
+        # merged.md 仍写出但内容残缺; 老代码不看 all_succeeded → 直接当成功.
+        # 修复: 任一 chunk 失败 → 抛 ProfileExecutionError → worker 标 failed_permanent.
+        if not info.get("all_succeeded", False):
+            failed = [
+                f"chunk {c['index']} (PDF p.{c['pages'][0]}-{c['pages'][1]}): {c['error']}"
+                for c in info.get("chunks", []) if c.get("status") != "succeeded"
+            ]
+            raise ProfileExecutionError(
+                f"OCR 部分 chunk 失败 ({len(failed)}/{len(info.get('chunks', []))}): "
+                + "; ".join(failed)
+            )
     else:
         # v0.6 §#6 限制: 非 chunked 路径不传 on_chunk_done（parse_pdf 整体 < 2 min,
         # 30 min 首 chunk 超时足够覆盖）。如果未来 parse_pdf 变慢,再补 on_chunk_done。
