@@ -234,6 +234,11 @@ def run_quota_pipeline(
         info = parse_chunked(
             pdf_path=str(pdf_p),
             output_dir=str(ocr_dir),
+            # M2 修复 (2026-08-03): 与 parse_pdf 路径对齐, 显式传 api_url,
+            # 避免 parse_chunked 落到自己的 DEFAULT_API (= MINERU_API_URL 环境变量或
+            # http://172.16.20.23:8000), 与 worker.metadata_payload["ocr_api_url"] / config.
+            # get_ocr_api_url() 分叉. worker 用什么 URL, chunked 路径就用什么 URL.
+            api_url=api,
             on_chunk_done=on_chunk_done,
         )
         md_path = Path(info["markdown_path"]) if info.get("markdown_path") else None
