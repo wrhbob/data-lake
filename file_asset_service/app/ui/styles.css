@@ -3842,9 +3842,15 @@ a.rail-button {
 }
 .quota-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
+  margin-bottom: 18px;
+}
+.quota-header-titles {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 .quota-header-titles h1 {
   margin: 2px 0 6px;
