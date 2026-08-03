@@ -4460,6 +4460,7 @@ function renderViewerCanvas(item, file) {
     // 监听底部 sentinel 触发 fetchXlsxPage(append=true)。
     currentXlsxPageState = {
       file,
+      selectedFileId,
       offset: 0,
       limit: XLSX_PAGE_SIZE,
       total: null,
