@@ -1036,53 +1036,56 @@ _QUOTA_UPLOAD_VALID_CATEGORIES = set(QUOTA_UPLOAD_CATEGORY_LABELS.keys())
 #   - 河南=yu（豫）、湖北=hu（鄂）、湖南=xi（湘）— 单字母按车牌简称区分
 #   - 山西=sx（晋）、陕西=snx（陕）— 避开 shanxi/shanxi 冲突
 #   - 深圳=sz，副省级，jurisdiction_level=city
-_UPLOAD_PROVINCE_MAP: dict[str, tuple[str, str, str | None, str]] = {
-    "bj":  ("110000", "北京市",         None,        "province"),
-    "tj":  ("120000", "天津市",         None,        "province"),
-    "hb":  ("130000", "河北省",         None,        "province"),
-    "sx":  ("140000", "山西省",         None,        "province"),
-    "nm":  ("150000", "内蒙古自治区",   None,        "province"),
-    "ln":  ("210000", "辽宁省",         None,        "province"),
-    "jl":  ("220000", "吉林省",         None,        "province"),
-    "hl":  ("230000", "黑龙江省",       None,        "province"),
-    "sh":  ("310000", "上海市",         None,        "province"),
-    "js":  ("320000", "江苏省",         None,        "province"),
-    "zj":  ("330000", "浙江省",         None,        "province"),
-    "ah":  ("340000", "安徽省",         None,        "province"),
-    "fj":  ("350000", "福建省",         None,        "province"),
-    "jx":  ("360000", "江西省",         None,        "province"),
-    "sd":  ("370000", "山东省",         None,        "province"),
-    "yu":  ("410000", "河南省",         None,        "province"),  # 豫
-    "hu":  ("420000", "湖北省",         None,        "province"),  # 鄂
-    "xi":  ("430000", "湖南省",         None,        "province"),  # 湘
-    "gd":  ("440000", "广东省",         None,        "province"),
-    "gx":  ("450000", "广西壮族自治区", None,        "province"),
-    "hi":  ("460000", "海南省",         None,        "province"),
-    "cq":  ("500000", "重庆市",         "chongqing", "province"),
-    "sc":  ("510000", "四川省",         "sichuan",   "province"),
-    "gz":  ("520000", "贵州省",         None,        "province"),  # 黔
-    "yn":  ("530000", "云南省",         None,        "province"),  # 滇
-    "xz":  ("540000", "西藏自治区",     None,        "province"),  # 藏
-    "snx": ("610000", "陕西省",         None,        "province"),
-    "gs":  ("620000", "甘肃省",         None,        "province"),  # 陇
-    "qh":  ("630000", "青海省",         None,        "province"),
-    "nx":  ("640000", "宁夏回族自治区", None,        "province"),
-    "xj":  ("650000", "新疆维吾尔自治区", None,       "province"),
-    "sz":  ("440300", "深圳市",         None,        "city"),      # 副省级
+_UPLOAD_PROVINCE_MAP: dict[str, tuple[str, str, str, str]] = {
+    # tuple = (jurisdiction_code, label, profile, jurisdiction_level)
+    # profile 是拼音长名（GB/T 28039），与 province 短码 1:1。
+    # 完整语义见 quota/README.md §8（Profile 字段语义）。
+    # 注意：陕西 shaanxi ≠ 山西 shanxi（GB/T 28039 拼写）；湖南 hunan（湘 xi 是省内简称，不进 profile）。
+    "bj":  ("110000", "北京市",            "beijing",      "province"),
+    "tj":  ("120000", "天津市",            "tianjin",      "province"),
+    "hb":  ("130000", "河北省",            "hebei",        "province"),
+    "sx":  ("140000", "山西省",            "shanxi",       "province"),
+    "nm":  ("150000", "内蒙古自治区",      "neimenggu",    "province"),
+    "ln":  ("210000", "辽宁省",            "liaoning",     "province"),
+    "jl":  ("220000", "吉林省",            "jilin",        "province"),
+    "hl":  ("230000", "黑龙江省",          "heilongjiang", "province"),
+    "sh":  ("310000", "上海市",            "shanghai",     "province"),
+    "js":  ("320000", "江苏省",            "jiangsu",      "province"),
+    "zj":  ("330000", "浙江省",            "zhejiang",     "province"),
+    "ah":  ("340000", "安徽省",            "anhui",        "province"),
+    "fj":  ("350000", "福建省",            "fujian",       "province"),
+    "jx":  ("360000", "江西省",            "jiangxi",      "province"),
+    "sd":  ("370000", "山东省",            "shandong",     "province"),
+    "yu":  ("410000", "河南省",            "henan",        "province"),  # 豫
+    "hu":  ("420000", "湖北省",            "hubei",        "province"),  # 鄂
+    "xi":  ("430000", "湖南省",            "hunan",        "province"),  # 湘
+    "gd":  ("440000", "广东省",            "guangdong",    "province"),
+    "gx":  ("450000", "广西壮族自治区",    "guangxi",      "province"),
+    "hi":  ("460000", "海南省",            "hainan",       "province"),
+    "cq":  ("500000", "重庆市",            "chongqing",    "province"),
+    "sc":  ("510000", "四川省",            "sichuan",      "province"),
+    "gz":  ("520000", "贵州省",            "guizhou",      "province"),  # 黔
+    "yn":  ("530000", "云南省",            "yunnan",       "province"),  # 滇
+    "xz":  ("540000", "西藏自治区",        "xizang",       "province"),  # 藏
+    "snx": ("610000", "陕西省",            "shaanxi",      "province"),  # 区别于山西 shanxi
+    "gs":  ("620000", "甘肃省",            "gansu",        "province"),  # 陇
+    "qh":  ("630000", "青海省",            "qinghai",      "province"),
+    "nx":  ("640000", "宁夏回族自治区",    "ningxia",      "province"),
+    "xj":  ("650000", "新疆维吾尔自治区",  "xinjiang",     "province"),
+    "sz":  ("440300", "深圳市",            "shenzhen",     "city"),      # 副省级
 }
 
 _VALID_PROVINCE_CODES = set(_UPLOAD_PROVINCE_MAP.keys())
-_VALID_PROFILES = {"sichuan", "chongqing"}
+_VALID_PROFILES = {_v[2] for _v in _UPLOAD_PROVINCE_MAP.values()}
 
-# v0.7 闸口: 「新增档案」上传 (POST /upload) 只允许有真实 extractor 的省份.
-# _UPLOAD_PROVINCE_MAP / _VALID_PROVINCE_CODES 仍保留 32 省,给 review/重登记路径
-# (L1105 取 jurisdiction_code 元数据) 用. 但走 pipeline 真解析的省份只有以下两个:
-#   - sc → 四川 extractor (extractors/sc/)
-#   - cq → 重庆 extractor (extractors/cq/)
-# 其他省份若放任上传,run_quota_pipeline 会把 province 收敛到 PROVINCE_DEFAULT_KEY,
-# 写出 empty_candidate.xlsx 占位 (0 行), 形成「解析成功但无产物」的僵尸档案.
-# 故在 upload 入口直接 422 拒绝,避免资源浪费.
-_EXTRACTABLE_PROVINCES = frozenset({"sc", "cq"})
+# v0.8 删闸口: 「入库 ≠ 解析」。
+# - 之前 v0.7 在 upload 入口拒绝非 sc/cq 省 (理由: pipeline 会落 empty_candidate.xlsx 占位),
+#   但这违反了入库纪律 — 档案能不能入只该看元数据是否齐全, 不该看后续能不能解析。
+# - 现在 32 省都允许入库, profile 字段全员预填 (上方 _UPLOAD_PROVINCE_MAP 第三列)。
+#   是否有 extractor 是 worker 的事, 由 has_parser_for(province) 守卫,
+#   缺失时标 skipped_no_parser 终态 + warning, 不报 failed。
+# - 详见 quota/README.md §8 铁律 3。
+# _EXTRACTABLE_PROVINCES 已删除 (历史遗留硬白名单, 与"入库 ≠ 解析"原则冲突)。
 
 
 def _decode_upload_filename(raw: str | None) -> str:
@@ -1290,23 +1293,13 @@ async def upload_quota_files(
             422,
             detail=f"INVALID_PROVINCE: {province}. 必须为 {sorted(_VALID_PROVINCE_CODES)} 之一",
         )
-    # v0.7 闸口: 32 省里只有 sc/cq 有真实 extractor; 其余省份上传后会被 pipeline 收敛到 default 占位
-    # (empty_candidate.xlsx 0 行), 变成僵尸档案. 在 upload 入口直接拒绝,不让进档.
-    if province not in _EXTRACTABLE_PROVINCES:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"PROVINCE_NOT_EXTRACTABLE: {province}. "
-                f"当前可解析省份: {sorted(_EXTRACTABLE_PROVINCES)}. "
-                f"其他省份的 PDF 在 quota_md_to_csv_v2/extractors/ 下暂无 extractor, "
-                f"上传后会落为占位档案(0 行), 故暂不开放入库. "
-                f"如需支持,联系后端在 extractors/{{province}}/ 落地 extractor + 同步更新 _EXTRACTABLE_PROVINCES."
-            ),
-        )
     if year is None or year < 1900 or year > 2100:
         raise HTTPException(422, detail=f"INVALID_YEAR: {year}（必须 1900-2100 整数）")
     jurisdiction_code, jurisdiction_label, default_profile, jurisdiction_level = _UPLOAD_PROVINCE_MAP[province]
-    # profile 校验/缺省
+    # profile 校验/缺省：v0.8 起 32 省 profile 全员预填, _VALID_PROFILES 与 _UPLOAD_PROVINCE_MAP
+    # 第三列同步. 用户不传 → 沿用 province 对应 profile (即每个省自动有合法 profile).
+    # 用户传值 → 必须落在 _VALID_PROFILES 内 (历史 sichuan/chongqing 等都还在).
+    # 字段合法性 ≠ 有 extractor (铁律 3): 没 extractor 的省照样入库, 由 worker has_parser_for 守卫.
     if profile is None:
         profile = default_profile
     if profile is not None and profile not in _VALID_PROFILES:
@@ -1569,14 +1562,14 @@ async def trigger_quota_parse(
                 and _biz_parts[0] == "quota"
                 and _biz_parts[1] == "manual-upload"):
             _candidate = _biz_parts[2]
-            if _candidate in _EXTRACTABLE_PROVINCES:
+            if _candidate in _VALID_PROVINCE_CODES:
                 province_value = _candidate
 
     if province_value is None and archive.region_code:
         # region_code 是 GB/T 2260 jurisdiction_code (6 位), 反查 _UPLOAD_PROVINCE_MAP
         # tuple: (jurisdiction_code, label, default_profile, jurisdiction_level)
         for _k, _v in _UPLOAD_PROVINCE_MAP.items():
-            if _v[0] == archive.region_code and _k in _EXTRACTABLE_PROVINCES:
+            if _v[0] == archive.region_code:
                 province_value = _k
                 break
 

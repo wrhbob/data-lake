@@ -380,6 +380,9 @@ def migrate_archive_file_columns(engine: Engine) -> None:
     # F-M3 根治 (2026-08-03): 把 ck_archive_file_role 同步挪到独立函数,
     # 自身 try/except 隔离, 不再依赖手动 ALTER。web 启动 / worker 启动都会调。
     sync_archive_file_role_constraint(engine)
+    # v0.8: ck_quota_parse_job_profile 同样做幂等同步（从 sichuan/chongqing → 32 省）。
+    # 任一进程入口都自愈, 不依赖手动 ALTER。
+    sync_quota_parse_job_profile_constraint(engine)
 
 
 def archive_file_role_check_sql() -> str:
@@ -412,6 +415,42 @@ def sync_archive_file_role_constraint(engine: Engine) -> int | None:
         return expected_count
     except Exception as e:
         logger.warning("ck_archive_file_role 同步失败 (%s) — 继续启动, 后续写入可能被 CheckViolation 拒绝", e)
+        return None
+
+
+# v0.8: profile 字段语义（quota/README.md §8）放宽到 32 个 GB/T 28039 拼音长名。
+# 历史 DB ck_quota_parse_job_profile 硬编码 sichuan/chongqing，与 quota_api._VALID_PROFILES (32 项)
+# 漂移会导致 CHECK Violation — 上传深圳 PDF 时直接 500。
+# 同步逻辑与 ck_archive_file_role 完全同构：init_db / worker 启动都会跑一次。
+def quota_parse_job_profile_check_sql() -> str:
+    from app.quota_api import _VALID_PROFILES  # 避免循环 import
+    quoted = ", ".join(f"'{p}'" for p in sorted(_VALID_PROFILES))
+    return f"profile in ({quoted})"
+
+
+def sync_quota_parse_job_profile_constraint(engine: Engine) -> int | None:
+    """幂等同步 ck_quota_parse_job_profile 到 quota_api._VALID_PROFILES (32 个 pinyin 长名)。
+
+    行为:
+      - DROP IF EXISTS + ADD (从 sorted(_VALID_PROFILES) 重建 CHECK)
+      - 仅 PG (SQLite 由模型层自己管)
+      - 异常被吞, 不阻断其他迁移
+      - 返回新的 profile 数, 失败返回 None
+    """
+    if engine.dialect.name != "postgresql":
+        return None
+    try:
+        from app.quota_api import _VALID_PROFILES
+        expected_count = len(_VALID_PROFILES)
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE quota_parse_job DROP CONSTRAINT IF EXISTS ck_quota_parse_job_profile"))
+            conn.execute(
+                text(f"ALTER TABLE quota_parse_job ADD CONSTRAINT ck_quota_parse_job_profile CHECK ({quota_parse_job_profile_check_sql()})")
+            )
+        logger.info("ck_quota_parse_job_profile 已同步 (%d profiles)", expected_count)
+        return expected_count
+    except Exception as e:
+        logger.warning("ck_quota_parse_job_profile 同步失败 (%s) — 继续启动, 后续写入可能被 CheckViolation 拒绝", e)
         return None
 
 

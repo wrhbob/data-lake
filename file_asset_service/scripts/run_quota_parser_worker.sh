@@ -79,7 +79,10 @@ case "${1:-start}" in
     echo "[start] launching worker → $LOG"
 
     # Windows / Git Bash nohup 等价：直接 & 让进程脱离父 shell
-    /d/miniconda3/envs/file-asset/python.exe -u "$ROOT/quota/parser/quota_parser_worker.py" \
+    # v0.8: 加 PYTHONUTF8=1 — 强制 Python 启用 utf-8 mode, 避免 str ↔ bytes 默认按 mbcs (GBK)
+    # 编码导致 parse_warnings 等含中文 JSON 字段写到 PG jsonb 变乱码.
+    PYTHONUTF8=1 PYTHONIOENCODING=utf-8 \
+      /d/miniconda3/envs/file-asset/python.exe -X utf8 -u "$ROOT/quota/parser/quota_parser_worker.py" \
       >> "$LOG" 2>&1 &
     WORKER_PID=$!
     echo "$WORKER_PID" > "$PIDFILE"

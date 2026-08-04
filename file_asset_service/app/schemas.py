@@ -384,6 +384,15 @@ class ArchiveDetailResponse(ArchiveResponse):
     # virtual entries 合成条件(len>1),附件池 sidebar 永远 display:none。
     candidate_xlsx_key: str | None = None
     final_xlsx_key: str | None = None
+    # v0.8: 详情页渲染「未配置解析脚本」提示条 (quota-ui.js:renderParseStatusSection) 需要
+    # parse_status / parse_warnings / parse_error_message / parse_parser_version.
+    # 这些字段 _serialize_archive_base 已写入 (archive_service.py), 但 Pydantic response_model
+    # 严格按 schema 过滤, 必须显式声明才能透出前端. ArchiveSummaryResponse (list 端点) v0.4
+    # 已带 parse_status 等基础字段, 这里补齐详情页用到的额外字段.
+    parse_status: str | None = None
+    parse_warnings: list = []
+    parse_error_message: str | None = None
+    parse_parser_version: str | None = None
 
 
 class ArchiveFromIngestEventResponse(ArchiveDetailResponse):

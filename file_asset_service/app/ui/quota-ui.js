@@ -74,6 +74,9 @@
     usable:   "done",
     failed_user: "failed",
     failed_permanent: "failed",
+    // v0.8 新增：worker has_parser_for(province) 失败 → 档案入库成功但不会自动解析。
+    // 视觉上落 "pending-no-parser"（pending 变体），详情页另显示提示条。
+    skipped_no_parser: "pending-no-parser",
   });
 
   function resolveUiStatus(row) {
@@ -90,6 +93,7 @@
     var variant = resolveUiStatus(row);
     var labelMap = {
       pending:  "未解析",
+      "pending-no-parser": "未配置解析脚本",
       parsing:  "解析中",
       review:   "待审核",
       done:     "已完成",
@@ -97,6 +101,7 @@
     };
     var iconMap = {
       pending:  null,
+      "pending-no-parser": "alert-triangle",
       parsing:  "loader",
       review:   null,
       done:     "check",
@@ -370,20 +375,52 @@
     return html;
   }
 
-  // ── 上传弹窗省份白名单（v0.7 收缩: 只列有真实 extractor 的省份）──
-  // 完整 32 省字典在后端 _UPLOAD_PROVINCE_MAP 仍保留 (供 review/重登记路径取元数据),
-  // 但「新增档案」上传 (POST /api/data-lake/quota/upload) 只允许有 extractor 的省份,
-  // 否则会落入 pipeline 默认占位, 写 0 行空 xlsx. 与后端 _EXTRACTABLE_PROVINCES 对齐.
-  // 增量省份: 在 quota_md_to_csv_v2/extractors/{province}/ 落地 extractor + 同步更新 _EXTRACTABLE_PROVINCES.
-  const QUOTA_UPLOAD_PROVINCES = Object.freeze([
-    { code: "sc",  label: "四川省" },
+  // ── 上传弹窗省份全开（v0.8: 入库 ≠ 解析, 32 省都能入, 无 extractor 由 worker 兜底 skip）──
+  // 后端 quota_api.py:_UPLOAD_PROVINCE_MAP 已全员预填 province 短码 + jurisdiction_code + profile,
+  // 不再有 _EXTRACTABLE_PROVINCES 白名单. 档案能不能入库只看 province 是否在 _VALID_PROVINCE_CODES,
+  // 能不能解析由 quota_parser_worker.has_parser_for(province) 守卫 (无则 skipped_no_parser 终态).
+  // 完整语义见 quota/README.md §8.
+  // 注意: code 用 province 短码 (sc/cq/bj/...) 不是 6 位 jurisdiction_code,
+  //       因为 upload API 期望短码 (与 worker job.metadata_payload.province 对齐).
+  const UPLOAD_PROVINCE_OPTIONS = Object.freeze([
+    { code: "bj",  label: "北京市" },
+    { code: "tj",  label: "天津市" },
+    { code: "hb",  label: "河北省" },
+    { code: "sx",  label: "山西省" },
+    { code: "nm",  label: "内蒙古自治区" },
+    { code: "ln",  label: "辽宁省" },
+    { code: "jl",  label: "吉林省" },
+    { code: "hl",  label: "黑龙江省" },
+    { code: "sh",  label: "上海市" },
+    { code: "js",  label: "江苏省" },
+    { code: "zj",  label: "浙江省" },
+    { code: "ah",  label: "安徽省" },
+    { code: "fj",  label: "福建省" },
+    { code: "jx",  label: "江西省" },
+    { code: "sd",  label: "山东省" },
+    { code: "yu",  label: "河南省" },
+    { code: "hu",  label: "湖北省" },
+    { code: "xi",  label: "湖南省" },
+    { code: "gd",  label: "广东省" },
+    { code: "gx",  label: "广西壮族自治区" },
+    { code: "hi",  label: "海南省" },
     { code: "cq",  label: "重庆市" },
+    { code: "sc",  label: "四川省" },
+    { code: "gz",  label: "贵州省" },
+    { code: "yn",  label: "云南省" },
+    { code: "xz",  label: "西藏自治区" },
+    { code: "snx", label: "陕西省" },
+    { code: "gs",  label: "甘肃省" },
+    { code: "qh",  label: "青海省" },
+    { code: "nx",  label: "宁夏回族自治区" },
+    { code: "xj",  label: "新疆维吾尔自治区" },
+    { code: "sz",  label: "深圳市" },
   ]);
 
   function renderUploadProvinceOptions(selectedCode) {
     var html = '<option value="">请选择省份</option>';
-    for (var i = 0; i < QUOTA_UPLOAD_PROVINCES.length; i++) {
-      var r = QUOTA_UPLOAD_PROVINCES[i];
+    for (var i = 0; i < UPLOAD_PROVINCE_OPTIONS.length; i++) {
+      var r = UPLOAD_PROVINCE_OPTIONS[i];
       var sel = (r.code === selectedCode) ? " selected" : "";
       html += '<option value="' + escapeHtml(r.code) + '"' + sel + '>' + escapeHtml(r.label) + '</option>';
     }
@@ -1148,6 +1185,51 @@
     return (n / 1024 / 1024 / 1024).toFixed(2) + " GB";
   }
 
+  // v0.8 解析状态区块：依据 archive.parse_status 渲染提示条
+  // - skipped_no_parser → 黄色警告条：未配置解析脚本，需联系管理员接入或手工上传 reviewed.xlsx
+  // - failed_user / failed_permanent → 红色错误条：附 parse_error_message
+  // - parsing → loading 条
+  // - parsed / qa_passed / usable → 绿色完成条
+  // - pending (或空) → 不渲染（与已存在的「未解析」徽章重复）
+  function renderParseStatusSection(archive) {
+    var st = archive && archive.parse_status;
+    if (!st) return "";
+    var warnings = Array.isArray(archive.parse_warnings) ? archive.parse_warnings : [];
+
+    var block = "";
+    if (st === "skipped_no_parser") {
+      var npWarn = warnings.find(function (w) { return w && w.code === "no_parser_for_province"; });
+      var detail = npWarn ? npWarn.detail : "未在 extractors/{province}/ 找到对应解析脚本";
+      block = '<div class="quota-warning quota-warning--no-parser">' +
+        '<strong><i data-lucide="alert-triangle"></i>未配置解析脚本</strong>' +
+        '<p>档案已入库（'+ escapeHtml(archive.title || "（未命名）") +'），但 worker 找不到 extractors/'+ escapeHtml(npWarn ? npWarn.province : "?") +'/ 下的解析脚本，不会自动解析。</p>' +
+        '<p class="quota-filter-note">'+ escapeHtml(detail) +'</p>' +
+        '<p class="quota-filter-note">可选：联系管理员接入 extractor；或手工上传 reviewed.xlsx 走审核流程。</p>' +
+        '</div>';
+    } else if (st === "failed_user" || st === "failed_permanent") {
+      var msg = archive.parse_error_message || archive.parse_error_code || "未提供错误详情";
+      block = '<div class="quota-warning quota-warning--error">' +
+        '<strong><i data-lucide="alert-circle"></i>解析失败</strong>' +
+        '<p>'+ escapeHtml(msg) +'</p>' +
+        '</div>';
+    } else if (st === "parsing") {
+      block = '<div class="quota-warning quota-warning--info">' +
+        '<strong><i data-lucide="loader"></i>正在解析</strong>' +
+        '<p>worker 已领取任务，结果将写入 candidate.xlsx。</p>' +
+        '</div>';
+    } else if (st === "parsed" || st === "candidate_ready" || st === "qa_passed" || st === "usable") {
+      var finishedAt = archive.parse_finished_at || "";
+      var ver = archive.parse_parser_version || "";
+      block = '<div class="quota-warning quota-warning--success">' +
+        '<strong><i data-lucide="check-circle"></i>解析完成</strong>' +
+        '<p>状态: '+ escapeHtml(st) + (finishedAt ? ' · 完成于 '+ escapeHtml(finishedAt) : "") +'</p>' +
+        (ver ? '<p class="quota-filter-note">parser_version: '+ escapeHtml(ver) +'</p>' : "") +
+        '</div>';
+    }
+    if (!block) return "";
+    return '<section class="quota-archive-detail-section"><h3>解析状态</h3>'+ block +'</section>';
+  }
+
   function renderArchiveDetailView() {
     const detail = state.archiveDetail || {};
     if (detail.status === CAP.UNKNOWN || (detail.status !== CAP.READY && !detail.data)) {
@@ -1260,6 +1342,7 @@
         <h3>来源 PDF（${files.length}）</h3>
         ${filesHtml}
       </section>
+      ${renderParseStatusSection(archive)}
       <section class="quota-archive-detail-section">
         <h3>状态机</h3>
         <p>当前状态: <strong>${escapeHtml(statusText)}</strong></p>

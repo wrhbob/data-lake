@@ -247,7 +247,118 @@ Worker 只在任务执行期间使用本地临时目录，例如：
 
 删除操作应保留审计记录，并处理数据库记录与 MinIO 对象之间的一致性。建议默认保留原始 PDF、候选 CSV 和审核后 CSV，只有明确的清理操作才删除中间产物。
 
-## 8. 任务状态
+## 8. Profile 字段语义
+
+> 本节为字段契约，与 `quota/web-frontend/SPEC.md` §11 字段对齐表、`file_asset_service/app/quota_api.py` `_UPLOAD_PROVINCE_MAP` 一并阅读。
+
+### 8.1 字段定位
+
+`province` / `profile` / `jurisdiction_code` / `extractors/{province}/` 是四件事，**互不替代、单一权威源映射**：
+
+| 字段 | 平面 | 取值形态 | 取值例子 | 权威源 | 谁可以改 |
+|---|---|---|---|---|---|
+| `province` | 控制平面 key | 用户选 / API 入参 | `sc`、`hu` | 前端 select / API 表单 | 用户 |
+| `jurisdiction_code` | 数据平面值 | GB/T 2260 6 位数字 | `510000`、`420000` | `_UPLOAD_PROVINCE_MAP[province][0]` | **任何人不可改**（系统派生） |
+| `profile` | 抽取模板引用 | 拼音长名 | `sichuan`、`hubei` | `_UPLOAD_PROVINCE_MAP[province][2]` | **任何人不可改**（系统派生） |
+| `extractors/{province_short}/` | 物理解析脚本 | git 仓库目录存在性 | `extractors/sc/extract_quota.py` | git 仓库 | 开发者 |
+
+**单一权威源**：`file_asset_service/app/quota_api.py` 的 `_UPLOAD_PROVINCE_MAP`。任何一处需要从 `province` 推出 `jurisdiction_code` 或 `profile`，**必须经过这张表**——不允许反向推导（短码 ↔ 长名）、不允许就地拼接、不允许前端/worker 各自维护副本。
+
+### 8.2 三条铁律
+
+#### 铁律 1 — `profile` 是抽取模板引用，不是省名标签
+
+`profile` 字段值指向"加载哪个 extractor 实现"。它**当前恰好与省份 1:1 绑定**，但这只是因为每省只实作了一个 extractor。语义上 `profile` 与 `extractors/{profile_name}/` 目录是引用关系，不是命名关系。
+
+```
+province="sc"  →  profile="sichuan"   →  extractors/sc/extract_quota.py
+province="cq"  →  profile="chongqing" →  extractors/cq/extract_quota.py
+```
+
+注：**目录名跟 province 短码对齐**（不是跟 profile 长名）。这是 onboarding 约定：`extractors/{province_short}/`。
+
+#### 铁律 2 — `profile` 与"定额种类"无关
+
+「房屋建筑」「装饰工程」「市政工程」是**定额的内容分类**，对应**不同的 PDF 文件**（同一省的不同分册），但它们**共享同一个 extractor**。
+
+```
+四川省房屋建筑定额 PDF  ─┐
+四川省装饰工程定额 PDF  ─┼── province="sc" profile="sichuan" extractors/sc/
+四川省市政工程定额 PDF  ─┘    （一个 extractor 处理该省所有定额种类）
+```
+
+**入库 N 个 PDF = N 个 archive 行**，各自独立，但 `province` / `profile` / extractor **完全一致**。worker 不按"定额种类"分流，只看 `province`。
+
+#### 铁律 3 — 入库 ≠ 解析
+
+**没有 extractor 的省份照样入库，`profile` 字段照样填**。
+
+- 上传：北京市 PDF + province="bj" → 后端写 `province="bj"`、`profile="beijing"`、`jurisdiction_code="110000"` ✅
+- worker 抢到这个 job → `has_parser_for("bj")` 返回 False → 标 `skipped_no_parser` 终态 + warning
+- 详情页提示"未配置解析脚本，需联系管理员接入 extractors/bj/ 或自行上传 reviewed.xlsx"
+- 用户可继续上传 reviewed.xlsx（这是手工审核流程，不归 worker 管）
+
+**profile 字段从不因为"extractor 不存在"而被拒绝写入**。字段合法性 = 命名合法（在 `_VALID_PROFILES` 集合内），与 extractor 是否落地**正交**。
+
+### 8.3 onboarding 新省流程
+
+要把北京市从"入库即可"升级到"真能解析"，按顺序：
+
+1. **代码落地**：在 `quota/parser/external/quota-md-to-csv-v2/extractors/bj/extract_quota.py` 写 extractor（参照 `extractors/sc/`）
+2. **本地调试**：`run_quota_pipeline(province="bj", ...)` 跑通样例 PDF
+3. **DB 映射补齐**：`_UPLOAD_PROVINCE_MAP["bj"]` 的 `default_profile` 字段（`"beijing"`）已在 v0.4 预填，**无需改后端**
+4. **重启 web / worker**：`_EXTRACTABLE_PROVINCES`（如果存在）需加 `"bj"`；或直接依赖 `has_parser_for("bj")` 的目录存在性检查（推荐，去除硬编码白名单）
+5. **端到端验证**：上传北京市 PDF → 入库成功 → worker `has_parser_for` 返回 True → 跑通
+
+**不要做**：
+- ❌ 不要修改 `_UPLOAD_PROVINCE_MAP` 的 `jurisdiction_code` 字段（GB/T 2260 不能乱改）
+- ❌ 不要新增 `profile` 跟 `province` 不一致的映射（违反铁律 1）
+- ❌ 不要把 `_EXTRACTABLE_PROVINCES` 当成"省份黑名单"——它一旦存在就退化成"必须手工维护"的省份白名单，与"入库 ≠ 解析"原则冲突。**推荐彻底删除 `_EXTRACTABLE_PROVINCES`，统一用 `has_parser_for()` 守卫**。
+
+### 8.4 `profile` 长名命名约定（GB/T 28039 拼音规则）
+
+`_UPLOAD_PROVINCE_MAP` 第二列（profile 长名）按 GB/T 28039 拼写：
+
+| 省份 | province 短码 | profile 长名 | 备注 |
+|---|---|---|---|
+| 北京 | `bj` | `beijing` | |
+| 天津 | `tj` | `tianjin` | |
+| 河北 | `hb` | `hebei` | |
+| 山西 | `sx` | `shanxi` | |
+| 陕西 | `snx` | `shaanxi` | **区别于山西**（陕西 shaanxi ≠ 山西 shanxi） |
+| 内蒙古 | `nm` | `neimenggu` | |
+| 辽宁 | `ln` | `liaoning` | |
+| 吉林 | `jl` | `jilin` | |
+| 黑龙江 | `hl` | `heilongjiang` | |
+| 上海 | `sh` | `shanghai` | |
+| 江苏 | `js` | `jiangsu` | |
+| 浙江 | `zj` | `zhejiang` | |
+| 安徽 | `ah` | `anhui` | |
+| 福建 | `fj` | `fujian` | |
+| 江西 | `jx` | `jiangxi` | |
+| 山东 | `sd` | `shandong` | |
+| 河南 | `yu` | `henan` | |
+| 湖北 | `hu` | `hubei` | |
+| 湖南 | `xi` | `hunan` | 湖南拼音 `hunan`（湘 xi 是湖南省内简称，不用于 profile） |
+| 广东 | `gd` | `guangdong` | |
+| 广西 | `gx` | `guangxi` | |
+| 海南 | `hi` | `hainan` | |
+| 重庆 | `cq` | `chongqing` | |
+| 四川 | `sc` | `sichuan` | |
+| 贵州 | `gz` | `guizhou` | |
+| 云南 | `yn` | `yunnan` | |
+| 西藏 | `xz` | `xizang` | |
+| 甘肃 | `gs` | `gansu` | |
+| 青海 | `qh` | `qinghai` | |
+| 宁夏 | `nx` | `ningxia` | |
+| 新疆 | `xj` | `xinjiang` | |
+| 深圳 | `sz` | `shenzhen` | city 级，非 province 级 |
+
+**该表为权威源**，任何 onboarding 文档、UI 显示、CSV 导出都按此表取值。
+
+---
+
+## 9. 任务状态
 
 复用 `Archive.status` 状态机（**不**新增独立 `parse_run` 表——每个 PDF 只保留一份最新 XLSX，无历史需求）：
 

@@ -186,6 +186,18 @@ def main() -> int:
             )
             return 2  # sync 也不顶用才退出 (区别于 flock 占用退出码 1)
 
+    # F-PROFILE (v0.8): ck_quota_parse_job_profile 同样做 schema 自检 + 幂等 sync.
+    # 历史 DB 硬编码 sichuan/chongqing, 与 quota_api._VALID_PROFILES (32 省) 漂移
+    # 会导致 skipped_no_parser 路径入队就被 CHECK 拒. 任一进程入口自愈,
+    # 不依赖手动 ALTER。web 启动 init_db 也会跑一次 (双保险).
+    try:
+        from app.database import get_engine, sync_quota_parse_job_profile_constraint
+        n = sync_quota_parse_job_profile_constraint(get_engine())
+        if n is not None:
+            logger.warning("profile 自检 ✅: ck_quota_parse_job_profile ↔ _VALID_PROFILES (%d) 一致", n)
+    except Exception as e:
+        logger.warning("profile 自检失败 (%s) — 继续启动", e)
+
     # fcntl flock — Windows 跳过
     flock_fd = None
     if sys.platform != "win32":
@@ -353,7 +365,15 @@ def _process_real_job(job) -> None:
         pdf_object_key = fa.object_key
         source_sha = fa.sha256
 
-    # 2. 下载 PDF 到本地 temp（get_object 拿 bytes → 落临时文件）
+    # 2. 提取 province 并调用 _guard_has_parser (v0.8: 入库 ≠ 解析)
+    # 必须在下载 PDF / 跑 OCR 之前判定, 没有 extractor 的省直接 skip, 不浪费网络和算力.
+    province = job.metadata_payload.get("province")
+    has_parser, np_detail = _guard_has_parser(province)
+    if not has_parser:
+        _mark_job_skipped_no_parser(job, province=province or "<empty>", detail=np_detail)
+        return
+
+    # 3. 下载 PDF 到本地 temp（get_object 拿 bytes → 落临时文件）
     work_root = Path(os.environ.get(
         "QUOTA_PARSER_WORK_ROOT", "/tmp/quota_parser_work"
     )) / job.job_id
@@ -371,8 +391,8 @@ def _process_real_job(job) -> None:
     _update_job_fields(job.job_id, chunks_total=chunks_total)
 
     # 4. 跑 pipeline（核心 — 阻塞 5-15 分钟）
+    # province 已在 §2 守卫处取出; 此处不再重复 get.
     ocr_api_url = job.metadata_payload.get("ocr_api_url") or get_ocr_api_url()
-    province = job.metadata_payload.get("province")
     try:
         result = run_quota_pipeline(
             pdf_path=str(local_pdf),
@@ -651,6 +671,71 @@ def _mark_job_done(job_id: str, *, chunks_total: int | None = None,
     with get_session_factory()() as session:
         session.execute(text(sql), params)
         session.commit()
+
+
+# v0.8 新增：判断 province 是否已有 extractor 落地. 与"入库 ≠ 解析"铁律配合:
+# 档案能入, 但没有 extractor 的省 worker 直接跳过 (skipped_no_parser 终态), 不算 failed.
+def _guard_has_parser(province: str | None) -> tuple[bool, str]:
+    """返回 (has_parser, detail).
+
+    has_parser=False 时 _process_real_job 走 skipped_no_parser 分支.
+    detail 是给 archive.parse_warnings 看的解释 (含建议).
+    """
+    if not province:
+        return False, "job.metadata_payload.province 为空, 无法定位 extractor 目录"
+    # extractor 根路径 (仓库结构, 与 quota/README.md §8 onboarding 流程对齐)
+    repo_root = Path(__file__).resolve().parent.parent.parent  # quota/parser/worker.py → 项目根
+    extractor_dir = repo_root / "quota" / "parser" / "external" / "quota-md-to-csv-v2" / "extractors" / province
+    if extractor_dir.is_dir() and (extractor_dir / "extract_quota.py").exists():
+        return True, f"extractor 已落地: {extractor_dir}"
+    return False, (
+        f"未在 {extractor_dir} 找到 extract_quota.py. "
+        f"如需支持该省, 在 quota/parser/external/quota-md-to-csv-v2/extractors/{province}/ "
+        f"落地 extractor (参照 extractors/sc/), 重启 worker 即可."
+    )
+
+
+def _mark_job_skipped_no_parser(job, *, province: str, detail: str) -> None:
+    """标 job done + archive.parse_status='skipped_no_parser' + warning.
+
+    走 _mark_job_done 的 'done' 状态 (而不是 'failed'), 避免污染失败指标.
+    archive.parse_status 用 'skipped_no_parser' 是新的 archive 解析子状态 (String(32) 无 CHECK,
+    models.py:478; 与 web-frontend SPEC §3.1.2 五态枚举独立, 不影响 status 字段).
+    """
+    from sqlalchemy import update
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from app.database import get_session_factory
+    from app.models import Archive
+
+    now = datetime.now(UTC)
+    warning = {"code": "no_parser_for_province", "province": province, "detail": detail}
+    with get_session_factory()() as session:
+        # quota_parse_job: 走 ORM update (避开 raw SQL bind param 触发 system locale 编码)
+        from app.models import QuotaParseJob
+        session.execute(
+            update(QuotaParseJob)
+            .where(QuotaParseJob.job_id == job.job_id)
+            .values(status="done", chunks_total=0, chunks_done=0, finished_at=now)
+        )
+        # archive: 读出现有 warnings → append → ORM update (flag_modified 强制 jsonb 列刷新)
+        archive = session.get(Archive, job.archive_id)
+        if archive is None:
+            session.rollback()
+            logger.error("skip-no-parser: archive %s 不存在, 跳过写入", job.archive_id)
+            return
+        existing = list(archive.parse_warnings or [])
+        existing.append(warning)
+        archive.parse_status = "skipped_no_parser"
+        archive.parse_phase = "skipped"
+        archive.parse_warnings = existing
+        archive.parse_finished_at = now
+        flag_modified(archive, "parse_warnings")  # JSON 列必须显式 flag
+        session.commit()
+    logger.warning(
+        "skip-no-parser job_id=%s archive_id=%s province=%s reason=%s",
+        job.job_id, job.archive_id, province, detail,
+    )
 
 
 def _mark_job_failed(job, *, error_code: str, message: str) -> None:

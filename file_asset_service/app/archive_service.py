@@ -277,6 +277,12 @@ def _serialize_archive_base(archive: Archive) -> dict[str, object]:
         "parse_started_at": archive.parse_started_at.isoformat() if archive.parse_started_at else None,
         "parse_finished_at": archive.parse_finished_at.isoformat() if archive.parse_finished_at else None,
         "parse_error_code": archive.parse_error_code,
+        # v0.8: 详情页需要展示「未配置解析脚本」提示,前端 quota-ui.js:renderArchiveDetailView
+        # 读 parse_warnings 找 {code:"no_parser_for_province"} warning. 也透出 error_message
+        # 给 failed_* 状态显示具体原因.
+        "parse_warnings": list(archive.parse_warnings or []),
+        "parse_error_message": archive.parse_error_message,
+        "parse_parser_version": archive.parse_parser_version,
         "candidate_xlsx_key": archive.candidate_xlsx_key,
         "final_xlsx_key": archive.final_xlsx_key,
     }

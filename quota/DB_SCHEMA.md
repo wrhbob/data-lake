@@ -386,7 +386,15 @@ CREATE TABLE quota_parse_job (
     metadata         JSONB NOT NULL DEFAULT '{}'::jsonb,
 
     CONSTRAINT ck_quota_parse_job_status CHECK (status IN ('queued', 'running', 'done', 'failed', 'cancelled')),
-    CONSTRAINT ck_quota_parse_job_profile CHECK (profile IN ('sichuan', 'chongqing')),
+    -- v0.8: profile 与 quota_api._VALID_PROFILES 同步（32 个 GB/T 28039 拼音长名）。
+    -- 入库 ≠ 解析：所有省级单位（含深圳）都能入库并写入 profile，但 worker
+    -- has_parser_for() 守卫决定能否真正解析。详见 quota/README.md §8 铁律 3。
+    CONSTRAINT ck_quota_parse_job_profile CHECK (profile IN (
+        'beijing','tianjin','hebei','shanxi','neimenggu','liaoning','jilin','heilongjiang',
+        'shanghai','jiangsu','zhejiang','anhui','fujian','jiangxi','shandong','henan',
+        'hubei','hunan','guangdong','guangxi','hainan','chongqing','sichuan','guizhou',
+        'yunnan','xizang','shaanxi','gansu','qinghai','ningxia','xinjiang','shenzhen'
+    )),
     CONSTRAINT ck_quota_parse_job_attempt CHECK (attempt >= 0 AND attempt <= max_attempts)
 );
 
@@ -511,7 +519,15 @@ CREATE TABLE IF NOT EXISTS quota_parse_job (
     created_by       VARCHAR(128),
     metadata         JSONB NOT NULL DEFAULT '{}'::jsonb,
     CONSTRAINT ck_quota_parse_job_status CHECK (status IN ('queued', 'running', 'done', 'failed', 'cancelled')),
-    CONSTRAINT ck_quota_parse_job_profile CHECK (profile IN ('sichuan', 'chongqing')),
+    -- v0.8: profile 与 quota_api._VALID_PROFILES 同步（32 个 GB/T 28039 拼音长名）。
+    -- 入库 ≠ 解析：所有省级单位（含深圳）都能入库并写入 profile，但 worker
+    -- has_parser_for() 守卫决定能否真正解析。详见 quota/README.md §8 铁律 3。
+    CONSTRAINT ck_quota_parse_job_profile CHECK (profile IN (
+        'beijing','tianjin','hebei','shanxi','neimenggu','liaoning','jilin','heilongjiang',
+        'shanghai','jiangsu','zhejiang','anhui','fujian','jiangxi','shandong','henan',
+        'hubei','hunan','guangdong','guangxi','hainan','chongqing','sichuan','guizhou',
+        'yunnan','xizang','shaanxi','gansu','qinghai','ningxia','xinjiang','shenzhen'
+    )),
     CONSTRAINT ck_quota_parse_job_attempt CHECK (attempt >= 0 AND attempt <= max_attempts)
 );
 CREATE INDEX IF NOT EXISTS ix_quota_parse_job_status_enqueued ON quota_parse_job (status, enqueued_at);
