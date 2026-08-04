@@ -248,6 +248,51 @@ def render_chunk(result_path: Path, chunk_pdf: Path, render_script: Path):
         print(f"  ✅ rendered")
 
 
+# v0.8 chunk 粒度 PollTaskLost 重试参数
+# 设计: PollTaskLost 是 minerU 端瞬时不可用 (OOM/重启) 触发的客户端异常,
+#       大概率下一次 submit/poll 就会恢复,但若立即重试会撞同一波故障。
+#       实证: b2107a91 chunk 1 fail → 后续 chunks 仍能成,说明仅 chunk 1 受影响。
+# 决策: 默认 2 次重试 + 30s 间隔 (≈ 矿工U container 从 OOM kill 到 K8s 重启完成的时间窗)。
+#       仅 PollTaskLost 重试,其他 Exception (网络瞬断/5xx) 走原 except 立即 continue。
+CHUNK_POLL_LOST_RETRIES = 2
+CHUNK_POLL_LOST_RETRY_INTERVAL_S = 30
+
+
+def _process_chunk_once(
+    *,
+    chunk_pdf: Path,
+    chunk_index: int,
+    chunk_count: int,
+    api_url: str,
+    backend: str,
+    effort: str,
+    render_script: Path,
+    poll_interval_s: int,
+    result_paths: list[Path],
+) -> None:
+    """单次 chunk 全流程: submit → poll → fetch → render.
+
+    任何一步失败 (含 PollTaskLost/PollTaskTimeout/网络错误/poll status != completed)
+    都向上 raise,由外层决定是否重试或终止该 chunk。
+    """
+    t0 = time.time()
+    task_id = submit_task(chunk_pdf, api_url, backend, effort)
+    print(f"  task_id: {task_id}  ({time.time()-t0:.1f}s)")
+
+    info = poll_task(task_id, api_url, f"chunk {chunk_index}/{chunk_count}",
+                     poll_interval=poll_interval_s)
+    if info.get("status") != "completed":
+        err = info.get("error") or "unknown"
+        raise RuntimeError(f"chunk {chunk_index} minerU 端 status={info.get('status')!r}: {err}")
+
+    result_path = chunk_pdf.parent / "result.json"
+    fetch_result(task_id, api_url, result_path)
+    print(f"  💾 {result_path.name}  ({result_path.stat().st_size:,} bytes)")
+    result_paths.append(result_path)
+
+    render_chunk(result_path, chunk_pdf, render_script)
+
+
 def merge_chunks(chunks: list[Path], result_paths: list[Path], pdf: Path, out_dir: Path):
     """合并所有 chunk 的 md_content 成总 .md，并触发合并 render。"""
     print(f"\n📦 合并 {len(result_paths)} 个 chunk ...")
@@ -364,25 +409,35 @@ def parse_chunked(
         chunk_started = time.time()
         chunk_status = "failed"
         chunk_error = None
+        # v0.8 PollTaskLost 重试状态: 重试期间保留 exception 对象到下一轮 try,
+        # 让 except 只在外层 except 处理 PollTaskLost;其他 Exception 维持原行为。
         try:
-            t0 = time.time()
-            task_id = submit_task(chunk_pdf, api_url, backend, effort)
-            print(f"  task_id: {task_id}  ({time.time()-t0:.1f}s)")
-
-            info = poll_task(task_id, api_url, f"chunk {i}/{chunk_count}",
-                             poll_interval=poll_interval_s)
-            if info.get("status") != "completed":
-                chunk_error = info.get("error")
-                print(f"  ❌ 失败: {chunk_error}")
-                continue
-
-            result_path = chunk_pdf.parent / "result.json"
-            fetch_result(task_id, api_url, result_path)
-            print(f"  💾 {result_path.name}  ({result_path.stat().st_size:,} bytes)")
-            result_paths.append(result_path)
-
-            render_chunk(result_path, chunk_pdf, render_script)
-            chunk_status = "succeeded"
+            for attempt in range(1, CHUNK_POLL_LOST_RETRIES + 2):  # 1 + retries
+                try:
+                    _process_chunk_once(
+                        chunk_pdf=chunk_pdf,
+                        chunk_index=i,
+                        chunk_count=chunk_count,
+                        api_url=api_url,
+                        backend=backend,
+                        effort=effort,
+                        render_script=render_script,
+                        poll_interval_s=poll_interval_s,
+                        result_paths=result_paths,
+                    )
+                    chunk_status = "succeeded"
+                    break  # 成功 — 跳出重试循环
+                except PollTaskLost as e:
+                    if attempt <= CHUNK_POLL_LOST_RETRIES:
+                        print(
+                            f"  ⚠ chunk {i} PollTaskLost 第 {attempt}/{CHUNK_POLL_LOST_RETRIES} 次, "
+                            f"等 {CHUNK_POLL_LOST_RETRY_INTERVAL_S}s 后重试..."
+                        )
+                        time.sleep(CHUNK_POLL_LOST_RETRY_INTERVAL_S)
+                        continue
+                    # 重试用完仍未恢复 — 视为永久失败,抛给外层 except
+                    raise
+                # 其他 Exception (网络瞬断/5xx/PollTaskTimeout/RuntimeError) 不重试,直接抛
 
             # v0.6 §#6: chunk 粒度回调由 finally 块统一处理（成功后 chunk_status="succeeded"）
             # 这里不再单独调用,避免与 finally 块形成双调用导致 chunks_done 被冗余写两次。
