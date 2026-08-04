@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.archive_rules import build_quota_business_key, metadata_cell, now_iso
-from app.archive_service import attach_file as _attach_archive_file, create_archive
+from app.archive_service import attach_file as _attach_archive_file, create_archive, UI_EXCLUDED_FILE_ROLES
 from app.assets import register_asset
 from app.database import get_db_session
 from app.models import (
@@ -576,6 +576,11 @@ def get_quota_archive_detail(
             })
 
     # ── files (ArchiveFile LEFT JOIN FileAsset) ────────────────────────
+    # 2026-08-04: 应用 UI_EXCLUDED_FILE_ROLES 过滤, 修复左侧栏多出 3 个 parse_* 按钮.
+    # parse_markdown/parse_html/parse_candidate_xlsx 是 worker 写出的中间产物,
+    # parse_final_xlsx 与 archive.final_xlsx_key 同一份 (前端 archiveFiles() 已 virtual 合成).
+    # 这 4 行 archive_file 都不应在 UI 显示. 与 archive_service.py:list_archives() 的
+    # file_count 计算保持一致, 避免列表/详情两个 API 行为分裂.
     files: list[dict] = []
     file_rows = session.execute(
         select(ArchiveFile, FileAsset)
@@ -584,6 +589,8 @@ def get_quota_archive_detail(
         .order_by(asc(ArchiveFile.sort_order), asc(ArchiveFile.added_at))
     ).all()
     for af, fa in file_rows:
+        if af.file_role in UI_EXCLUDED_FILE_ROLES:
+            continue
         files.append({
             "archive_file_id": af.archive_file_id,
             "file_id": af.file_id,

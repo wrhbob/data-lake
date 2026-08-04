@@ -43,6 +43,19 @@ PROVENANCE_WALL_ERRORS = {
     "FIELD_SOURCE_MISSING",
 }
 
+# 解析阶段产出的中间 archive_file 行, 不应在 UI 渲染为"附件"按钮.
+# parse_markdown/parse_html 是 OCR 阶段产物 (markdown + html 渲染);
+# parse_candidate_xlsx/parse_final_xlsx 与 archive.candidate_xlsx_key/final_xlsx_key 指向
+# 同一份 MinIO 对象, 已通过前端 virtual file (archiveFiles()) 合成,
+# 不能既走真实 archive_file 按钮, 又走 virtual 按钮 → 重复显示.
+# 2026-08-04: 详情 API (quota_api.py) 也应用此过滤, 修复左侧栏多出 3 个 parse_* 按钮.
+UI_EXCLUDED_FILE_ROLES = frozenset([
+    "parse_markdown",
+    "parse_html",
+    "parse_candidate_xlsx",
+    "parse_final_xlsx",
+])
+
 
 def _require_json_object(value: dict | None, field_name: str) -> dict:
     if value is None:
@@ -469,12 +482,9 @@ def _archive_summary_rows(session: Session, archives: list[Archive], *, mirror: 
         # 2026-08-03: 排除 worker 写出的中间产物 (parse_markdown/parse_html 是 OCR 阶段产物,
         # parse_candidate_xlsx/parse_final_xlsx 与 archive.candidate/final_xlsx_key 同一份,
         # 已计入 parse_artifact_count, 避免重复)。其它域不受影响(它们的 ArchiveFile
-        # 不会有这 4 个 role)。
-        _UI_EXCLUDED_FILE_ROLES = frozenset([
-            "parse_markdown", "parse_html",
-            "parse_candidate_xlsx", "parse_final_xlsx",
-        ])
-        visible_archive_files = [f for f in files if f[0].file_role not in _UI_EXCLUDED_FILE_ROLES]
+        # 不会有这 4 个 role)。2026-08-04: 提取到模块顶层 UI_EXCLUDED_FILE_ROLES 常量,
+        # 详情 API 也复用同一份过滤逻辑。
+        visible_archive_files = [f for f in files if f[0].file_role not in UI_EXCLUDED_FILE_ROLES]
         parse_artifact_count = (
             (1 if archive.candidate_xlsx_key else 0)
             + (1 if archive.final_xlsx_key else 0)
