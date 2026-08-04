@@ -683,15 +683,21 @@ def _guard_has_parser(province: str | None) -> tuple[bool, str]:
     """
     if not province:
         return False, "job.metadata_payload.province 为空, 无法定位 extractor 目录"
-    # extractor 根路径 (仓库结构, 与 quota/README.md §8 onboarding 流程对齐)
+    # 双胞胎目录（quota_md_to_csv_v2/ vs quota-md-to-csv-v2/）当前完全双胞胎,
+    # 但 pipeline 实际 import 的是 underscore 版（pipeline.py:117 + config.py:103
+    # QUOTA_MD_TO_CSV_DIR = EXTERNAL_ROOT / "quota_md_to_csv_v2"）。守卫必须与
+    # _load_province_module 走的目录一致, 否则会出现「守卫说没脚本 / pipeline
+    # 跑得起来」或反过来的错乱。两份都要改才会同步生效 (见
+    # quota/parser/EXTRACTOR_ONBOARDING.md)。
     repo_root = Path(__file__).resolve().parent.parent.parent  # quota/parser/worker.py → 项目根
-    extractor_dir = repo_root / "quota" / "parser" / "external" / "quota-md-to-csv-v2" / "extractors" / province
+    extractor_dir = repo_root / "quota" / "parser" / "external" / "quota_md_to_csv_v2" / "extractors" / province
     if extractor_dir.is_dir() and (extractor_dir / "extract_quota.py").exists():
         return True, f"extractor 已落地: {extractor_dir}"
     return False, (
         f"未在 {extractor_dir} 找到 extract_quota.py. "
-        f"如需支持该省, 在 quota/parser/external/quota-md-to-csv-v2/extractors/{province}/ "
-        f"落地 extractor (参照 extractors/sc/), 重启 worker 即可."
+        f"如需支持该省, 在 quota/parser/external/quota_md_to_csv_v2/extractors/{province}/ "
+        f"落地 extractor (参照 extractors/sc/), 重启 worker 即可. "
+        f"另需同步在 quota-md-to-csv-v2/extractors/{province}/ 落副本 (CLI 链路)."
     )
 
 
