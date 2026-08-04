@@ -74,9 +74,9 @@
     usable:   "done",
     failed_user: "failed",
     failed_permanent: "failed",
-    // v0.8 新增：worker has_parser_for(province) 失败 → 档案入库成功但不会自动解析。
-    // 视觉上落 "pending-no-parser"（pending 变体），详情页另显示提示条。
-    skipped_no_parser: "pending-no-parser",
+    // v0.8: worker has_parser_for(province) 失败 → 档案入库成功但不会自动解析。
+    // 列表徽章视觉上等同 pending（"未解析"），不污染 5 态分布；
+    // 提示信息走右下角 toast（点击"开始解析"时弹）+ 详情页 renderParseStatusSection。
   });
 
   function resolveUiStatus(row) {
@@ -93,7 +93,6 @@
     var variant = resolveUiStatus(row);
     var labelMap = {
       pending:  "未解析",
-      "pending-no-parser": "未配置解析脚本",
       parsing:  "解析中",
       review:   "待审核",
       done:     "已完成",
@@ -101,7 +100,6 @@
     };
     var iconMap = {
       pending:  null,
-      "pending-no-parser": "alert-triangle",
       parsing:  "loader",
       review:   null,
       done:     "check",
@@ -2777,6 +2775,32 @@
     var api = _parseApiOrWarn();
     if (!api) return;
     if (!archiveId) { setToast("缺少 archiveId"); return; }
+    // v0.8: 点「开始解析」时若档案 parse_status='skipped_no_parser' (即入库成功但
+    // 该省未配置 extractor), 不发请求直接弹 toast 提示, 不污染失败统计.
+    // 列表徽章视觉等同「未解析」(等同 pending 变体), 区别只在用户主动触发解析时才弹出.
+    var archiveRow = null;
+    if (state.archives && state.archives.status === CAP.READY && state.archives.data) {
+      for (var i = 0; i < state.archives.data.length; i++) {
+        if (state.archives.data[i].archive_id === archiveId) {
+          archiveRow = state.archives.data[i];
+          break;
+        }
+      }
+    }
+    if (archiveRow && archiveRow.parse_status === "skipped_no_parser") {
+      var provinceHint = "";
+      // province 短码 → label 映射 (取自 _UPLOAD_PROVINCE_MAP 同源数据)
+      var code = (archiveRow.metadata && archiveRow.metadata.province) || "";
+      for (var j = 0; j < UPLOAD_PROVINCE_OPTIONS.length; j++) {
+        if (UPLOAD_PROVINCE_OPTIONS[j].code === code) {
+          provinceHint = UPLOAD_PROVINCE_OPTIONS[j].label;
+          break;
+        }
+      }
+      var provincePart = provinceHint ? "（" + provinceHint + "）" : "";
+      setToast("未配置解析脚本" + provincePart + "，请联系管理员接入 extractor");
+      return;
+    }
     setToast("已提交阶段 A,稍候查询状态…");
     api.triggerParse(archiveId).then(function (res) {
       if (res.status === CAP.READY) {
