@@ -922,6 +922,10 @@ def get_archive_detail(session: Session, archive_id: str, *, mirror: FileMirror 
         raise ValueError(f"ARCHIVE_NOT_FOUND: {archive_id}")
     detail = _serialize_archive_base(archive)
     _apply_source_config_metadata_fallback(detail, session.get(DataSource, archive.source_id))
+    # 2026-08-04: 与 list_archives 同款过滤, 排除 OCR/parse 阶段中间产物 (parse_markdown /
+    # parse_html / parse_candidate_xlsx / parse_final_xlsx), 避免前端 archiveFiles() 把它
+    # 们当成真实附件按钮渲染, 与 candidate/final_xlsx_key virtual 文件重复。详见
+    # UI_EXCLUDED_FILE_ROLES 模块常量注释。
     detail["files"] = [
         _serialize_archive_file(mounted, asset, archive=archive, mirror=mirror)
         for mounted, asset in session.execute(
@@ -930,6 +934,7 @@ def get_archive_detail(session: Session, archive_id: str, *, mirror: FileMirror 
             .where(ArchiveFile.archive_id == archive.archive_id)
             .order_by(ArchiveFile.sort_order, ArchiveFile.added_at)
         ).all()
+        if mounted.file_role not in UI_EXCLUDED_FILE_ROLES
     ]
     return detail
 
