@@ -48,7 +48,7 @@ SECTION_RE_HEAD_ONLY = re.compile(
     r"^\s?##\s+([A-Z](?: ?\.? ?\d+)*)\s*$"                  # 仅 ID, 标题在下一行 (章节首页 OCR 断行)
 )
 SECTION_RE2 = re.compile(
-    r"^\s?([A-Z](?: ?\.? ?\d+)*)(?:\s+|[　])(.+?)\s*$"        # 纯文本编号行（行首/编号内最多 1 空格）
+    r"^\s?([A-Z](?: ?\.? ?\d+)*)(?:\s+|[　])([^\s\-<>\[({].*?)\s*$"  # 纯文本编号行（行首/编号内最多 1 空格；标题不能以箭头/括号开头，避免 mermaid 'A --> B[...]' 误识别）
 )
 # gd 项目编码: {字母}{章}-{节}-{子}
 # - 字母是 PDF 分册代号 (A=房屋建筑与装饰 / B=装饰 / C=机械设备安装 / ...)
@@ -1096,15 +1096,55 @@ def process_md_file(md_path: Path) -> tuple[list[list[str]], list[dict]]:
     seen_pids: set[str] = set()  # v0.9 跨表已 emit 的 project_id, 用于续表检测
     # v0.11 物理接续: 记录每个 PID 主表 emit 段的 [blank] 行索引, 续表行插入到 [blank] 之前
     pid_blank_idx: dict[str, int] = {}
+    # v0.13.4: TOC 标题库 + body 已 emit 集合
+    #   - toc_titles: 从第 1 个 prefix (TOC area) 收集的 id→title, 用于 body 缺父段时 carry-forward
+    #   - body_emitted: body 阶段已 emit 的段 id (子段触发时, 走父链补缺)
+    toc_titles: dict[str, str] = {}
+    body_emitted: set[str] = set()
 
-    for m in table_matches:
+    for table_idx, m in enumerate(table_matches):
         table_html = m.group(0)
         table_start = m.start()
         prefix = content[prev_end:table_start]
+        is_body = (table_idx >= 1)  # v0.13.4: 第 1 张表 = TOC, 之后 = body
 
         # 只提取本段 prefix 中的段标记（相邻 table 之间）
         secs = extract_sections_before(prefix)
+        # v0.13.4: body 阶段, 子段触发时, 补缺其未 emit 的祖先段 (从 toc_titles 取标题)
+        expanded_secs: list[tuple[str, str]] = []
         for sec_id, sec_name in secs:
+            if is_body:
+                # 走父链: A.1.3.1 -> A.1.3 -> A.1
+                ancestors: list[tuple[str, str]] = []
+                parts = sec_id.split(".")
+                # 累积父链: A.1.3.1 -> ['A.1', 'A.1.3'] -> ['A', 'A.1', 'A.1.3']
+                cur_parts: list[str] = []
+                for p in parts[:-1]:  # 跳过最后一段 (本身)
+                    cur_parts.append(p)
+                    ancestor_id = ".".join(cur_parts)
+                    if ancestor_id not in body_emitted:
+                        # 用 toc_titles 的标题; 没记录就用空标题 (兜底)
+                        anc_title = toc_titles.get(ancestor_id, "")
+                        ancestors.append((ancestor_id, anc_title))
+                # 按从外到内 emit (A.1 在前, A.1.3 在后)
+                for a_id, a_title in ancestors:
+                    if a_id not in body_emitted:
+                        expanded_secs.append((a_id, a_title))
+                        body_emitted.add(a_id)
+            expanded_secs.append((sec_id, sec_name))
+            # v0.13.4: 仅在 body 阶段 add 到 body_emitted, 否则 TOC 阶段会把所有父段都标 '已 emit',
+            #          导致 body 阶段 A.1.3.1 触发时, A.1.3 误判为 '已 emit' 而跳过祖先补缺
+            if is_body:
+                body_emitted.add(sec_id)
+
+        # v0.13.4: TOC 阶段收集 toc_titles (从已 emit 的条目; 仅保留 '干净' 标题, 即不是 page-tail 衍生)
+        if not is_body:
+            for sec_id, sec_name in secs:
+                # 仅在 toc_titles 里没记录时写入 (避免 TOC area 里页码尾行覆盖正确标题)
+                if sec_id not in toc_titles and sec_name and not TOC_PAGE_TAIL.search(sec_name):
+                    toc_titles[sec_id] = sec_name
+
+        for sec_id, sec_name in expanded_secs:
             last_section_id = sec_id
             all_rows.append(["段", sec_id, clean_latex_name(sec_name), "", "", "", "", "", "", ""])
 
