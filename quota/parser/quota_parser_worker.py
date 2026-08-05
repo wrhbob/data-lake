@@ -680,9 +680,24 @@ def _guard_has_parser(province: str | None) -> tuple[bool, str]:
 
     has_parser=False 时 _process_real_job 走 skipped_no_parser 分支.
     detail 是给 archive.parse_warnings 看的解释 (含建议).
+
+    v0.13.1 升级: 先查 PROVINCE_KEYWORDS 注册 (避免 _resolve_province 抛
+    UnsupportedProvinceError 才被 pipeline 标 failed_user; 应在守卫层早拦截).
+    这样未注册的省份走 skipped_no_parser (符合"未配置解析脚本"语义),
+    已注册但脚本缺失的省份走清晰的下一步指令.
     """
     if not province:
         return False, "job.metadata_payload.province 为空, 无法定位 extractor 目录"
+    # v0.13.1: 先查 PROVINCE_KEYWORDS 注册表 (避免 _resolve_province 抛 UnsupportedProvinceError)
+    from quota_parser.config import PROVINCE_KEYWORDS, PROVINCE_DEFAULT_KEY
+    if province == PROVINCE_DEFAULT_KEY or province not in PROVINCE_KEYWORDS:
+        registered = sorted(k for k in PROVINCE_KEYWORDS if k != PROVINCE_DEFAULT_KEY)
+        return False, (
+            f"省份 '{province}' 未在 quota_parser.config.PROVINCE_KEYWORDS 注册. "
+            f"已注册: {registered}. "
+            f"如需支持, 同步 4 处 (config.py + 2 薄壳 + quota_api.py:1577) + 落地 extractors/{province}/"
+            f" (详见 EXTRACTOR_ONBOARDING.md §2)"
+        )
     # 双胞胎目录（quota_md_to_csv_v2/ vs quota-md-to-csv-v2/）当前完全双胞胎,
     # 但 pipeline 实际 import 的是 underscore 版（pipeline.py:117 + config.py:103
     # QUOTA_MD_TO_CSV_DIR = EXTERNAL_ROOT / "quota_md_to_csv_v2"）。守卫必须与
@@ -694,9 +709,8 @@ def _guard_has_parser(province: str | None) -> tuple[bool, str]:
     if extractor_dir.is_dir() and (extractor_dir / "extract_quota.py").exists():
         return True, f"extractor 已落地: {extractor_dir}"
     return False, (
-        f"未在 {extractor_dir} 找到 extract_quota.py. "
-        f"如需支持该省, 在 quota/parser/external/quota_md_to_csv_v2/extractors/{province}/ "
-        f"落地 extractor (参照 extractors/sc/), 重启 worker 即可. "
+        f"省份 '{province}' 已注册但 {extractor_dir}/extract_quota.py 不存在. "
+        f"按 EXTRACTOR_ONBOARDING.md §3 落地脚本, 重启 worker 即可. "
         f"另需同步在 quota-md-to-csv-v2/extractors/{province}/ 落副本 (CLI 链路)."
     )
 

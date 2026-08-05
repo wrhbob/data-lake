@@ -68,6 +68,7 @@ def get_database_url() -> str:
 PROVINCE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "sc": ("四川", "川建"),
     "cq": ("重庆",),
+    "gd": ("广东", "粤"),  # v0.13 已落地 extractors/gd/
     # v0.4 §9 #15: default 作为 sentinel,不绑定省份关键词;用于 web 侧传"无偏好"。
     # extract_quota._load_province_module 不接受 — pipeline 必须在此之前收敛。
     "default": (),
@@ -76,6 +77,7 @@ PROVINCE_KEYWORDS: dict[str, tuple[str, ...]] = {
 PROVINCE_NAMES: dict[str, str] = {
     "sc": "四川",
     "cq": "重庆",
+    "gd": "广东",
 }
 
 # v0.4 §9 #15: 显式 sentinel 名;pipeline.py 在调省份子脚本前收敛到该值,

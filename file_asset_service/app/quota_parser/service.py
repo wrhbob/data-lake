@@ -30,7 +30,14 @@ logger = logging.getLogger(__name__)
 # key 前缀用 `quota/` 与 cost 域产物区分（cost 用 `cost/...`），共享同一桶命名空间
 PARSE_BUCKET_CANDIDATE = "cost-extract"   # candidate.xlsx / final.xlsx
 PARSE_BUCKET_REPORT = "cost-report"        # manifest.json / qa_report.{json,md}
-PROFILES = ("sichuan", "chongqing")
+# v0.13.1: 从 quota_api._VALID_PROFILES 派生（quota_api.py:1079，从 _UPLOAD_PROVINCE_MAP 派生,
+# 32 省含 guangdong 等). 与 quota_parser_worker._guard_has_parser + DB CHECK 三方对齐,
+# 单一真源. quota_api.py 全部 quota_parser 引用都是函数内 lazy import, 不存在 module 顶层循环.
+def _load_profiles() -> tuple[str, ...]:
+    from app.quota_api import _VALID_PROFILES
+    return tuple(sorted(_VALID_PROFILES))
+
+PROFILES = _load_profiles()
 PARSE_MOCK_ENV_VAR = "QUOTA_PARSE_MOCK"
 
 

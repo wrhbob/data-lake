@@ -90,11 +90,13 @@ from extractors._common import narrative_parser, xlsx_writer  # noqa: E402 必�
 PROVINCE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "sc": ("四川", "川建"),   # "川建" 兜底（部分老 PDF 路径用简称）
     "cq": ("重庆",),          # 重庆没有简称，路径必带"重庆"
+    "gd": ("广东", "粤"),     # v0.13 已落地 extractors/gd/
 }
 
 PROVINCE_NAMES: dict[str, str] = {
     "sc": "四川",
     "cq": "重庆",
+    "gd": "广东",
 }
 
 EXTRACTORS_DIR = HERE / "extractors"

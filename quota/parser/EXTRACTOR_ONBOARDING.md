@@ -30,13 +30,15 @@
 
 > ⚠️ **关键词不要用短名**：PROVINCE_KEYWORDS 走 `_resolve_province`（`pipeline.py:42-91`）的 stage 3 反查，`dict.items()` 按声明顺序遍历、`s in keywords` 命中即返回。短名（川 / 渝 / 豫 / 鄂 等）会被 PDF 内正文撞车，导致误判省份。如 x 省的 keyword 含"川"，会被先注册 sc 抢走。**至少 1 个全名（"湖北"），可加 1 个全名简称（"鄂"），但短名禁止做 keyword**。
 
-### Step 2 — 改 3 处注册表
+### Step 2 — 改 4 处注册表
 
 | # | 文件 | 改什么 |
 |---|---|---|
 | 2.1 | `quota/parser/quota_parser/config.py` L68-83 | `PROVINCE_KEYWORDS` (L68-74) + `PROVINCE_NAMES` (L76-79) + `PROVINCE_DEFAULT_KEY` (L83) |
 | 2.2 | `quota/parser/external/quota_md_to_csv_v2/extract_quota.py` L92-100 | 同 2.1（无 `default` sentinel） |
 | 2.3 | `quota/parser/external/quota-md-to-csv-v2/extract_quota.py` L68-76 | 同 2.2 |
+| 2.4 | `file_asset_service/app/quota_api.py` L1576-1581 | `{"sichuan", "chongqing"}` 硬编码 profile 白名单 → 改为 `_VALID_PROFILES`（从 `_UPLOAD_PROVINCE_MAP` 派生，32 省含新省）。**漏改此条**:即使 2.1-2.3 全改,`POST /parse` 带 `profile=guangdong` 仍被 422 INVALID_PROFILE 拒绝（worker 触发解析路径会卡在此处）。 |
+| 2.5 | `file_asset_service/app/quota_parser/service.py` L33 / L121 / L522 | `PROFILES = ("sichuan", "chongqing")` 硬编码白名单（L121/L522 两处 check 用同一变量）→ 改为从 `quota_api._VALID_PROFILES` 派生（与 2.4 共用单一真源，32 省）。**漏改此条**：即使 2.4 通过，仍在 `_trigger(archive, profile=...)` 内抛 `ValueError: profile 'x' 不在注册表 ['sichuan', 'chongqing']`，web 端转 422；错误消息"不在注册表"区别于 2.4 的"必须为 ... 或省略"。 |
 
 ```python
 # config.py (顶层 — 含 default sentinel)
@@ -165,6 +167,9 @@ rm -rf quota/parser/external/quota-md-to-csv-v2/extractors/x/
 |---|---|
 | 改注册表但 worker 还是 skipped_no_parser | 99% 双胞胎只改 1 份。守卫扫 underscore。 |
 | `UnsupportedProvinceError: 未知 province='x'. 接受: ...` | `_resolve_province`（`pipeline.py:89`）3 阶段都未命中。检查 `config.py:PROVINCE_KEYWORDS` 漏改或 keyword 太偏 |
+| `POST /parse` 带新省 profile 被 422 INVALID_PROFILE | `quota_api.py:1577` 硬编码 `{"sichuan", "chongqing"}` 白名单未升级（Step 2.4）。改为 `_VALID_PROFILES`（line 1079，32 省已派生）。**漏改此条**会让 worker 触发解析路径返回 422，archive 落 `failed_user` |
+| `trigger_parse` 抛 `ValueError: profile 'x' 不在注册表 ['sichuan', 'chongqing']` | `file_asset_service/app/quota_parser/service.py:33` 还有第二处硬编码白名单 `PROFILES = ("sichuan", "chongqing")`（Step 2.5）。L121/L522 两处 check 用同一变量。改为从 `quota_api._VALID_PROFILES` 派生（与 L1577 共用单一真源）。**漏改此条**即使 L1577 通过，仍在 `_trigger(archive, profile=...)` 内抛 422，错误消息是"不在注册表"（区别于 L1577 的"必须为 ... 或省略"） |
+| worker claim 显示 `profile=sichuan` 但 archive 实际是 gd/x/yu | `quota_api.py:1599` 历史硬编码 `profile=... or "sichuan"` fallback（body.profile + archive.parse_profile 都空时）。gd/x/yu 等非 sc/cq 省份会被错误 fallback 成 sichuan → worker 跑错省 extractor → 必然失败。改为「profile 缺省时按 province 推 default profile」(`_UPLOAD_PROVINCE_MAP[province][2]`)，province 推不出时 422 PROVINCE_NO_PROFILE。 |
 | pipeline 跑通但 CSV 空 | `extractors/x/extract_quota.py` 的 `SECTION_RE` 没匹配上 x 省章节格式。看 `--keep-csv` 产出的 `issues.md` |
 | 类型列下游识别错 | 写错"类型"列取值（必须 8 选 1：`段 / 定 / 工 / 料 / 配 / 机 / 综 / 主材`，见 `quota_md_to_csv_v2/SKILL.md §5`） |
 

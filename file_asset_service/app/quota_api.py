@@ -1573,11 +1573,23 @@ async def trigger_quota_parse(
                 province_value = _k
                 break
 
-    # (b) profile 白名单：仅 sichuan/chongqing；None = 沿用旧值
-    if profile is not None and profile not in {"sichuan", "chongqing"}:
+    # (a''') v0.13.1 fix: profile 缺省时按 province 推 default profile (替代历史硬编码 "sichuan" fallback,
+    #         让非四川省份不再被错误 fallback 成 sichuan → 跑错 extractor)
+    if not (profile or archive.parse_profile):
+        if province_value and province_value in _UPLOAD_PROVINCE_MAP:
+            profile = _UPLOAD_PROVINCE_MAP[province_value][2]  # tuple 第 3 列 = default profile
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail=f"PROVINCE_NO_PROFILE: 无法从 province={province_value!r} 推 profile (不在 _UPLOAD_PROVINCE_MAP)",
+            )
+
+    # (b) profile 白名单：用 _VALID_PROFILES (32 省, 从 _UPLOAD_PROVINCE_MAP 派生,
+    #     已含 guangdong/xi/hu/yu 等) — 与 quota_parser_worker._guard_has_parser + DB CHECK 保持单一真源
+    if profile is not None and profile not in _VALID_PROFILES:
         raise HTTPException(
             status_code=422,
-            detail=f"INVALID_PROFILE: {profile!r}. 必须为 'sichuan' | 'chongqing' 或省略",
+            detail=f"INVALID_PROFILE: {profile!r}. 必须为 {sorted(_VALID_PROFILES)} 之一或省略",
         )
 
     # (1) 推 archive.parse_status='parsing'（已有 _trigger）—— 必须在入队前 commit,
@@ -1595,7 +1607,7 @@ async def trigger_quota_parse(
         job = enqueue_parse_job(
             session,
             archive_id,
-            profile=profile or archive.parse_profile or "sichuan",
+            profile=profile or archive.parse_profile,  # v0.13.1: 已按 province 推 default profile (L1583-1592)
             created_by=(body or {}).get("created_by"),
             mock=is_parse_mock(),
             ocr_api_url=os.environ.get("OCR_URL", "http://172.16.20.23:8000"),
