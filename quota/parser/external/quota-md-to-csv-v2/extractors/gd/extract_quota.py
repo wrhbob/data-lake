@@ -37,9 +37,12 @@ SECTION_RE = re.compile(
 SECTION_RE2 = re.compile(
     r"^\s?([A-Z](?: ?\.? ?\d+)*)(?:\s+|[　])(.+?)\s*$"        # 纯文本编号行（行首/编号内最多 1 空格）
 )
-# gd (广东 2018 C1 机械设备安装) 项目编码格式: C{章}-{节}-{子}
-# (e.g. C1-2-1, C1-4-119); 3 段数字 + 双连字符; 与 sc/cq 的 AB1234 不同
-PROJECT_ID_RE = re.compile(r"^C(\d+)-(\d+)-(\d+)$")
+# gd 项目编码: {字母}{章}-{节}-{子}
+# - 字母是 PDF 分册代号 (A=房屋建筑与装饰 / B=装饰 / C=机械设备安装 / ...)
+#   v0.13 验证用的是 C 分册, 现扩展到任意字母 (A 分册房屋上册 v0.13.2 验证通过)
+# - 容忍单空格 (OCR 偶尔在字母/数字间留空格, 如 "A 1-2-1" / "A1 -2-1")
+# - m.group(0) 取完整串 (下游用 pid 作 key, 见 _discover_project_ids L239)
+PROJECT_ID_RE = re.compile(r"^([A-Z])\s*(\d+)\s*-\s*(\d+)\s*-\s*(\d+)$")
 
 # TOC 行: 末尾是 ASCII 点 + 页码（OCR 把目录的 `....19` 写在节名尾部）
 # 例: `C.1.1.1 桥式起重机.....19`、`C.1.4.4 小型杂货电梯.....143`
@@ -234,8 +237,8 @@ def find_projects(grid, total_cols: int) -> list[dict]:
             txt = row[c].strip()
             m = PROJECT_ID_RE.fullmatch(txt)
             if m:
-                # gd 编码 C{章}-{节}-{子} 用 m.group(0) 取完整串
-                # (PROJECT_ID_RE 含 3 个 capture group, 不能只取 group(1))
+                # gd 编码 {字母}{章}-{节}-{子} 用 m.group(0) 取完整串
+                # (PROJECT_ID_RE 含 4 个 capture group: 字母/章/节/子, 不能只取 group(1))
                 pid = m.group(0)
                 if pid not in seen:
                     seen.add(pid)
