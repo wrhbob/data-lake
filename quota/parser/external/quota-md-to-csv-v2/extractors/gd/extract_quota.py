@@ -295,15 +295,48 @@ def find_section_rows(grid, total_cols: int) -> dict:
     return sections
 
 
-def find_cost_rows(grid) -> dict:
+def find_cost_rows(grid, raw_rows=None) -> dict:
     """识别 人工费 / 材料费 / 施工机具使用费(机械费) / 管理费 / 利润 / 一般风险费 行；
     兼容 OCR 切分（去全部空白后匹配）.
 
     与四川版本的差异：
       - "机械费" 或 "施工机具使用费" 都识别为 machine（重庆 2018 版用新命名）
       - 增加 "一般风险费" → risk_fee 识别（重庆独有）
+
+    v0.13.2 新增：multi-label 单 cell 拆分
+    - 广东 2018 PDF A 分册"其中"块的 4 个 label (人工费/材料费/机具费/管理费)
+      经常被 OCR 合并到 1 个 <td rowspan="4" colspan="4"> 细胞
+      (例 A1-1-119: "人工费(元)材料费(元)机具费(元)管理费(元)").
+    - 原逻辑把 4 个 label 全指到 row=r (即 row4), get_cost_values 读到的值是人工费
+      → 4 个 cost 行重复, management=人工费值 (典型错误).
+    - 修复: 检测单 cell 含 ≥2 label + cell.rowspan ≥ label 数, 按 LABEL_ORDER 顺序
+      拆到 r, r+1, r+2, ... (顺序: 人工费 → 材料费 → 机具费 → 管理费, 与 cell 文本顺序一致).
+    - C 分册每个 label 独立 <td>, 单 cell 仅 1 label, 不触发 multi-label pass,
+      Pass 2 fallback 行为不变 (C 分册回归 39732 行 不变).
     """
+    LABEL_ORDER = [("labor", "人工费"), ("material_fee", "材料费"),
+                   ("machine", "机具费"), ("management", "管理费")]
+
     cost_rows: dict = {}
+
+    # ── Pass 1 · multi-label 单 cell 拆分 ───────────────────────────────
+    # 广东 A 分册场景: OCR 把"人工费(元)材料费(元)机具费(元)管理费(元)"塞进 1 个
+    # rowspan=4 colspan=4 cell, 该 cell 所在行 r 的 grid 里 r..r+3 行 col1..col4
+    # 都被 forward-fill 成同一段文字. 若不拆分, 4 个 cost_row 都指 r,
+    # get_cost_values 都读到 r 行的"人工费"列值 → 输出重复.
+    # 修复: 检测到此场景, 按 LABEL_ORDER 顺序把 4 label 分配到 r, r+1, r+2, r+3.
+    if raw_rows is not None:
+        for r, cells in enumerate(raw_rows):
+            for cell in cells:
+                cell_text_norm = re.sub(r"\s+", "", cell["text"])
+                matched = [(k, kw) for k, kw in LABEL_ORDER if kw in cell_text_norm]
+                if len(matched) >= 2 and cell["rowspan"] >= len(matched):
+                    for i, (k, _kw) in enumerate(matched):
+                        if k not in cost_rows:
+                            cost_rows[k] = r + i
+                    break  # 一行只处理一次 multi-label cell
+
+    # ── Pass 2 · 原 fallback (label 在各自独立 row 的场景, 含 C 分册回归) ──
     for r, row in enumerate(grid):
         full = " ".join(c.strip() for c in row if c.strip())
         full_norm = re.sub(r"\s+", "", full)
@@ -664,7 +697,9 @@ def extract_table(html_text: str, working_content: str, unit_fallback: str,
                 })
 
     sections = find_section_rows(grid, total_cols)
-    cost_rows = find_cost_rows(grid)
+    # v0.13.2: 透传 raw_rows 让 find_cost_rows 能检测 multi-label 单 cell 拆分
+    # (广东 A 分册"其中"块的 4 label 塞 1 cell 场景)
+    cost_rows = find_cost_rows(grid, raw_rows=raw_rows)
 
     # 项目名：找到 col0 为 "项目" / "项 目"（四川/重庆型）或 "子目名称"（广东型）的行区域
     project_names: list[str] = []
