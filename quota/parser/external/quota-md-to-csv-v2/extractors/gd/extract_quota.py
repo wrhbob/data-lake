@@ -31,8 +31,21 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 
 # ---------- 常量 ----------
+# 段标题解析 (v0.13.3 自适应延长 + 容忍单空格)
+# - 编号深度自适应: A.1 / A.1.1 / A.1.1.1 / A.1.1.1.1 都支持 (用户 2026-08-05 要求)
+# - 编号内单空格容忍: "A .1.5" / "A.1 .5" / "A.1. 5" 都识别为 A.1.5 (OCR 抖动)
+# - 标题 3 种形式:
+#   1. SECTION_RE:       ## A.1.5 混凝土工程            (ID + 单/全角空格 + 标题)
+#   2. SECTION_RE_COMPACT: ## A.1.5混凝土工程            (紧凑,无空格分隔,常见于目录行尾)
+#   3. SECTION_RE_HEAD_ONLY: ## A.1.5                    (仅 ID, 标题在下一行; OCR 章节首页断行)
 SECTION_RE = re.compile(
     r"^\s?##\s+([A-Z](?: ?\.? ?\d+)*)(?:\s+|[　])(.+?)\s*$"  # 二级标题（行首/编号内最多 1 空格）
+)
+SECTION_RE_COMPACT = re.compile(
+    r"^\s?##\s+([A-Z](?: ?\.? ?\d+)*)([^\s#　\d.].*?)\s*$"  # 紧凑型: ID 后无空格直接跟标题 (常见 TOC)
+)
+SECTION_RE_HEAD_ONLY = re.compile(
+    r"^\s?##\s+([A-Z](?: ?\.? ?\d+)*)\s*$"                  # 仅 ID, 标题在下一行 (章节首页 OCR 断行)
 )
 SECTION_RE2 = re.compile(
     r"^\s?([A-Z](?: ?\.? ?\d+)*)(?:\s+|[　])(.+?)\s*$"        # 纯文本编号行（行首/编号内最多 1 空格）
@@ -982,21 +995,65 @@ def extract_table(html_text: str, working_content: str, unit_fallback: str,
 
 # ---------- 段行提取 ----------
 def extract_sections_before(text: str) -> list[tuple[str, str]]:
-    """从文本中提取段标记，返回 [(编号, 名称), ...]."""
+    """从文本中提取段标记，返回 [(编号, 名称), ...].
+
+    v0.13.3 新增 3 种形式的标题识别（应对广东 OCR 抖动）:
+      - 标准型: ## A.1.5 混凝土工程         (SECTION_RE)
+      - 紧凑型: ## A.1.5混凝土工程          (SECTION_RE_COMPACT, 常见于 TOC 行尾)
+      - 孤标型: ## A.1.5 + 下一行标题        (SECTION_RE_HEAD_ONLY, 章节首页 OCR 断行)
+    顺序: 先试标准型, 再试紧凑型, 最后试孤标型(peek 下一行).
+    """
     sections: list[tuple[str, str]] = []
-    for line in text.splitlines():
-        line = line.strip()
+    lines = text.splitlines()
+    n = len(lines)
+    i = 0
+    while i < n:
+        line = lines[i].strip()
+
         # 跳过目录行（节名尾部带 `....19` 页码）
         if TOC_PAGE_TAIL.search(line):
+            i += 1
             continue
+
+        matched = False
+        # Pass 1: 标准型 ## A.X.Y 标题
         m = SECTION_RE.match(line)
         if m:
-            # 编号内的空格（来自 OCR 抖动如 "L. 8"）写入时标准化为无空格
             sections.append((re.sub(r"\s+", "", m.group(1)), m.group(2).strip()))
-            continue
-        m = SECTION_RE2.match(line)
-        if m:
-            sections.append((re.sub(r"\s+", "", m.group(1)), m.group(2).strip()))
+            matched = True
+        else:
+            # Pass 2: 紧凑型 ## A.X.Y标题 (无空格分隔)
+            m = SECTION_RE_COMPACT.match(line)
+            if m:
+                title = m.group(2).strip()
+                # title 非空才算 (避免 ## A.1.6 后是空字符串被误识别)
+                if title:
+                    sections.append((re.sub(r"\s+", "", m.group(1)), title))
+                    matched = True
+            if not matched:
+                # Pass 3: 孤标型 ## A.X.Y (标题在下一行)
+                m = SECTION_RE_HEAD_ONLY.match(line)
+                if m:
+                    # peek 下一行, 找第一个非空且非 `##` 开头的行作为 title
+                    j = i + 1
+                    while j < n and not lines[j].strip():
+                        j += 1
+                    if j < n:
+                        next_line = lines[j].strip()
+                        if next_line and not next_line.startswith("#"):
+                            # 排除 TOC 行 (标题里含页码)
+                            if not TOC_PAGE_TAIL.search(next_line):
+                                sections.append((re.sub(r"\s+", "", m.group(1)), next_line))
+                                matched = True
+                                i = j  # 跳过标题行,避免被下一轮当独立章节
+
+        if not matched:
+            # Pass 4: 纯文本编号行 (SECTION_RE2)
+            m = SECTION_RE2.match(line)
+            if m:
+                sections.append((re.sub(r"\s+", "", m.group(1)), m.group(2).strip()))
+
+        i += 1
     return sections
 
 
