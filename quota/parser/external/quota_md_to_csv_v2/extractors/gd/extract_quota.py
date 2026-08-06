@@ -1133,11 +1133,24 @@ def process_md_file(md_path: Path) -> tuple[list[list[str]], list[dict]]:
                     if a_id not in body_emitted and a_title:
                         expanded_secs.append((a_id, a_title))
                         body_emitted.add(a_id)
-            expanded_secs.append((sec_id, sec_name))
-            # v0.13.4: 仅在 body 阶段 add 到 body_emitted, 否则 TOC 阶段会把所有父段都标 '已 emit',
-            #          导致 body 阶段 A.1.3.1 触发时, A.1.3 误判为 '已 emit' 而跳过祖先补缺
+            # v0.13.7 (回滚 v0.13.6 + 修 Bug B):
+            #   - TOC 阶段: 无条件 emit (让 toc_titles 写入; expanded_secs 走状态机 emit 段行)
+            #   - body 阶段: legit emit 也要查 body_emitted (修 Bug B)
+            #     否则 body prefix 里 ## A.1.13 + ## A.1.13.1 连 emit 时,
+            #     A.1.13.1 触发 walk A.1.13 → emit 1 次 (写到 body_emitted);
+            #     接着 ## A.1.13 legit emit 又来 1 次 → 重复 1 行 (Bug B, 中册 r=2500+r=2501)
+            #   - Bug A (TOC + body 跨阶段 dup 1 个段行) 保留可接受:
+            #     A.1.12 在 TOC emit (r=68) 后, body A.1.12.2 触发 walk A.1.12 → body emit 1 次 (r=157)
+            #     → quota 表跟在 r=157 后面, 归类正确 (A.1.12); 不修避免 quota 错位归到 A.1.27
+            #   - 1 个 dup 段行 (Bug A) 人工审核阶段删 1 行即可, 远比 quota 错位好处理
             if is_body:
-                body_emitted.add(sec_id)
+                if sec_id not in body_emitted:
+                    expanded_secs.append((sec_id, sec_name))
+                    body_emitted.add(sec_id)
+                # else: skip (Bug B 去重 — A.1.13.1 触发 walk 已 emit 过的 A.1.13 时不再补 emit)
+            else:
+                # TOC 阶段: 无条件 emit (让 toc_titles 写入; 不写 body_emitted, 否则 body 阶段会全误判已 emit)
+                expanded_secs.append((sec_id, sec_name))
 
         # v0.13.4: TOC 阶段收集 toc_titles (从已 emit 的条目; 仅保留 '干净' 标题, 即不是 page-tail 衍生)
         if not is_body:

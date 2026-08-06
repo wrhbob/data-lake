@@ -1096,9 +1096,13 @@ def process_md_file(md_path: Path) -> tuple[list[list[str]], list[dict]]:
     seen_pids: set[str] = set()  # v0.9 跨表已 emit 的 project_id, 用于续表检测
     # v0.11 物理接续: 记录每个 PID 主表 emit 段的 [blank] 行索引, 续表行插入到 [blank] 之前
     pid_blank_idx: dict[str, int] = {}
-    # v0.13.4: TOC 标题库 + body 已 emit 集合
-    #   - toc_titles: 从第 1 个 prefix (TOC area) 收集的 id→title, 用于 body 缺父段时 carry-forward
-    #   - body_emitted: body 阶段已 emit 的段 id (子段触发时, 走父链补缺)
+    # v0.13.7 (回滚 v0.13.6 + 修 Bug B): 双集合 toc_titles + body_emitted
+    #   - toc_titles: 从 TOC area 收集的 id→title, 用于 body 缺父段时 carry-forward 取标题
+    #   - body_emitted: 仅 body 阶段写入, 用于 body 内同前缀重复段去重 (Bug B: A.1.13 r=2344/2345)
+    #   - v0.13.6 all_emitted 跨 TOC+body 去重已被证伪: A.1.12 在 TOC emit 后,
+    #     body A.1.12.2.x 的 182 个 quota 表全部归到 last_section_id='A.1.27' (错位到 A.1.27)
+    #   - Bug A (TOC + body 跨阶段 dup 1 个段行, A.1.12 r=68 + r=157) 保留可接受:
+    #     quota 表跟在 r=157 的 A.1.12 后面 → 归类正确; 1 行 dup 人工审核阶段删即可
     toc_titles: dict[str, str] = {}
     body_emitted: set[str] = set()
 
@@ -1133,11 +1137,18 @@ def process_md_file(md_path: Path) -> tuple[list[list[str]], list[dict]]:
                     if a_id not in body_emitted and a_title:
                         expanded_secs.append((a_id, a_title))
                         body_emitted.add(a_id)
-            expanded_secs.append((sec_id, sec_name))
-            # v0.13.4: 仅在 body 阶段 add 到 body_emitted, 否则 TOC 阶段会把所有父段都标 '已 emit',
-            #          导致 body 阶段 A.1.3.1 触发时, A.1.3 误判为 '已 emit' 而跳过祖先补缺
+            # v0.13.7 (Bug B 修复): body 阶段 legit emit 也要查 body_emitted
+            #   - body prefix 里 ## A.1.13 + ## A.1.13.1 连 emit 时,
+            #     A.1.13.1 触发 walk A.1.13 → emit 1 次 (写到 body_emitted);
+            #     接着 ## A.1.13 legit emit 又来 1 次 → 重复 1 行 (Bug B)
+            #   - 修复: body 阶段 legit emit 查 body_emitted, 已 emit 跳过
+            # v0.13.7: TOC 阶段无条件 emit (让 toc_titles 写入 + 状态机走段行 emit)
             if is_body:
-                body_emitted.add(sec_id)
+                if sec_id not in body_emitted:
+                    expanded_secs.append((sec_id, sec_name))
+                    body_emitted.add(sec_id)
+            else:
+                expanded_secs.append((sec_id, sec_name))
 
         # v0.13.4: TOC 阶段收集 toc_titles (从已 emit 的条目; 仅保留 '干净' 标题, 即不是 page-tail 衍生)
         if not is_body:
