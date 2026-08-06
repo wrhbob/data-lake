@@ -1110,7 +1110,20 @@ def process_md_file(md_path: Path) -> tuple[list[list[str]], list[dict]]:
     #     不依赖 r=236 carry-fwd A.1.12. 跳过 r=236 不影响 quota 归类.
     #   - 中册 r=234 carry-fwd A.1.12 是连续子段 A.1.12.2 在 body 阶段首次出现时触发,
     #     toc_titles['A.1.12'] 已有 '¥湤' → v0.13.9 跳过 emit; quota 表归 A.1.12.2 (r=235)
+    # v0.13.10: 修复 v0.13.9 副作用 — A.1.19 章段行 body 区缺失
+    #   - v0.13.9 carry-fwd 跳过条件过严: anc_id 在 toc_titles 已有 → 跳过.
+    #     但中册 A.1.19 章段头只在 TOC 阶段 prefix (L1049) 出现 1 次, body 区无 legit emit,
+    #     导致 walk anc A.1.19 时跳过 → body 区 r=N 没有 A.1.19 章段行 (xlsx 大纲缺一段).
+    #   - v0.13.10 思路: 维护 toc_emit_count 记录 toc 阶段每个 sec_id 的实际 emit 次数.
+    #     carry-fwd 时 anc_id toc 阶段 emit >= 2 次 (说明 toc 阶段 prefix 内出现多次) → 跳过
+    #     (避免 v0.13.7 A.1.12 第 3 次). emit <= 1 次 → 允许 carry-fwd emit, 补 body 区章段行.
+    #   - 验证:
+    #     A.1.12: toc 阶段 prefix 内 ## A.1.12 出现 2 次 (L68 + L1390) → count=2 → 跳过 ✅
+    #     A.1.19: toc 阶段 prefix 内 ## A.1.19 出现 1 次 (L1049) → count=1 → emit 补 ✅
+    #     A.1.18: toc 阶段 prefix 内 ## A.1.18 出现 1 次 (L1030) → count=1 → 理论 emit;
+    #             但 body 区 L5023 legit emit 已经先入 body_emitted → walk 时跳过 → 不重复 ✅
     toc_titles: dict[str, str] = {}
+    toc_emit_count: dict[str, int] = {}  # v0.13.10 新增: toc 阶段每个 sec_id 的实际 emit 次数
     body_emitted: set[str] = set()
 
     for table_idx, m in enumerate(table_matches):
@@ -1142,8 +1155,13 @@ def process_md_file(md_path: Path) -> tuple[list[list[str]], list[dict]]:
                 #          时仍 emit 会产生 '段 A (空)' 垃圾行; 让子段自 emit 即可)
                 # v0.13.9: anc_id 在 toc_titles 里 (干净标题已收录) → 跳过 carry-fwd emit
                 #          因为 TOC 阶段已经 emit 过 (toc_titles 写入条件就是 toc 阶段 emit 的副作用)
+                # v0.13.10: 改用 toc_emit_count 判定 (见 dict 声明处说明)
+                #          - count == 1 (toc 阶段 prefix 内 anc_id 只出现 1 次) → 允许 carry-fwd emit,
+                #            补 body 区章段行 (修复 A.1.19 缺失)
+                #          - count >= 2 (toc 阶段 prefix 内 anc_id 出现多次, 即 A.1.12 这种
+                #            "目录 + body 段头溢出"情况) → 跳过 carry-fwd, 避免 v0.13.7 第 3 次
                 for a_id, a_title in ancestors:
-                    if a_id not in body_emitted and a_title and a_id not in toc_titles:
+                    if a_id not in body_emitted and a_title and toc_emit_count.get(a_id, 0) <= 1:
                         expanded_secs.append((a_id, a_title))
                         body_emitted.add(a_id)
             # v0.13.7 (Bug B 修复): body 阶段 legit emit 也要查 body_emitted
@@ -1160,6 +1178,8 @@ def process_md_file(md_path: Path) -> tuple[list[list[str]], list[dict]]:
             else:
                 # TOC 阶段: 无条件 emit (让 toc_titles 写入; 不写 body_emitted, 否则 body 阶段会全误判已 emit)
                 expanded_secs.append((sec_id, sec_name))
+                # v0.13.10: 累加 toc 阶段实际 emit 次数 (供 body walk 判定 carry-fwd 是否需要 emit)
+                toc_emit_count[sec_id] = toc_emit_count.get(sec_id, 0) + 1
 
         # v0.13.4: TOC 阶段收集 toc_titles (从已 emit 的条目; 仅保留 '干净' 标题, 即不是 page-tail 衍生)
         if not is_body:
