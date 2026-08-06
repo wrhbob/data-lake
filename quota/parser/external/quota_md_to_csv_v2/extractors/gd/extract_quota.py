@@ -969,7 +969,10 @@ def extract_table(html_text: str, working_content: str, unit_fallback: str,
                 else:
                     v = qty_f * price_f
                 v_str = f"{v:.2f}".rstrip("0").rstrip(".") if "." in f"{v:.2f}" else f"{v:.2f}"
-            if not is_proportion:
+            # v0.13.13: 附项不参与定行总验证 (不 append 到 sub_verifications)
+            #   例: 余土外运 m³ 是工程量附加项, 不属于定额子目基价构成
+            #   v_str 仍按 qty × price 计算 (保留 col 8 显示), 但定行 verify 不累加
+            if not is_proportion and not mat.get("is_appendix"):
                 sub_verifications.append(to_float(v_str))
             row_type = mat.get("category", "料")
             if row_type == "料" and is_proportion:
