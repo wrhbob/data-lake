@@ -421,6 +421,7 @@ def parse_material_row(cells: list[dict], start_cols: list[int], project_cols: l
     raw_name = first_cell["text"].strip()
 
     category = "料"
+    is_appendix = False  # v0.13.12: 附项标记 — 排序时插在「料」末、「机」前
     # cq 特有：col0="人工" 单独作为分组标签（重庆 2018 版），列结构：
     #   col0=分类(人工) col1=编码 col2=名字 col3=单位 col4=单价 col5=消耗量
     # 与料/机行的列结构（col0=名字 col1=单位 col2=单价 col3=消耗量）不同，
@@ -471,6 +472,8 @@ def parse_material_row(cells: list[dict], start_cols: list[int], project_cols: l
         else:
             # "附项" 不含"机", 自动落到"料"; 后续 L479 99xx 编码检查不会误转"机"
             category = "机" if "机" in raw_norm else "料"
+        # v0.13.12: "附项" emit 时插在「料」末、「机」前 (PDF 视觉顺序: 材料 → 机具 → 附项)
+        is_appendix = (raw_norm == "附项")
         nxt = sorted(
             (c for c in cell_positions
              if c["start_col"] > first_cell["end_col"] and c["text"].strip()),
@@ -578,6 +581,7 @@ def parse_material_row(cells: list[dict], start_cols: list[int], project_cols: l
         "is_other_material": is_other_material,
         "category": category,
         "is_proportion": is_proportion,
+        "is_appendix": is_appendix,  # v0.13.12: 附项位置标记
     }
 
 
@@ -928,6 +932,19 @@ def extract_table(html_text: str, working_content: str, unit_fallback: str,
             v = to_float(pmaterial_fee)
             v_str = f"{v:.2f}".rstrip("0").rstrip(".") if "." in f"{v:.2f}" else f"{v:.2f}"
             csv_rows.append(["料", "", "材料费", "", "元", pmaterial_fee, "1.00", v_str, "", ""])
+
+        # v0.13.12: 附项位置排序 — 料(0) → 附项(1) → 机(2)
+        #   PDF 视觉顺序: 材料 → 机具 → 附项, 期望 emit 顺序: 材料 → 附项 → 机具
+        #   stable sort 同 priority 保持原顺序; "未计价"/"工"/"综" 不在此循环内
+        def _mat_emit_priority(m: dict) -> int:
+            if m["category"] == "未计价":
+                return -1  # 主材单独循环 (L910), 此处不会 emit
+            if m.get("is_appendix"):
+                return 1   # 附项
+            if m["category"] == "机":
+                return 2   # 机具
+            return 0       # 普通料/配
+        materials.sort(key=_mat_emit_priority)
 
         # 下方料/配/机/工行（普通材料、配、机械、人工）
         for mat in materials:
