@@ -48,7 +48,7 @@ SECTION_RE_HEAD_ONLY = re.compile(
     r"^\s?##\s+([A-Z](?: ?\.? ?\d+)*)\s*$"                  # 仅 ID, 标题在下一行 (章节首页 OCR 断行)
 )
 SECTION_RE2 = re.compile(
-    r"^\s?([A-Z](?: ?\.? ?\d+)*)(?:\s+|[　])([^\s\-<>\[({].*?)\s*$"  # 纯文本编号行（行首/编号内最多 1 空格；标题不能以箭头/括号开头，避免 mermaid 'A --> B[...]' 误识别）
+    r"^\s?([A-Z](?: ?\.? ?\d+)+)(?:\s+|[　])([^\s\-<>\[({].*?)\s*$"  # 纯文本编号行（v0.13.5: 组1 至少 1 个 .N 段, 拒 'W 单=L×B×H×R' 等单字母变量定义; 标题不能以箭头/括号开头, 拒 mermaid 'A --> B[...]'）
 )
 # gd 项目编码: {字母}{章}-{节}-{子}
 # - 字母是 PDF 分册代号 (A=房屋建筑与装饰 / B=装饰 / C=机械设备安装 / ...)
@@ -1127,8 +1127,10 @@ def process_md_file(md_path: Path) -> tuple[list[list[str]], list[dict]]:
                         anc_title = toc_titles.get(ancestor_id, "")
                         ancestors.append((ancestor_id, anc_title))
                 # 按从外到内 emit (A.1 在前, A.1.3 在后)
+                # v0.13.5: 标题为空则跳过 emit (中册无 TOC area, toc_titles 查不到 A/A.1
+                #          时仍 emit 会产生 '段 A (空)' 垃圾行; 让子段自 emit 即可)
                 for a_id, a_title in ancestors:
-                    if a_id not in body_emitted:
+                    if a_id not in body_emitted and a_title:
                         expanded_secs.append((a_id, a_title))
                         body_emitted.add(a_id)
             expanded_secs.append((sec_id, sec_name))
