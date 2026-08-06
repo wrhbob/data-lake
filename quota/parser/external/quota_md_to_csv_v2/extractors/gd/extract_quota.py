@@ -1096,9 +1096,20 @@ def process_md_file(md_path: Path) -> tuple[list[list[str]], list[dict]]:
     seen_pids: set[str] = set()  # v0.9 跨表已 emit 的 project_id, 用于续表检测
     # v0.11 物理接续: 记录每个 PID 主表 emit 段的 [blank] 行索引, 续表行插入到 [blank] 之前
     pid_blank_idx: dict[str, int] = {}
-    # v0.13.4: TOC 标题库 + body 已 emit 集合
-    #   - toc_titles: 从第 1 个 prefix (TOC area) 收集的 id→title, 用于 body 缺父段时 carry-forward
-    #   - body_emitted: body 阶段已 emit 的段 id (子段触发时, 走父链补缺)
+    # v0.13.9: 修复 v0.13.7 Bug A 残留 — carry-fwd 跳过 toc_titles 已收录的祖段
+    #   - v0.13.7 中册 A.1.12 emit 3 次 (r=68 TOC + r=157 TOC 重复 + r=236 carry-fwd):
+    #     md 第 1 张 <table> 之前 prefix 跨 TOC + body 两区 (中册 L1390 是 body 区章段头,
+    #     在 TOC 阶段 prefix L1-L1397 里), TOC 阶段无条件 emit 触发重复 (L686 + L1390).
+    #     后续 body A.1.12.2 walk 父链 A.1.12 → emit 第 3 次.
+    #   - v0.13.8 (废案): 试过 TOC 阶段 toc_seen 去重, 但跳过 L1390/L1392 emit
+    #     导致 quota A1-12-1 ~ A1-12-10 全部归到 last_section_id='A.1.27' (严重回归).
+    #   - v0.13.9 正确方向: TOC 阶段不动 (L1390/L1392 必须 emit, 否则 quota 归类错);
+    #     carry-fwd 时如果 anc_id 在 toc_titles 已有干净标题 (说明 TOC 阶段 emit 过),
+    #     跳过 emit, 避免 r=236 这种"祖段在 TOC 已 emit + carry-fwd 又来一次"重复.
+    #   - A.1.12.2 quota 表归类: 依赖 r=237 段 A.1.12.2 (body 阶段 legit emit),
+    #     不依赖 r=236 carry-fwd A.1.12. 跳过 r=236 不影响 quota 归类.
+    #   - 中册 r=234 carry-fwd A.1.12 是连续子段 A.1.12.2 在 body 阶段首次出现时触发,
+    #     toc_titles['A.1.12'] 已有 '¥湤' → v0.13.9 跳过 emit; quota 表归 A.1.12.2 (r=235)
     toc_titles: dict[str, str] = {}
     body_emitted: set[str] = set()
 
@@ -1129,20 +1140,18 @@ def process_md_file(md_path: Path) -> tuple[list[list[str]], list[dict]]:
                 # 按从外到内 emit (A.1 在前, A.1.3 在后)
                 # v0.13.5: 标题为空则跳过 emit (中册无 TOC area, toc_titles 查不到 A/A.1
                 #          时仍 emit 会产生 '段 A (空)' 垃圾行; 让子段自 emit 即可)
+                # v0.13.9: anc_id 在 toc_titles 里 (干净标题已收录) → 跳过 carry-fwd emit
+                #          因为 TOC 阶段已经 emit 过 (toc_titles 写入条件就是 toc 阶段 emit 的副作用)
                 for a_id, a_title in ancestors:
-                    if a_id not in body_emitted and a_title:
+                    if a_id not in body_emitted and a_title and a_id not in toc_titles:
                         expanded_secs.append((a_id, a_title))
                         body_emitted.add(a_id)
-            # v0.13.7 (回滚 v0.13.6 + 修 Bug B):
-            #   - TOC 阶段: 无条件 emit (让 toc_titles 写入; expanded_secs 走状态机 emit 段行)
-            #   - body 阶段: legit emit 也要查 body_emitted (修 Bug B)
-            #     否则 body prefix 里 ## A.1.13 + ## A.1.13.1 连 emit 时,
+            # v0.13.7 (Bug B 修复): body 阶段 legit emit 也要查 body_emitted
+            #   - body prefix 里 ## A.1.13 + ## A.1.13.1 连 emit 时,
             #     A.1.13.1 触发 walk A.1.13 → emit 1 次 (写到 body_emitted);
-            #     接着 ## A.1.13 legit emit 又来 1 次 → 重复 1 行 (Bug B, 中册 r=2500+r=2501)
-            #   - Bug A (TOC + body 跨阶段 dup 1 个段行) 保留可接受:
-            #     A.1.12 在 TOC emit (r=68) 后, body A.1.12.2 触发 walk A.1.12 → body emit 1 次 (r=157)
-            #     → quota 表跟在 r=157 后面, 归类正确 (A.1.12); 不修避免 quota 错位归到 A.1.27
-            #   - 1 个 dup 段行 (Bug A) 人工审核阶段删 1 行即可, 远比 quota 错位好处理
+            #     接着 ## A.1.13 legit emit 又来 1 次 → 重复 1 行 (Bug B)
+            #   - 修复: body 阶段 legit emit 查 body_emitted, 已 emit 跳过
+            # v0.13.9: TOC 阶段无条件 emit 保留 (L1390/L1392 必须 emit, 否则 quota 归类错)
             if is_body:
                 if sec_id not in body_emitted:
                     expanded_secs.append((sec_id, sec_name))
