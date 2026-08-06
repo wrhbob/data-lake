@@ -460,12 +460,16 @@ def parse_material_row(cells: list[dict], start_cols: list[int], project_cols: l
         }
     # v3 新增："未计价"作为 col0 分组标签（与"材料"/"机械"同级），识别后 category="未计价"
     # gd 2018: "机具" 也是分组标签 (广东 PDF 用「机具」二字, cq 只有「机」「机械」)
+    # gd 2018: "附项" 也是分组标签 (园林绿化工程 PDF, 例: 04090135 余土外运 m³);
+    #         按"料"归类 + 计入 verify (余土外运是工程量附加项, 与主材类似消耗 m³)
     elif raw_name in ("材", "料", "机", "机具", "材 料", "材料", "机 具", "机 械", "料 料", "机械",
-                    "未计价", "未 计 价", "未 计价", "未计 价"):
+                    "未计价", "未 计 价", "未 计价", "未计 价",
+                    "附项", "附 项", "附  项"):
         raw_norm = raw_name.replace(" ", "")
         if raw_norm == "未计价":
             category = "未计价"
         else:
+            # "附项" 不含"机", 自动落到"料"; 后续 L479 99xx 编码检查不会误转"机"
             category = "机" if "机" in raw_norm else "料"
         nxt = sorted(
             (c for c in cell_positions
