@@ -63,19 +63,20 @@ PROJECT_ID_RE = re.compile(r"^([A-Z])\s*(\d+)\s*-\s*(\d+)$")
 # 2. 节:           "一、xx" / "一、 xx"   (编号和顿号之间允许空格, 含全角括号容忍)
 # 3. 小节:         "1.挖土方" / "1. 挖土方" (允许半角/全角点和空格)
 # 4. 小小节:       "(1)人工挖一般土方" / "（1）人工挖一般土方" / "()人工挖一般土方" / "（ ）人工挖一般土方"
-#                  (空括号 → 编号默认 1, 编码末尾加 "." 留给人工审核)
-# hu md 里所有章节标题都带 markdown ## / ### 前缀(ocr 输出), 正则必须容忍
-# 前缀模式: 可选 1-6 个 # + 空白, 行首匹配
-_SECTION_PREFIX = r"^\s*#{1,6}\s*"
+#                  (空括号 → 编号固定为 _NUM_MISSING("X"), 留人工审核, 无末尾点)
+# v0.14.3: 不再以 markdown # 前缀为匹配依据 — OCR 对 # 输出极不一致, 实测真实定额体
+#   大部分节/小节/小小节行不带 # (节 71/115、小节 156/171、小小节 102/115 无 #)。
+#   统一按内容匹配; # 只做可选容忍 (0-6 个), 噪音靠下游验证规则过滤.
+_SECTION_PREFIX = r"^\s*#{0,6}\s*"
 
 SECTION_ZH_CHAPTER_RE = re.compile(_SECTION_PREFIX + r"第\s*([一-龥]{1,3})\s*章\s*(.*?)\s*$")
 SECTION_ZH_SECTION_RE = re.compile(_SECTION_PREFIX + r"([一-龥]{1,3})\s*[、,]\s*(.+?)\s*$")
 SECTION_ZH_SUBSECTION_RE = re.compile(_SECTION_PREFIX + r"(\d{1,3})\s*[\.．]\s*([^\.]+?)\s*$")
-# 小小节: group(1) = 数字 (可能为空字符串 → 默认 1), group(2) = 名称
+# 小小节: group(1) = 数字 (可能为空字符串 → 编号固定 _NUM_MISSING "X"), group(2) = 名称
 SECTION_ZH_SUBSUBSECTION_RE = re.compile(
     _SECTION_PREFIX + r"[\(【（]\s*(\d*)\s*[\)】）]\s*(.+?)\s*$"
 )
-# 残括号型: ()xx / （）xx / ( )xx / (  )xx (用户要求: 括号里无数字 → 默认 1)
+# 残括号型: ()xx / （）xx / ( )xx / (  )xx (用户要求: 括号里无数字 → 编号固定 X)
 SECTION_ZH_SUBSUBSECTION_EMPTY_RE = re.compile(
     _SECTION_PREFIX + r"[\(【（]\s*[\)】）]\s*(.+?)\s*$"
 )
@@ -344,11 +345,22 @@ def find_section_rows(grid, total_cols: int) -> dict:
                          "基价(元)" in full_text or
                          "基价（元）" in full_text or
                          "综 合 基 价" in full_text)
+            # hu 湖北 2024: 综合基价行叫 "全费用(元)" (label 独特, 行内只要 ≥1 数字即认定)
+            #   多列子目表: <td colspan="4">全费用(元)</td><td>v1</td>...
+            #   单列子目表: <td colspan="3">全费用(元)</td><td>v1</td>
+            #   行内无数字的描述行 (如说明文字) 不匹配, 避免误命中
+            is_full_cost = ("全费用(元)" in full_text or
+                            "全费用（元）" in full_text or
+                            "全费用" in full_text)
+            row_has_number = any(
+                re.match(r"^[\d,.\s]+$", c.strip())
+                for c in row if c.strip()
+            )
             has_value = any(
-                re.match(r"^[\d,.\s ]+$", c.strip())
+                re.match(r"^[\d,.\s]+$", c.strip())
                 for c in row[4:] if c.strip()
             )
-            if has_label and has_value:
+            if (has_label and has_value) or (is_full_cost and row_has_number):
                 sections["composite"] = r
 
         if col0 in ("其 中", "其中") and "labor_start" not in sections:
@@ -434,7 +446,11 @@ def find_cost_rows(grid, raw_rows=None) -> dict:
         # hu 湖北 2018: 识别 "费用" 行 (不是玻璃里的"管理费"或"利润", 而是"费用"独立行)
         #   例: "费用(元) 3385.17" 出现在"机械费"和"增值税"之间
         #   排除词: "管理费"/"利润" 已含 "费" 字, 但这些字段另外有完整词
-        if "fee" not in cost_rows and "费用" in full_norm and "管理费" not in full_norm:
+        #   v0.14.4: 必须排除 "全费用(元)" 行 —— "全费用" 字面含 "费用",
+        #     否则 cost_rows["fee"] 错指 全费用行, 真实"费用"值丢失
+        #     (全费用 已在 find_section_rows 识别为 composite = 定额总价)
+        if ("fee" not in cost_rows and "费用" in full_norm
+                and "管理费" not in full_norm and "全费用" not in full_norm):
             cost_rows["fee"] = r
         # hu 湖北 2018: 识别 "增值税" 行
         if "vat" not in cost_rows and "增值税" in full_norm:
@@ -1166,11 +1182,84 @@ _VALIDATE_SUBSUBSECTION_EMPTY_RE = SECTION_ZH_SUBSUBSECTION_EMPTY_RE
 
 _WORK_CONTENT_RE = re.compile(r"^\s*工作内容")
 
+# v0.14.3 空括号小小节 / 被吃编号的小节: 编号不可知 → 固定占位 X, 留人工审核
+_NUM_MISSING = "X"
+
+# 句读结尾: 正文/说明句子以句读收尾; 标题行一般不收尾
+_SENTENCE_END_RE = re.compile(r"[。；，、：:．·]$")
+
+
+def _has_work_content_within(lines: list[str], start: int,
+                              max_nonempty: int = 5) -> bool:
+    """v0.14.3 节验证: 从 start+1 往下扫最多 max_nonempty 个非空行,
+    只要有以"工作内容"开头的行 → True; 否则 False.
+
+    用户明确: 节 = 中文数字+顿号, 为防误识别, 只认"下方 5 个非空行内有工作内容"
+    的才归为节; 没有的忽略. 窗口内不足 5 个非空行走完即止.
+    """
+    count = 0
+    n = len(lines)
+    j = start + 1
+    while j < n:
+        s = lines[j].strip()
+        if s:
+            count += 1
+            if _WORK_CONTENT_RE.match(s):
+                return True
+            if count >= max_nonempty:
+                return False
+        j += 1
+    return False
+
+
+def _is_plausible_subsection_title(s: str) -> bool:
+    """v0.14.3 判据: 一行是否像"被 OCR 吃掉编号的小节标题".
+
+    保守, 避免把正文/说明误认成小节:
+      - 不是任何段行正则 (章/节/小节/小小节)
+      - 不以"工作内容"开头
+      - 不含 <table / "计量单位" (这些行在小节之下, 不是小节本身)
+      - 不以句读结尾 (正文/说明句子以句读收尾, 标题一般不收尾)
+      - 不含 TOC 点线 (…)
+      - 长度 0 < len ≤ 30
+    """
+    if not (0 < len(s) <= 30):
+        return False
+    if _SENTENCE_END_RE.search(s):
+        return False
+    if "…" in s or "<table" in s or "计量单位" in s:
+        return False
+    if s.startswith("工作内容"):
+        return False
+    for pat in (SECTION_ZH_CHAPTER_RE, SECTION_ZH_SECTION_RE,
+                SECTION_ZH_SUBSECTION_RE, SECTION_ZH_SUBSUBSECTION_RE,
+                SECTION_ZH_SUBSUBSECTION_EMPTY_RE):
+        if pat.match(s):
+            return False
+    return True
+
+
+def _find_eaten_subsection_title(lines: list[str], start: int) -> str | None:
+    """v0.14.3 方案 A: 小小节要 emit 但没有小节上下文 (cur_subsection is None) 时,
+    向上找最近一行非空行, 若它是"被 OCR 吃掉编号的小节标题"(如 `预制钢筋混凝土方桩`,
+    原本是 `1. 预制钢筋混凝土方桩`) → 返回该标题; 调用方把它 emit 成小节(号=_NUM_MISSING).
+
+    判据见 _is_plausible_subsection_title; 不满足 → 返回 None (调用方拒绝此小小节).
+    """
+    j = start - 1
+    while j >= 0:
+        s = lines[j].strip()
+        if s:
+            s = re.sub(_SECTION_PREFIX, "", s)  # 去 # 前缀, 与 line_disp 一致
+            return s if _is_plausible_subsection_title(s) else None
+        j -= 1
+    return None
+
 
 def extract_sections_before(text: str, volume: str,
                               cur_chapter: int | None = None,
                               cur_section: int | None = None,
-                              cur_subsection: int | None = None
+                              cur_subsection: int | str | None = None
                               ) -> list[tuple[str, str]]:
     """hu 专用: 从文本中提取段标记, 返回 [(段行编码, 名称), ...].
 
@@ -1178,25 +1267,28 @@ def extract_sections_before(text: str, volume: str,
       1. "第X章  章名称"        → (volume.X, 章名称)
       2. "一、节名称"           → (volume.X.Y, 节名称)
       3. "1.小节名称"           → (volume.X.Y.Z, 小节名称)
-      4. "(1)小小节名称" / "()小小节名称" (空括号默认 1, 编码末尾加 ".")
+      4. "(1)小小节名称" / "()小小节名称" (空括号 → 编号固定 _NUM_MISSING "X")
 
     数字规则:
       - 章号/节号: 中文数字 → 阿拉伯 (_cn_to_int)
       - 小节号/小小节号: ASCII 数字 (int())
-      - 空括号 () / （） → 默认 1; 编码末尾加 "." (G.X.Y.Z.) 留作人工审核
+      - 空括号 () / （） → 编号固定 "X" (G.X.Y.Z.X) 留作人工审核, 无末尾点
       - 转换失败 / 名称空 → 跳过该行
 
     下游验证 (防线 — 防止 OCR 把说明文字误识别成段行):
-      - 小小节: 下方 (下一个非空行) 必须是定额 (即工作内容)
-      - 小节:   下方必须是小小节 或 定额
-      - 节:     下方必须是小节 或 定额
       - 章:     硬匹配 "第X章 章名称", 不验证 (本身识别度高, 兜底层级重置)
+      - 节:     下方 5 个非空行内有以"工作内容"开头的行 → emit (v0.14.3 用户 v3)
+      - 小节:   下方 (下一个非空行) 必须是小节 / 小小节 / 工作内容才 emit;
+                **方案 B**: 无节上下文 (cur_section is None) → 拒绝, 不降级为节
+      - 小小节: 下方 (下一个非空行) 必须是工作内容才 emit;
+                无小节上下文时 (方案 A) 向上认"被吃编号的小节裸行"为小节,
+                找不到 → 拒绝 (不落到节/章层)
 
     章节层级:
       - 4 层可缺, 缺时跳过该层
-      - 例: 看到 "1.挖土方" 但之前没有 "一、xx" → 编码 = volume.chapter.1
       - stateful 状态: 调用方传入 cur_chapter/cur_section/cur_subsection 作为初始值
         (跨 table prefix 调用时, 上一段的 state 应传入, 否则兜底会丢失层级)
+      - 小节/被吃小节号可能是 "X" (字符串占位), 用 f-string 拼接, 不做 int()
 
     v3 fix: cur_chapter/cur_section/cur_subsection 由调用方传入 (process_md_file 维护),
             避免每次 table prefix 调用都从 None 开始, 跨 prefix 的小节 emit 编码错位
@@ -1257,6 +1349,11 @@ def extract_sections_before(text: str, volume: str,
             i += 1
             continue
 
+        # 显示标题 (v0.14.3): 去掉行首 markdown # 前缀 (OCR 对 # 输出不一致, 不算内容),
+        # 但**保留数字/括号标记** — 小节 `3．xxx` / 小小节 `（1）xxx` 原样保留,
+        #   供人工核对原始编号 (空括号 `（ ）` 必须可见).
+        line_disp = re.sub(_SECTION_PREFIX, "", line)
+
         # 0. 跳过 TOC 尾行 (带页码点) — 已在 4 个正则之前
         if TOC_PAGE_TAIL.search(line):
             i += 1
@@ -1278,19 +1375,17 @@ def extract_sections_before(text: str, volume: str,
             continue
 
         # === 2. 一、节名称 ===
-        # v0.14.2 验证 (按用户分层方案 v2): 下一个非空行必须是"小节标题"
-        #   (降一级) 或 "工作内容" (定额, 节可能直接跟定额, 没有小节层)
-        #   才 emit. 节后面不能接节 (跨章已处理).
+        # v0.14.3 验证 (用户分层方案 v3): 下方 5 个非空行内有以"工作内容"开头
+        #   的行 → emit 节; 没有 → 忽略 (防 OCR 把说明文字误识别成节).
+        #   实测: 计算规则里的假节 `## 一、打桩。` 下方 5 行内无工作内容 → 被拒.
+        #   真节 `## 一、打桩` 下方第 3 个非空行就是 工作内容 → emit.
         m = SECTION_ZH_SECTION_RE.match(line)
         if m:
             cn_num = m.group(1)
-            title = m.group(2).strip()
+            title = line_disp
             n_int = _cn_to_int(cn_num)
             if n_int is not None and title:
-                if _validate_section_downstream(
-                    lines, i,
-                    allowed_next=(_VALIDATE_SUBSECTION_RE, _WORK_CONTENT_RE),
-                ):
+                if _has_work_content_within(lines, i):
                     if cur_chapter is None:
                         # 兜底: 没识别到章, 把此节号当章号
                         sections.append((f"{volume}.{n_int}", title))
@@ -1303,13 +1398,15 @@ def extract_sections_before(text: str, volume: str,
             continue
 
         # === 3. 1.小节名称 ===
-        # v0.14.2 验证 (按用户分层方案 v2): 下一个非空行必须是"小节标题"(同级)
+        # v0.14.3 验证 (用户分层方案 v3): 下一个非空行必须是"小节标题"(同级)
         #   "小小节标题"(降一级) 或 "工作内容"(定额, 小节可能直接跟定额) 才 emit.
         #   不能接节 (节是上一层级, 跨章已处理).
+        #   **方案 B**: cur_section is None (没有节上下文) → 拒绝, 不降级为节.
+        #   (修复 v0.14.2 G.3.4 误判: `## 4．钢管桩` 曾因节被拒而降级成节 G.3.4)
         m = SECTION_ZH_SUBSECTION_RE.match(line)
         if m:
             num = m.group(1)
-            title = m.group(2).strip()
+            title = line_disp
             if num.isdigit() and title:
                 if _validate_section_downstream(
                     lines, i,
@@ -1318,70 +1415,71 @@ def extract_sections_before(text: str, volume: str,
                                   _VALIDATE_SUBSUBSECTION_EMPTY_RE,
                                   _WORK_CONTENT_RE),
                 ):
-                    n_int = int(num)
                     if cur_section is None:
-                        # 兜底: 没识别到节, 把此小节号当节号
-                        if cur_chapter is None:
-                            sections.append((f"{volume}.{n_int}", title))
-                            cur_chapter = n_int
-                        else:
-                            sections.append((f"{volume}.{cur_chapter}.{n_int}", title))
-                            cur_section = n_int
-                    else:
-                        sections.append((f"{volume}.{cur_chapter}.{cur_section}.{n_int}", title))
-                        cur_subsection = n_int
+                        i += 1
+                        continue
+                    n_int = int(num)
+                    sections.append((f"{volume}.{cur_chapter}.{cur_section}.{n_int}", title))
+                    cur_subsection = n_int
             i += 1
             continue
 
         # === 4. (1)小小节名称 / ()小小节名称 ===
-        # v0.14 验证: 下一个非空行必须是"工作内容"才 emit
-        # 编码: 正常 → G.X.Y.Z; 空括号 → G.X.Y.Z. (末尾加 "." 留人工审)
+        # v0.14.3 验证: 下一个非空行必须是"工作内容"才 emit
+        # 编码: 正常 → G.X.Y.Z.W; 空括号 → W = _NUM_MISSING("X")
+        # 方案 A: cur_subsection is None (没有小节上下文) 时, 向上找"被 OCR 吃掉
+        #   编号的小节裸行"认作小节 (号 = X), 再 emit 此小小节; 找不到 → 拒绝
+        #   (小小节永远 4 层, 不落到节/章层).
+        # 继承: 父小节号是 X (被吃小节) → 小小节号也固定 X (编号不可靠, 统一留审).
         m = SECTION_ZH_SUBSUBSECTION_RE.match(line)
         if m:
             num_str = m.group(1)
-            title = m.group(2).strip()
+            title = line_disp
             if title:
                 if _validate_section_downstream(
                     lines, i,
                     allowed_next=(_WORK_CONTENT_RE,),
                 ):
-                    empty_paren = (num_str == "")
-                    if empty_paren:
-                        n_int = 1  # 默认 1
+                    if num_str == "" or not num_str.isdigit():
+                        n_int: int | str = _NUM_MISSING
                     else:
-                        if not num_str.isdigit():
-                            i += 1
-                            continue
                         n_int = int(num_str)
 
                     if cur_subsection is None:
-                        # 兜底: 没识别到小节, 把此小小节号当小节号
+                        # 方案 A: 向上认被吃小节裸行
                         if cur_section is None:
-                            if cur_chapter is None:
-                                code = f"{volume}.{n_int}"
-                                if empty_paren:
-                                    code += "."
-                                sections.append((code, title))
-                                cur_chapter = n_int
-                            else:
-                                code = f"{volume}.{cur_chapter}.{n_int}"
-                                if empty_paren:
-                                    code += "."
-                                sections.append((code, title))
-                                cur_section = n_int
-                        else:
-                            code = f"{volume}.{cur_chapter}.{cur_section}.{n_int}"
-                            if empty_paren:
-                                code += "."
-                            sections.append((code, title))
-                            cur_subsection = n_int
-                    else:
-                        code = f"{volume}.{cur_chapter}.{cur_section}.{cur_subsection}.{n_int}"
-                        if empty_paren:
-                            code += "."
-                        sections.append((code, title))
+                            # 无节上下文 → 拒绝 (方案 B 同理, 不落到节/章层)
+                            i += 1
+                            continue
+                        eaten = _find_eaten_subsection_title(lines, i)
+                        if eaten is None:
+                            i += 1
+                            continue
+                        sections.append(
+                            (f"{volume}.{cur_chapter}.{cur_section}.{_NUM_MISSING}",
+                             eaten))
+                        cur_subsection = _NUM_MISSING
+
+                    n_disp = _NUM_MISSING if cur_subsection == _NUM_MISSING else n_int
+                    code = f"{volume}.{cur_chapter}.{cur_section}.{cur_subsection}.{n_disp}"
+                    sections.append((code, title))
             i += 1
             continue
+
+        # === 5. 被吃小节裸行直接跟定额 (v0.14.3 方案 A 补充) ===
+        #   例: `预制钢筋混凝土板桩` 原本是 `2. 预制钢筋混凝土板桩`, 编号被 OCR 吃掉,
+        #   下面直接是 工作内容 + 定额 (没有小小节). 编码: G.X.Y.X.
+        #   需 cur_section 已存在 (方案 B); 下一非空行必须是 工作内容;
+        #   且本行满足 _is_plausible_subsection_title (保守, 不误认说明文字).
+        if cur_section is not None and _is_plausible_subsection_title(line_disp):
+            if _validate_section_downstream(
+                lines, i,
+                allowed_next=(_WORK_CONTENT_RE,),
+            ):
+                sections.append(
+                    (f"{volume}.{cur_chapter}.{cur_section}.{_NUM_MISSING}",
+                     line_disp))
+                cur_subsection = _NUM_MISSING
 
         i += 1
 
@@ -1472,8 +1570,8 @@ def process_md_file(md_path: Path) -> tuple[list[list[str]], list[dict]]:
             elif len(parts) == 3:  # volume.X.Y = 节
                 cur_section = int(parts[2])
                 cur_subsection = None
-            elif len(parts) == 4:  # volume.X.Y.Z = 小节
-                cur_subsection = int(parts[3])
+            elif len(parts) == 4:  # volume.X.Y.Z = 小节 (Z 可能是被吃小节的 X)
+                cur_subsection = parts[3] if parts[3].isdigit() else _NUM_MISSING
             # 5 段 (小小节) 不需要维护, 见 sec_id 自身的 5 段
 
         # 提取工作内容
