@@ -91,12 +91,14 @@ PROVINCE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "sc": ("四川", "川建"),   # "川建" 兜底（部分老 PDF 路径用简称）
     "cq": ("重庆",),          # 重庆没有简称，路径必带"重庆"
     "gd": ("广东", "粤"),     # v0.13 已落地 extractors/gd/
+    "hu": ("湖北", "鄂"),     # hu 提取器已落地 extractors/hu/
 }
 
 PROVINCE_NAMES: dict[str, str] = {
     "sc": "四川",
     "cq": "重庆",
     "gd": "广东",
+    "hu": "湖北",
 }
 
 EXTRACTORS_DIR = HERE / "extractors"
