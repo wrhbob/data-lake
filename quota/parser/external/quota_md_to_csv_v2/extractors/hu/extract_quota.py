@@ -655,10 +655,12 @@ def parse_material_row(cells: list[dict], start_cols: list[int], project_cols: l
                     quantities[pc] = v
                     break
 
-    # 其他材料费特殊处理
+    # 其他材料费特殊处理 (湖北 2024: 单位=% 的比例行, 无单价)
     is_other_material = "其他材料费" in name or "其它材料费" in name
-    if is_other_material and (not price or re.fullmatch(r"[\-−–—]+", price)):
-        price = "1.000"
+    if is_other_material:
+        # v0.14.5: 基价不填任何数值 (百分比行, 验证列在 emit 循环单独按
+        #   Σ(其他料行验证列) × 百分比/100 计算, 见 L1042 预计算)
+        price = ""
 
     return {
         "name": name,
@@ -1039,6 +1041,33 @@ def extract_table(html_text: str, working_content: str, unit_fallback: str,
             return 0       # 普通料/配
         materials.sort(key=_mat_emit_priority)
 
+        # v0.14.5: 其他材料费(湖北 2024 单位=%)是比例行, 不是金额行.
+        #   验证列 = Σ(材料分类中其他料/配行的验证列) × 其他材料费百分比/100
+        #   预计算本子目其他料行验证列之和, 供 其他材料费 emit 使用.
+        #   范围: category ∈ {料, 配} 且非 其他材料费 自身 (机/工/综/主材 不算,
+        #   附项 is_appendix 也不计入 — 附项不是材料费构成).
+        other_mat_basis = 0.0
+        for mat in materials:
+            if mat.get("is_other_material"):
+                continue
+            if mat["category"] not in ("料", "配"):
+                continue
+            if mat.get("is_proportion") or mat.get("is_appendix"):
+                # 比例行(配, 如黄土 price=—)验证列为空、不参与 sub_verifications,
+                #   不能把数量当验证值计入其他材料费的基数
+                continue
+            bq = strip_numeric_brackets(mat["quantities"].get(project_cols[j], ""))
+            bp = strip_numeric_brackets(mat["price"])
+            bqty_f = to_float(bq)
+            bprice_f = to_float(bp)
+            if bqty_f == 0.0:
+                bv = 0.0
+            elif bprice_f == 0.0:
+                bv = bqty_f
+            else:
+                bv = bqty_f * bprice_f
+            other_mat_basis += bv
+
         # 下方料/配/机/工行（普通材料、配、机械、人工）
         for mat in materials:
             if mat["category"] == "未计价":
@@ -1052,7 +1081,9 @@ def extract_table(html_text: str, working_content: str, unit_fallback: str,
             if is_proportion:
                 v_str = ""
             elif mat["is_other_material"]:
-                v = qty_f
+                # v0.14.5: 其他材料费验证列 = 其他料行验证列之和 × 百分比/100
+                #   基价已在 parse_material_row 置空 (price="")
+                v = other_mat_basis * qty_f / 100.0
                 v_str = f"{v:.2f}".rstrip("0").rstrip(".") if "." in f"{v:.2f}" else f"{v:.2f}"
             else:
                 if qty_f == 0.0:
