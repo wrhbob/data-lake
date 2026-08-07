@@ -1278,7 +1278,9 @@ def extract_sections_before(text: str, volume: str,
             continue
 
         # === 2. 一、节名称 ===
-        # v0.14 验证: 下一个非空行必须是"小节标题"或"工作内容"才 emit, 否则忽略
+        # v0.14.2 验证 (按用户分层方案 v2): 下一个非空行必须是"小节标题"
+        #   (降一级) 或 "工作内容" (定额, 节可能直接跟定额, 没有小节层)
+        #   才 emit. 节后面不能接节 (跨章已处理).
         m = SECTION_ZH_SECTION_RE.match(line)
         if m:
             cn_num = m.group(1)
@@ -1301,7 +1303,9 @@ def extract_sections_before(text: str, volume: str,
             continue
 
         # === 3. 1.小节名称 ===
-        # v0.14 验证: 下一个非空行必须是"小小节标题"或"工作内容"才 emit
+        # v0.14.2 验证 (按用户分层方案 v2): 下一个非空行必须是"小节标题"(同级)
+        #   "小小节标题"(降一级) 或 "工作内容"(定额, 小节可能直接跟定额) 才 emit.
+        #   不能接节 (节是上一层级, 跨章已处理).
         m = SECTION_ZH_SUBSECTION_RE.match(line)
         if m:
             num = m.group(1)
@@ -1309,7 +1313,8 @@ def extract_sections_before(text: str, volume: str,
             if num.isdigit() and title:
                 if _validate_section_downstream(
                     lines, i,
-                    allowed_next=(_VALIDATE_SUBSUBSECTION_RE,
+                    allowed_next=(_VALIDATE_SUBSECTION_RE,
+                                  _VALIDATE_SUBSUBSECTION_RE,
                                   _VALIDATE_SUBSUBSECTION_EMPTY_RE,
                                   _WORK_CONTENT_RE),
                 ):
