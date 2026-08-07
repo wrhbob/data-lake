@@ -1108,6 +1108,18 @@ def extract_table(html_text: str, working_content: str, unit_fallback: str,
 
 
 # ---------- 段行提取 ----------
+# 工作内容判定 (hu md 里定额前的固定标志, OCR 实测 100% 命中)
+WORK_CONTENT_PREFIX = "工作内容"
+
+def _is_work_content(line: str) -> bool:
+    """判断一行是否以"工作内容"开头 (hu 定额前的固定标志).
+
+    容忍空格 / 全半角冒号: `工作内容：` / `工作内容:` / `工作内容 :`
+    """
+    s = line.strip()
+    return s.startswith(WORK_CONTENT_PREFIX)
+
+
 def _next_nonempty_line(lines: list[str], start: int) -> str | None:
     """返回从 start 起的下一个非空行 (不含 start 行本身); 走完未找到 → None.
 
@@ -1123,53 +1135,36 @@ def _next_nonempty_line(lines: list[str], start: int) -> str | None:
     return None
 
 
-def _is_quota_like(line: str) -> bool:
-    """hu: 判断一行是否"像定额"。
+def _validate_section_downstream(lines: list[str], start: int,
+                                  allowed_next: tuple[str, ...]) -> bool:
+    """段行验证 (v0.14): 看下一个非空行是否属于 allowed_next.
 
-    定额编号格式: G1-1 / G2-113 / 第二个字母后的编号等
-    (G后接数字-数字)。行首或经 strip 后以 `G\\d+-\\d+` 开头就视为定额。
-    """
-    return bool(re.match(r"^[A-Z]\s*\d+\s*-\s*\d+\b", line))
-
-
-def _next_quota_marker(lines: list[str], start: int, raw_text: str | None = None) -> bool:
-    """方案 C: 从 start 行往下, 跳过任意非空行(工作内容/工程量计算规则段落),
-    看是否能撞到 `<table...>` 开头 — 即真定额表的位置.
+    语义: 节/小节/小小节正则命中后, 必须验证"下一个非空行"是合法后续, 否则忽略.
+        - 节:     allowed_next = (小节正则, 工作内容)
+        - 小节:   allowed_next = (小小节正则, 工作内容)
+        - 小小节: allowed_next = (工作内容,)
 
     返回:
-      True  → 后面看到 <table> (说明这确实是一个真章节标题)
-      False → 走到尽头都没看到 <table> (孤立标题, 噪声, 不 emit)
+      True  → 下一个非空行符合 allowed_next 之一 → emit
+      False → 下一个非空行不是 allowed_next 中任何一类 (或没有下一个非空行) → 忽略
 
-    用途: 节 / 小节 / 小小节的下游验证 — 放宽版, 不要求"下一个非空行就是更深层级或定额",
-          只要求"放眼望去, 这一段最终通向一张定额表".
-
-    注: hu md 通常是单行巨型字符串, splitlines() 后只有 1 个元素 (n=1), 此时 lines-based
-        循环退化为"start+1=1 >= n=1 立刻退出 → 返回 False", 全拒绝.
-    退化兜底: 若 raw_text != None 且 lines 退化为单行, 直接检查 raw_text 是否含 "<table".
+    注: 调用方传入 start (当前 emit 行 idx), 本函数从 start+1 开始找下一个非空行.
     """
-    n = len(lines)
-    # 单行退化: hu md 的 splitlines() 只有 1 元素, raw_text 全文 substring 检查
-    if n <= 1 and raw_text is not None:
-        return "<table" in raw_text
-    j = start + 1
-    while j < n:
-        s = lines[j].strip()
-        if not s:
-            j += 1
-            continue
-        if s.startswith("<table"):
+    nxt = _next_nonempty_line(lines, start)
+    if nxt is None:
+        return False
+    for pat in allowed_next:
+        if pat.match(nxt):
             return True
-        j += 1
     return False
 
 
-def _prefix_has_table(prefix: str) -> bool:
-    """方案 C 实用版: 给定一段 prefix 文本, 是否包含 <table 标记.
+# 段行验证用到的预编译正则: 小节 / 小小节 / 工作内容
+_VALIDATE_SUBSECTION_RE = SECTION_ZH_SUBSECTION_RE
+_VALIDATE_SUBSUBSECTION_RE = SECTION_ZH_SUBSUBSECTION_RE
+_VALIDATE_SUBSUBSECTION_EMPTY_RE = SECTION_ZH_SUBSUBSECTION_EMPTY_RE
 
-    hu md 是单行巨型字符串, splitlines() 后只有 1 个元素, _next_quota_marker 失效.
-    实际验证: 检查 prefix 字符串里是否含 "<table" 即可.
-    """
-    return "<table" in prefix
+_WORK_CONTENT_RE = re.compile(r"^\s*工作内容")
 
 
 def extract_sections_before(text: str, volume: str,
@@ -1283,14 +1278,17 @@ def extract_sections_before(text: str, volume: str,
             continue
 
         # === 2. 一、节名称 ===
-        # 验证 (方案 C): 后面能看到 <table> 才 emit (放宽: 允许中间夹杂工作内容段)
+        # v0.14 验证: 下一个非空行必须是"小节标题"或"工作内容"才 emit, 否则忽略
         m = SECTION_ZH_SECTION_RE.match(line)
         if m:
             cn_num = m.group(1)
             title = m.group(2).strip()
             n_int = _cn_to_int(cn_num)
             if n_int is not None and title:
-                if _next_quota_marker(lines, i, raw_text=text):
+                if _validate_section_downstream(
+                    lines, i,
+                    allowed_next=(_VALIDATE_SUBSECTION_RE, _WORK_CONTENT_RE),
+                ):
                     if cur_chapter is None:
                         # 兜底: 没识别到章, 把此节号当章号
                         sections.append((f"{volume}.{n_int}", title))
@@ -1303,13 +1301,18 @@ def extract_sections_before(text: str, volume: str,
             continue
 
         # === 3. 1.小节名称 ===
-        # 验证 (方案 C): 后面能看到 <table>
+        # v0.14 验证: 下一个非空行必须是"小小节标题"或"工作内容"才 emit
         m = SECTION_ZH_SUBSECTION_RE.match(line)
         if m:
             num = m.group(1)
             title = m.group(2).strip()
             if num.isdigit() and title:
-                if _next_quota_marker(lines, i, raw_text=text):
+                if _validate_section_downstream(
+                    lines, i,
+                    allowed_next=(_VALIDATE_SUBSUBSECTION_RE,
+                                  _VALIDATE_SUBSUBSECTION_EMPTY_RE,
+                                  _WORK_CONTENT_RE),
+                ):
                     n_int = int(num)
                     if cur_section is None:
                         # 兜底: 没识别到节, 把此小节号当节号
@@ -1326,14 +1329,17 @@ def extract_sections_before(text: str, volume: str,
             continue
 
         # === 4. (1)小小节名称 / ()小小节名称 ===
-        # 验证 (方案 C): 后面能看到 <table>
+        # v0.14 验证: 下一个非空行必须是"工作内容"才 emit
         # 编码: 正常 → G.X.Y.Z; 空括号 → G.X.Y.Z. (末尾加 "." 留人工审)
         m = SECTION_ZH_SUBSUBSECTION_RE.match(line)
         if m:
             num_str = m.group(1)
             title = m.group(2).strip()
             if title:
-                if _next_quota_marker(lines, i, raw_text=text):
+                if _validate_section_downstream(
+                    lines, i,
+                    allowed_next=(_WORK_CONTENT_RE,),
+                ):
                     empty_paren = (num_str == "")
                     if empty_paren:
                         n_int = 1  # 默认 1
