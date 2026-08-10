@@ -56,7 +56,11 @@ SECTION_RE2 = re.compile(
 # - 仅 1 个 '-' 分隔, 因为定额编号本身不带「节」概念
 # - 段行编码的章号 X 直接从定额编号的章号段提取 (节/小节/小小节 由段行文字识别 + 累加)
 # - 容忍单空格 (OCR 抖动, 如 "1 -1" / "1- 1")
-PROJECT_ID_RE = re.compile(r"^(\d+)\s*-\s*(\d+)$")
+# - v0.15.3 (2026-08-10): 收紧为 1-2 位章号 + 1-3 位定额号. bj OCR 噪声里
+#   "8001000102-1" / "13410008-1" / "01010002-1" 是材料编码 + 同行编号被截断
+#   拼成的伪定额号; 原来 (\d+)-(\d+) 太宽, 误识别 10 行. bj 真实章号 1-9 (中文
+#   一-九), 定额号最大 1-122 (3 位), 收紧 (\d{1,2})-(\d{1,3}) 完全覆盖真值.
+PROJECT_ID_RE = re.compile(r"^(\d{1,2})\s*-\s*(\d{1,3})$")
 
 # hu 段行识别 (4 种标记, 全部在 <table> 之前的 md 文本里)
 # 1. 第X章:        "## 第一章  土石方工程" / "第一章 土石方工程" / "第一章　土石方工程"
@@ -70,6 +74,10 @@ PROJECT_ID_RE = re.compile(r"^(\d+)\s*-\s*(\d+)$")
 _SECTION_PREFIX = r"^\s*#{0,6}\s*"
 
 SECTION_ZH_CHAPTER_RE = re.compile(_SECTION_PREFIX + r"第\s*([一-龥]{1,3})\s*章\s*(.*?)\s*$")
+# bj 特有 (2026-08-10): "第X节" 形式节标记 — 仿古建筑 PDF 是「章 → 节(第X节) → 小节(一、xx)」3 层结构
+# hu 没有"第X节", 故仅 bj 启用. 比 SECTION_ZH_SECTION_RE (一、xx) 优先级高,
+#   否则 "第X节" 走"一、xx"路径被误归类为小节.
+SECTION_ZH_SECTION_BJ_RE = re.compile(_SECTION_PREFIX + r"第\s*([一-龥]{1,3})\s*节\s*(.*?)\s*$")
 SECTION_ZH_SECTION_RE = re.compile(_SECTION_PREFIX + r"([一-龥]{1,3})\s*[、,]\s*(.+?)\s*$")
 SECTION_ZH_SUBSECTION_RE = re.compile(_SECTION_PREFIX + r"(\d{1,3})\s*[\.．]\s*([^\.]+?)\s*$")
 # 小小节: group(1) = 数字 (可能为空字符串 → 编号固定 _NUM_MISSING "X"), group(2) = 名称
@@ -818,10 +826,21 @@ def extract_table_bj(html_text: str, working_content: str, unit_fallback: str,
 
     # 找项目名 (col0="项目"/"项 目" 的行, 多个项目分组行拼起来)
     project_names: list[str] = []
+    # v0.15.3 (2026-08-10): bj "项目" block 最后一行 = 定额号实际单位 (m/m²/对/份/块 等).
+    #   当 unit_fallback="见 表" 时, 用 project_names_last_line 覆盖单位列.
+    #   通用版 extract_table (gd/hu/cq) v0.13 已支持 (commit 86ea1fc);
+    #   bj 自闭环 extract_table_bj 没继承 → 1232 行定额单位列写"见表".
+    #   bj "项目" block 形态 (实测):
+    #     行 1 = 项目总描述 (colspan=N, 覆盖所有定额列)
+    #     行 2 = 定额下子项名 (每定额列 1 个, 如"三岔头"/"蓝四丁砖盘头")
+    #     行 3 = 定额号实际单位 (如"对"/"份"/"m"/"m²")
+    #   last_line = 每定额号列下"项目" block 最后一个非空文本 (= 单位行)
+    project_names_last_line: list[str] = []
     parent_rows = [r for r, row in enumerate(grid)
                    if re.match(r"^(项目|项 目)(?!\s*编)", row[0].strip())]
     for j, pc in enumerate(project_cols):
         parts: list[str] = []
+        last_line_text: str = ""
         for pr in parent_rows:
             if pc >= total_cols:
                 continue
@@ -832,8 +851,27 @@ def extract_table_bj(html_text: str, working_content: str, unit_fallback: str,
             # 跳过编号行 (1-1, 1-2 ... — 这些是表头编号行, 不是项目名)
             if PROJECT_ID_RE.fullmatch(txt):
                 continue
-            parts.append(txt)
+            # v0.15.3 fix: 去重 — rowspan 继承时同一文本出现在多行 (例 L1811
+            #   row 2 col6="围脊" rowspan=2 继承到 row 3 col6="围脊"),
+            #   不去重会出现 project_names 重复 (如 "无陡板脊 围脊 围脊") 和
+            #   last_line 重复覆盖成同一值. 参考 gd 模板 L1115 的去重逻辑.
+            if not parts or txt != parts[-1]:
+                parts.append(txt)
+            if last_line_text != txt:
+                last_line_text = txt
         project_names.append(" ".join(parts))
+        project_names_last_line.append(last_line_text)
+
+    # 项目单位 (bj 专用: 不读"计量单位"行, 单位来自 md 前置文本 "单位:xx" → unit_fallback)
+    # 当 unit_fallback="见 表" 时, 用"项目"block last_line 覆盖 (每定额号独立)
+    project_units: list[str] = [unit_fallback for _ in range(n_projects)]
+    unit_fallback_norm = normalize_unit(unit_fallback)
+    if re.fullmatch(r"见\s*表", unit_fallback_norm):
+        for j in range(n_projects):
+            ll = project_names_last_line[j] if j < len(project_names_last_line) else ""
+            ll_norm = normalize_unit(ll)
+            if ll_norm and not re.fullmatch(r"见\s*表", ll_norm):
+                project_units[j] = ll_norm
 
     # 数据起始行: 跳过表头 (编号行 + 项目行 + 工料机行)
     # 用「工料机名称」/「名称」/「工料机」行作为锚点, 之后所有 col0 含 人工/材料/机械 的行开始抽
@@ -881,9 +919,11 @@ def extract_table_bj(html_text: str, working_content: str, unit_fallback: str,
     for j in range(n_projects):
         pid = projects[j]["id"]
         pname = clean_latex_name(project_names[j]) if j < len(project_names) else ""
+        # v0.15.3: 用 project_units[j] 替代 unit_fallback — 见 表时 last_line 已覆盖
+        punit = project_units[j] if j < len(project_units) else unit_fallback
 
         # 定行 (基价/验证/换算/来源 留空, PID 保留)
-        csv_rows.append(["定", pid, pname, working_content, unit_fallback,
+        csv_rows.append(["定", pid, pname, working_content, punit,
                          "", "", "", "", ""])
 
         # 资源明细 (按 category 排序: 工 → 料 → 机, 保持 PDF 视觉顺序)
@@ -1574,6 +1614,10 @@ def extract_sections_before(text: str, volume: str,
     def _classify_line(line: str) -> int:
         if SECTION_ZH_CHAPTER_RE.match(line):
             return 1
+        # bj (2026-08-10): 第X节也是 level=2, 优先级高于"一、xx"
+        #   hu 没有这个标记, bj 走 extract_sections_before 内部识别
+        if SECTION_ZH_SECTION_BJ_RE.match(line):
+            return 2
         if SECTION_ZH_SECTION_RE.match(line):
             return 2
         if SECTION_ZH_SUBSECTION_RE.match(line):
@@ -1642,11 +1686,30 @@ def extract_sections_before(text: str, volume: str,
             i += 1
             continue
 
-        # === 2. 一、节名称 ===
+        # === 2. 第X节 (bj 特有, 2026-08-10 新增) ===
+        #   北京消耗量定额 PDF 是「章 → 第X节 → 小节」3 层结构
+        #   例: "第一节 砖石砌体" → (BJ.X.Y, 砖石砌体)
+        #   验证: 下方 5 个非空行内有"工作内容"才 emit (防 OCR 误识别说明文字)
+        m = SECTION_ZH_SECTION_BJ_RE.match(line)
+        if m:
+            cn_num = m.group(1)
+            title = m.group(2).strip()
+            n_int = _cn_to_int(cn_num)
+            if n_int is not None and title and cur_chapter is not None:
+                if _has_work_content_within(lines, i):
+                    sections.append((f"{volume}.{cur_chapter}.{n_int}", title))
+                    cur_section = n_int
+                    cur_subsection = None
+            i += 1
+            continue
+
+        # === 3. 一、节名称 (hu: 节; bj: 小节) ===
         # v0.14.3 验证 (用户分层方案 v3): 下方 5 个非空行内有以"工作内容"开头
         #   的行 → emit 节; 没有 → 忽略 (防 OCR 把说明文字误识别成节).
         #   实测: 计算规则里的假节 `## 一、打桩。` 下方 5 行内无工作内容 → 被拒.
         #   真节 `## 一、打桩` 下方第 3 个非空行就是 工作内容 → emit.
+        #   bj (2026-08-10): "一、xx" 在 bj 是小节 (4 段编号 BJ.1.X.Y);
+        #     只有没识别到"第X节"(cur_section is None) 时降级为节兜底, 避免丢失数据
         m = SECTION_ZH_SECTION_RE.match(line)
         if m:
             cn_num = m.group(1)
@@ -1658,10 +1721,15 @@ def extract_sections_before(text: str, volume: str,
                         # 兜底: 没识别到章, 把此节号当章号
                         sections.append((f"{volume}.{n_int}", title))
                         cur_chapter = n_int
-                    else:
+                    elif cur_section is None:
+                        # bj 兜底: 没识别到"第X节" → "一、xx"降级为节 (避免丢失数据)
                         sections.append((f"{volume}.{cur_chapter}.{n_int}", title))
                         cur_section = n_int
                         cur_subsection = None
+                    else:
+                        # bj 标准路径: "一、xx" 是小节
+                        sections.append((f"{volume}.{cur_chapter}.{cur_section}.{n_int}", title))
+                        cur_subsection = n_int
             i += 1
             continue
 
@@ -1965,6 +2033,9 @@ def process_md_file(md_path: Path) -> tuple[list[list[str]], list[dict]]:
 
 # ---------- main ----------
 def main():
+    # bj 主入口 (2026-08-10): 默认不再落盘 CSV — pipeline 唯一产物是 xlsx
+    #   - shell subprocess 模式: 传 argv[2]=csv_target 时仍按指定路径写 CSV (兼容性)
+    #   - 手动 `python bj/extract_quota.py xxx.md` 不传 argv[2]: 仅 stdout 报告, 不写任何 CSV
     if len(sys.argv) < 2:
         print("Usage: quota_md_to_csv.py <input.md> [output.csv]")
         sys.exit(1)
@@ -1974,46 +2045,37 @@ def main():
         print(f"[ERROR] 文件不存在: {md_path}")
         sys.exit(1)
 
-    if len(sys.argv) > 2:
-        output_csv = Path(sys.argv[2])
-    else:
-        # 默认输出 CSV：MD 同目录、同 stem，**加 `_数值待审核` 后缀**标记未经人工核对
-        # （人工核对通过后可去掉该后缀，或直接传给 quota-csv-finalize）
-        output_csv = md_path.with_name(md_path.stem + "_数值待审核.csv")
-
     rows, issues = process_md_file(md_path)
-
-    with output_csv.open("w", encoding="utf-8-sig", newline="") as f:
-        csv.writer(f).writerows(rows)
 
     n_sec = sum(1 for r in rows if r[0] == "段")
     n_proj = sum(1 for r in rows if r[0] == "定")
 
-    if issues:
-        issues_md = output_csv.with_name(output_csv.stem + "_issues.md")
-        with issues_md.open("w", encoding="utf-8") as f:
-            f.write("# 解析问题报告\n\n")
-            f.write(f"> 来源: {md_path.name}\n")
-            f.write(f"> 生成时间: {datetime.now(timezone.utc).isoformat()}\n\n")
-            f.write("---\n\n")
-            for i, issue in enumerate(issues, 1):
-                f.write(f"## 异常表 {i}\n\n")
-                f.write(f"- **章节定位**: `{issue['section_id'] or '-'}'`\n")
-                f.write(f"- **项目编码**: `{issue['project_id']}`\n")
-                f.write(f"- **失败原因**: {issue['reason']}\n")
-                f.write(f"- **原始表前文本**: {issue['prefix']}\n")
-                f.write(f"- **原始 HTML 摘要**:\n  ```html\n  {issue['html'][:500]}\n  ```\n\n")
-        print(f"[OK] 解析完成: {output_csv}")
-        print(f"[OK] 段行: {n_sec}")
-        print(f"[OK] 定额条目: {n_proj}")
-        print(f"[OK] 异常表: {len(issues)} 个（详见 {issues_md.name}）")
-        print(f"[OK] 总行数: {len(rows)}")
-    else:
-        print(f"[OK] 解析完成: {output_csv}")
-        print(f"[OK] 段行: {n_sec}")
-        print(f"[OK] 定额条目: {n_proj}")
-        print(f"[OK] 无异常表")
-        print(f"[OK] 总行数: {len(rows)}")
+    if len(sys.argv) > 2:
+        # 显式传了 output_csv (shell subprocess 模式) — 写到指定路径
+        output_csv = Path(sys.argv[2])
+        with output_csv.open("w", encoding="utf-8-sig", newline="") as f:
+            csv.writer(f).writerows(rows)
+        if issues:
+            issues_md = output_csv.with_name(output_csv.stem + "_issues.md")
+            with issues_md.open("w", encoding="utf-8") as f:
+                f.write("# 解析问题报告\n\n")
+                f.write(f"> 来源: {md_path.name}\n")
+                f.write(f"> 生成时间: {datetime.now(timezone.utc).isoformat()}\n\n")
+                f.write("---\n\n")
+                for i, issue in enumerate(issues, 1):
+                    f.write(f"## 异常表 {i}\n\n")
+                    f.write(f"- **章节定位**: `{issue['section_id'] or '-'}'`\n")
+                    f.write(f"- **项目编码**: `{issue['project_id']}`\n")
+                    f.write(f"- **失败原因**: {issue['reason']}\n")
+                    f.write(f"- **原始表前文本**: {issue['prefix']}\n")
+                    f.write(f"- **原始 HTML 摘要**:\n  ```html\n  {issue['html'][:500]}\n  ```\n\n")
+            print(f"[OK] CSV: {output_csv}")
+            print(f"[OK] 异常报告: {issues_md}")
+        else:
+            print(f"[OK] CSV: {output_csv}")
+
+    # 总结到 stdout (无论是否落盘 CSV 都打)
+    print(f"[OK] 解析完成: 段行={n_sec}, 定额条目={n_proj}, 异常={len(issues)}, 总行数={len(rows)}")
 
 
 if __name__ == "__main__":
