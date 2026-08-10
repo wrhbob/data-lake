@@ -872,15 +872,18 @@ def extract_table_bj(html_text: str, working_content: str, unit_fallback: str,
             return [], issue
 
     # emit: 10 列 schema, 基价/验证/换算/来源 恒空
-    #   bj: 编码列 (col 2) 也留空 — PID "1-1" 在 Excel 里被识别成日期 "1月1日",
-    #        10 位资源编码被识别成科学计数法 "3.109E+09". 项目编码信息已在 名称 列体现.
+    #   bj: 定行 col 2 = PID (1-1, 用户要求保留项目编号);
+    #        工/料/机 行 col 2 留空 — 10 位资源编码 (如 3109003301) 在 Excel 里被
+    #        自动识别成科学计数法 (3.109E+09), 项目编码信息已在名称列体现.
+    #        xlsx_writer._write_csv_to_sheet 对 col 2 强制 number_format='@'
+    #        防止 Excel 把 "1-1" 自动识别成日期 "1月1日".
     csv_rows: list[list[str]] = []
     for j in range(n_projects):
         pid = projects[j]["id"]
         pname = clean_latex_name(project_names[j]) if j < len(project_names) else ""
 
-        # 定行 (编码/基价/验证/换算/来源 全部留空)
-        csv_rows.append(["定", "", pname, working_content, unit_fallback,
+        # 定行 (基价/验证/换算/来源 留空, PID 保留)
+        csv_rows.append(["定", pid, pname, working_content, unit_fallback,
                          "", "", "", "", ""])
 
         # 资源明细 (按 category 排序: 工 → 料 → 机, 保持 PDF 视觉顺序)
