@@ -70,6 +70,7 @@ PROVINCE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "cq": ("重庆",),          # 重庆没有简称，路径必带"重庆"
     "gd": ("广东", "粤"),     # v0.13 已落地 extractors/gd/
     "hu": ("湖北", "鄂"),     # hu 提取器已落地 extractors/hu/
+    "bj": ("北京", "京"),     # v0.15 已落地 extractors/bj/ (北京消耗量定额)
 }
 
 PROVINCE_NAMES: dict[str, str] = {
@@ -77,6 +78,7 @@ PROVINCE_NAMES: dict[str, str] = {
     "cq": "重庆",
     "gd": "广东",
     "hu": "湖北",
+    "bj": "北京",
 }
 
 EXTRACTORS_DIR = HERE / "extractors"
