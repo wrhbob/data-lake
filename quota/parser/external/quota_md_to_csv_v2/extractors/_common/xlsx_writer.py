@@ -191,6 +191,13 @@ def _write_csv_to_sheet(ws, csv_path: Path) -> int:
     for r_idx, row in enumerate(rows, start=1):
         for c_idx, val in enumerate(row, start=1):
             cell = ws.cell(row=r_idx, column=c_idx, value=val)
+            # bj / hu / gd: 编码列 (col 2 = 项目编码, 含 PID / 工料机编码)
+            #   PID "1-1" / "G1-1" / "C1-4-1" 被 Excel 自动识别为日期 (→ "1月1日")
+            #   长数字编码 "3109003301" (10 位+) 被识别为科学计数法 (→ "3.109E+09")
+            #   强制文本格式 '@' 防止 Excel 自动转换.
+            # bj 实际受害最重 (PID 短 + 编码长), hu/gd PID 含字母也有同样隐患, 统一处理.
+            if r_idx > 1 and c_idx == 2:
+                cell.number_format = "@"
             if r_idx == 1:
                 cell.font = header_font
                 cell.alignment = Alignment(horizontal="center", vertical="center")
