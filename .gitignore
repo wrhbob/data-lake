@@ -40,3 +40,6 @@ Thumbs.db
 *.swp
 _runtime/
 logs/
+
+# ── 解析脚本测试产物（数据/PDF/OCR 跑批结果，磁盘保留不入库）──
+quota/parser/tests/

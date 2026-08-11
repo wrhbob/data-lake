@@ -92,12 +92,13 @@ PROVINCE_DEFAULT_KEY: str = "default"
 # 段临界页数（>100 页走分段 OCR）
 CHUNK_THRESHOLD_PAGES = 100
 
-# autofinalize 5 步顺序
+# autofinalize 6 步顺序
 FINALIZE_STEPS = [
     "clean_empty_qty.py",
     "drop_toc_sections.py",
     "fill_work_content.py",
     "space_split_materials.py",
+    "normalize_unit.py",  # v0.1 第 6 步: 计量单位字面规范化
     "finalize_last_step.py",  # 原 to_xlsx.py
 ]
 

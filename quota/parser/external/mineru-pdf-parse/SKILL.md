@@ -17,29 +17,17 @@ allowed-tools: Bash(python *), Bash(curl *), Bash(ls *), Bash(mkdir *), Bash(cp 
 
 ---
 
-## ⚠️ 严重警告：12GB 显卡必须**串行**，禁止任何并行
-
-> **本机环境：RTX 5070 Ti Laptop / 12GB 显存。**
-> **单 PDF 解析（hybrid-engine high）实测显存峰值 ~7.8GB**，只剩 ~4GB 余量。
-> **同时跑 2 个 /file_parse 必然 OOM，电脑直接死机（蓝屏/冻屏），只能强制关机。**
 
 **硬性约束（违反必炸）：**
 1. **禁止并发**：永远一次只跑 1 个 PDF，绝不同时开 2 个请求
 2. **禁止 MinerU 服务的异步并发利用**：服务默认 `max_concurrent_requests=3`，**单人都不要触发** —— 调 `/file_parse` 时前端用同步阻塞即可，不要用异步任务队列堆积
 3. **批处理必须串行**：本 skill 的 `parse_all.py` 已强制串行（一次处理完一个 PDF 再处理下一个）
 4. **不要启动多个 mineru-api 进程**：单进程单服务
-5. **跑批时不要同时做其他 GPU 任务**（包括模型推理、CUDA 训练等）
 
-**如果你看到 GPU 利用率 100% 持续 30 秒以上 + 显存占用逼近 12GB** → 立即 Ctrl+C 中断请求，等当前 worker 退出（`completed_tasks` +1 后）再继续。
+
 
 ---
 
-## ⚠️ 容器系统 RAM 上限（100 页以上 PDF 必须分段）
-
-> **2026-07 实测：436 页 PDF 在 `/file_parse` 同步端点上 ~9 分钟时被 Linux OOM killer SIGKILL。**
-> **根因不是 VRAM（全程未超过 8.4 GB），而是 Docker Desktop 默认给容器的 ~15 GB 系统 RAM 被吃满**（uvicorn + vLLM worker + multipart upload buffer + 中间张量）。
-
-**已踩坑的 PDF：** `《四川省建设工程工程量清单计价定额——房屋建筑更新改造工程》.pdf`（436 页）。
 
 **对策：**
 1. **大 PDF（>100 页）必须用 `parse_chunked.py`** —— 拆成 ~100 页/段，串行调用 `/tasks` 异步端点（HTTP 短连接，uvicorn 不会积累 buffer）。每段独立 result.json，部分失败不丢全部。
@@ -189,42 +177,8 @@ result_path.write_bytes(r.content)
 - 解决：写新 `extract_mineru.py`，用 `##` / `###` 作为 region 切分点
 - 或者在 render 阶段把 `##` 改成 `<div style="text-align: center;">...</div>` 注入回 md_content
 
-## 本地环境启动（用户手动）
-
-**Step A · 启动容器**（另一终端命令行）：
-
-```bash
-docker run --gpus all --name PDF2Markdown --memory 18g --ipc=host \
-  -p 30000:30000 -p 7860:7860 -p 8000:8000 -p 8002:8002 \
-  -it mineru:latest /bin/bash
-```
-
-**Step B · 启动 API**（再开一个终端，连进容器后跑）：
-
-```bash
-nohup mineru-api --host 0.0.0.0 --port 8000 > /tmp/mineru-api.log 2>&1 &
-```
-
-或直接宿主 shell 远程启：
-
-```bash
-docker exec -d PDF2Markdown bash -c \
-  'nohup mineru-api --host 0.0.0.0 --port 8000 > /tmp/mineru-api.log 2>&1 &'
-```
 
 ---
-
-## 后端选择参考
-
-| 后端 | 精度 | 显存 | 速度（warm） | 适用 |
-|---|---|---|---|---|
-| `pipeline` | 86.47 | 4GB | 最快 | 不在意精度，CPU 也能跑 |
-| **`hybrid-engine high`** | **95.39** | **8GB** | **1-2秒/页** | **推荐**，单人 12GB 显卡足够 |
-| `hybrid-engine medium` | 95.26 | 8GB | 1-1.5秒/页 | 不需要图像分析时 |
-| `vlm-engine` | 95.30 | 8GB | 1-3秒/页 | OpenAI 兼容协议客户端 |
-| `*-http-client` | 同上 | 2GB | 取决于远程 | 远程 GPU 服务 |
-
-**你的环境（RTX 5070 Ti 12GB，单人用）**：跑 `hybrid-engine high` 显存占用约 7.8GB，绰绰有余。
 
 ## 调用方式
 

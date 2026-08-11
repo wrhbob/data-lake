@@ -238,6 +238,9 @@ def run_finalize_pipeline(xlsx_path: Path,
         return 1
 
     for fname in FINALIZE_SCRIPTS:
+        # 第 5 步已重命名为 finalize_last_step.py
+        if fname == "to_xlsx.py":
+            fname = "finalize_last_step.py"
         script = finalize_dir / fname
         if not script.exists():
             print(f"[ERROR] finalize 脚本缺失: {script}", file=sys.stderr)

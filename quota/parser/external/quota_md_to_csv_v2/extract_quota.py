@@ -10,9 +10,9 @@ extract_quota.py — 定额 Markdown → 多 sheet xlsx（薄壳入口，自动�
   4. **默认**不再产 CSV：用 tempfile 收省子脚本的 CSV 结果，
      xlsx_writer 读 tempfile 生成多 sheet xlsx,然后 tempfile 自动清理。
      想要 CSV 用 `--keep-csv` 显式开。
-  5. **默认**自动跑 finalize 5 步流水线（clean / drop_toc / fill /
-     space_split / to_xlsx）原地覆盖写入 `<stem>_待审核.xlsx`，直接产出
-     待人工审核的最终 xlsx。中间不再有"格式待审核/最终输出"阶段。
+  5. **默认**自动跑 finalize 6 步流水线（clean / drop_toc / fill /
+     space_split / normalize_unit / finalize_last_step）原地覆盖写入 `<stem>_待审核.xlsx`，
+     直接产出待人工审核的最终 xlsx。中间不再有"格式待审核/最终输出"阶段。
      想要只产生 raw xlsx（不跑 finalize）用 `--no-finalize`。
 
 v0.2 函数级入口（Worker 使用）:
@@ -49,7 +49,7 @@ v0.2 函数级入口（Worker 使用）:
         → 这是一种"省份已声明但子脚本未到位"的临时状态
   4+ → 由各省 extract_quota.py 返回
   5  → xlsx 生成失败
-  6  → finalize 5 步中某一步失败（哪一步失败由子脚本 stderr 自报）
+  6  → finalize 6 步中某一步失败（哪一步失败由子脚本 stderr 自报）
 
 新省份决策（强制约束，详见 SKILL.md §11）：
   - 必须新建 extractors/<新 prov>/extract_quota.py，**不允许**直接调用已有省份子脚本作为代理
@@ -60,7 +60,7 @@ v0.2 函数级入口（Worker 使用）:
   默认：<MD 同目录>/<stem>_待审核.xlsx（含定额条目/册说明/各章 sheet；段行加粗、
                                          段行 C-D 合并、4 级分组已套上）
   + --keep-csv：同目录还多出 <stem>_待审核.csv 与 <stem>_待审核_issues.md（若省子脚本写了）
-  + --no-finalize：<stem>_待审核.xlsx 是 raw xlsx（未跑 5 步）
+  + --no-finalize：<stem>_待审核.xlsx 是 raw xlsx（未跑 6 步）
   + --no-xlsx / --xlsx OTHER：CSV 落到 <stem>_待审核.csv，xlsx 走自定义路径
 """
 from __future__ import annotations
@@ -234,13 +234,14 @@ def detect_province(md_path: Path) -> str | None:
 
 
 # ──────────────────────────────────────────────────────────────────
-# finalize 5 步流水线（subprocess 调用同目录的 4 个脚本）
+# finalize 6 步流水线（subprocess 调用同目录的 5 个脚本）
 # ──────────────────────────────────────────────────────────────────
 FINALIZE_SCRIPTS = [
     "clean_empty_qty.py",
     "drop_toc_sections.py",
     "fill_work_content.py",
     "space_split_materials.py",
+    "normalize_unit.py",  # v0.1 第 6 步: 计量单位字面规范化
     "to_xlsx.py",
 ]
 
@@ -260,6 +261,9 @@ def run_finalize_pipeline(xlsx_path: Path,
         return 1
 
     for fname in FINALIZE_SCRIPTS:
+        # 第 6 步已重命名为 finalize_last_step.py
+        if fname == "to_xlsx.py":
+            fname = "finalize_last_step.py"
         script = finalize_dir / fname
         if not script.exists():
             print(f"[ERROR] finalize 脚本缺失: {script}", file=sys.stderr)
@@ -321,7 +325,7 @@ def process_md_file(
     run_finalize: bool = True,
     finalize_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    """v0.2 函数级入口：MD → 多 sheet xlsx（含可选 autofinalize 5 步）。
+    """v0.2 函数级入口：MD → 多 sheet xlsx（含可选 autofinalize 6 步）。
 
     不依赖 subprocess;直接 import province 子脚本 + Python 调用 finalize 步骤。
 
@@ -330,7 +334,7 @@ def process_md_file(
         work_dir:   任务工作目录（函数会自己建子目录）
         province:   省份 code（'sc' / 'cq' / …）
         keep_csv:   是否保留 CSV 中间产物（默认 False, 用 tempfile 收）
-        run_finalize: 是否跑 autofinalize 5 步（默认 True）
+        run_finalize: 是否跑 autofinalize 6 步（默认 True）
         finalize_dir: finalize 脚本所在目录（默认 = 同包下 quota_csv_finalize/）
 
     Returns:
@@ -437,7 +441,7 @@ def process_md_file(
 
     warnings = list(narrative.get("warnings") or [])
 
-    # ── autofinalize 5 步 ──
+    # ── autofinalize 6 步 ──
     finalize_steps: list[str] = []
     if run_finalize:
         if finalize_dir is None:
@@ -449,7 +453,7 @@ def process_md_file(
             raise RuntimeError(f"finalize 脚本目录不存在: {fd}")
 
         for fname in FINALIZE_SCRIPTS:
-            # 第 5 步已重命名为 finalize_last_step.py
+            # 第 6 步已重命名为 finalize_last_step.py
             if fname == "to_xlsx.py":
                 fname = "finalize_last_step.py"
             script = fd / fname
@@ -508,7 +512,7 @@ def _run_finalize_step_inproc(script: Path, xlsx_path: Path) -> dict:
 # ──────────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(
-        description="定额 Markdown → 多 sheet xlsx（薄壳，自动判断省份并跑 5 步 finalize）"
+        description="定额 Markdown → 多 sheet xlsx（薄壳，自动判断省份并跑 6 步 finalize）"
     )
     ap.add_argument("md_path", nargs="?",
                     help="MD 文件绝对路径（含 HTML table）")
@@ -531,7 +535,7 @@ def main():
 
     # finalize 流水线
     ap.add_argument("--no-finalize", action="store_true",
-                    help="xlsx 写完后不跑 finalize 5 步（保留原始 raw xlsx）")
+                    help="xlsx 写完后不跑 finalize 6 步（保留原始 raw xlsx）")
     ap.add_argument("--finalize-dir", default=None,
                     help="finalize 脚本所在目录（默认 = ../quota-csv-finalize）")
     args = ap.parse_args()
@@ -693,7 +697,7 @@ def main():
         traceback.print_exc()
         sys.exit(5)
 
-    # ── finalize 5 步流水线 ──
+    # ── finalize 6 步流水线 ──
     if not args.no_finalize:
         # finalize 脚本与 extract_quota 平级（同属 d:/.claude/skills/
         # quota-md-to-csv-v2/../quota-csv-finalize/）
@@ -702,7 +706,7 @@ def main():
             finalize_dir = Path(args.finalize_dir).resolve()
         else:
             finalize_dir = (HERE.parent / "quota_csv_finalize").resolve()
-        print(f"[PIPELINE] 跑 finalize 5 步（{finalize_dir}）")
+        print(f"[PIPELINE] 跑 finalize 6 步（{finalize_dir}）")
         rc = run_finalize_pipeline(xlsx_path, finalize_dir)
         if rc != 0:
             sys.exit(6)  # finalize 失败

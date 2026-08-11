@@ -106,6 +106,10 @@ def process_xlsx(input_path: Path, output_path: Path | None = None) -> dict:
         is_section = (str(row[0]).strip() if row else "") == "段"
         for c_idx, val in enumerate(row, start=1):
             cell = ws.cell(row=r_idx, column=c_idx, value=val)
+            # bj: 编码列 (col 2) 含 PID '1-1' / 长数字编码, Excel 自动识别成日期 / 科学计数法.
+            #   强制文本格式 '@' (与 xlsx_writer._write_csv_to_sheet 保持一致).
+            if r_idx > 1 and c_idx == 2:
+                cell.number_format = "@"
             if is_section:
                 cell.font = bold_font
                 cell.alignment = Alignment(horizontal="left", vertical="center")
