@@ -1,3 +1,4 @@
+# ===== Web 服务 (file_asset_service/app/) =====
 boto3>=1.34
 fastapi>=0.115
 openpyxl>=3.1
@@ -9,3 +10,13 @@ uvicorn[standard]>=0.30
 xlrd>=2.0.1
 mammoth>=1.8
 
+# ===== 信息价解析子进程 (info_price_pipeline/北京/1_脚本/mineru-pdf-parse/scripts/parse_pdf.py:32) =====
+# parse_pdf.py / parse_async.py / parse_all.py / health_check.py 都要用
+requests>=2.34
+
+# PDF 页数 + 元数据 (parse_pdf.py / parse_chunked.py / quota pipeline 都 import fitz)
+PyMuPDF>=1.28
+
+# ===== quota parser 子进程 (quota/parser/external/*/scripts/*.py) =====
+# narrative_parser 处理 OCR 出的 HTML 用 BeautifulSoup 解析章节/字段
+beautifulsoup4>=4.12
