@@ -46,6 +46,9 @@ class MaterialHeaderLayout(str, Enum):
     CLASS_CODE_NAME_UNIT_PRICE_QTY = "class-code-name-unit-price-qty"  # gd: 分类|编码|名称|单位|单价|消耗量
     CLASS_NAME_UNIT_PRICE_QTY = "class-name-unit-price-qty"  # yn: 分类|名称|单位|单价|消耗量（无编码列，名称可跨2列）
     CLASS_CODE_NAME_UNIT_QTY = "class-code-name-unit-qty"  # bj: 分类|编码|名称|单位|消耗量（无单价列）
+    CLASS_NAME_UNIT_QTY_RIGHT_PRICE = "class-name-unit-qty-right-price"
+    # 深圳 2023 单子目形态：分类|名称(跨2)|单位|数量|价格(最右)。
+    #   价格列 = "2023年8月工料机参考价格(元)"，位于表格最右侧，数量在左。
 
 
 class FeeEmitStrategy(str, Enum):
@@ -304,6 +307,30 @@ PRESET_PROFILES: dict[str, FeatureFlagProfile] = {
         material_fee_auto_emit=MaterialFeeAutoEmit.HU,
         cross_page_strategy=CrossPageStrategy.JOIN,
         material_sort=True,
+        filter_project_numeric=True,
+    ),
+    "hn-2018": FeatureFlagProfile(
+        name="hn-2018",
+        project_id_regex=r"^[A-Z]\d+-\d+$",  # B1-1（湖南省仿古建筑工程消耗量标准基价表）
+        material_header_layout=MaterialHeaderLayout.NAME_UNIT_PRICE_QTY,
+        section_system=SectionSystem.CHINESE4,
+        section_depth=4,
+        fee_emit_strategy=FeeEmitStrategy.THREE_CORRESPONDENCE,
+        material_fee_auto_emit=MaterialFeeAutoEmit.HU,
+        cross_page_strategy=CrossPageStrategy.JOIN,
+        material_sort=True,
+        filter_project_numeric=True,
+        strict_section_downstream=True,  # 规则条目（工程量计算规则）不当段行；章节下方必须低级章节或定额
+    ),
+    "sz-2023": FeatureFlagProfile(
+        name="sz-2023",
+        project_id_regex=r"^\d{6}-\d+$",  # 010001-1（6 位章节码-子目序号，深圳市建筑工程消耗量标准）
+        material_header_layout=MaterialHeaderLayout.CLASS_NAME_UNIT_QTY_RIGHT_PRICE,
+        section_system=SectionSystem.CHINESE4,  # TODO(sz): 需新增 NUMERIC 枚举（## 1 / ## 1.3 / ## 1.3.1 数字多级）
+        section_depth=4,
+        fee_emit_strategy=FeeEmitStrategy.THREE_CORRESPONDENCE,
+        material_fee_auto_emit=MaterialFeeAutoEmit.NONE,  # 深圳表含 材料费/机械费 费行（全费用构成区），不自动 emit
+        cross_page_strategy=CrossPageStrategy.NONE,
         filter_project_numeric=True,
     ),
     "bj-2021": FeatureFlagProfile(

@@ -4804,3 +4804,794 @@ a.rail-button {
   color: var(--red);
   font-weight: 600;
 }
+
+/* ════ info 独有样式 (parse/excel/download, 2026-08-13 重建) ════ */
+/* PDF -> xlsx 解析弹框（透明 bug 修复：复制 manual-upload-dialog 的可见样式） */
+
+.parse-dialog{
+  width: min(680px, calc(100vw - 48px));
+  max-height: calc(100vh - 96px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.18);
+}
+
+/* 2026-08-04 改：解析弹框美化 — 头部加 accent 蓝色横条，body 留白，footer 三按钮网格 */
+
+.parse-dialog-header{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, #f6faff 0%, var(--surface) 100%);
+}
+
+.parse-dialog-titles p.eyebrow{ margin-bottom: 4px; }
+
+.parse-dialog-titles h2{ margin: 0; font-size: 16px; line-height: 1.3; }
+
+.parse-dialog-body{
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+}
+
+.parse-dialog-footer{
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.parse-dialog-footer:empty{ display: none; }
+
+/* 状态 pill：图标 + 文字 + 配色，比单纯 badge 更有信息量
+   2026-08-04 改：状态徽章挪到行级状态列（renderParseBadge），modal 里不再渲染，
+   旧的 .parse-status-pill 系列保留 CSS 兜底（如有遗留调用不至于炸样式）。 */
+
+.parse-status-pill{
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.parse-status-pill i{ width: 16px; height: 16px; }
+
+.parse-status-pill.spinning i{ animation: parse-badge-spin 1s linear infinite; }
+
+.parse-status-info{ color: #1e4ea1; border-color: #b7d3f0; background: var(--blue-soft); }
+
+.parse-status-warning{ color: #8a6300; border-color: #ffd591; background: var(--amber-soft); }
+
+.parse-status-success{ color: #0a7a3a; border-color: #b6e0c5; background: var(--green-soft); }
+
+.parse-status-error{ color: #b00020; border-color: #f4b5be; background: var(--red-soft); }
+
+/* 2026-08-04 新增：modal 内的「状态导引」提示条 — 告诉用户「去行上看」即可，不重复显示状态徽章 */
+
+.parse-status-hint{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  background: var(--surface-soft, #f5f7fa);
+  border: 1px solid var(--border-soft, #e3e7ec);
+  color: var(--text-secondary, #4a5560);
+  margin-bottom: 14px;
+}
+
+.parse-status-hint i{ width: 16px; height: 16px; flex-shrink: 0; }
+
+/* 解析产物元信息（成功后展示） */
+
+.parse-result-meta{
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+
+.parse-result-meta-item{
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.parse-result-meta-item i{ width: 13px; height: 13px; }
+
+.parse-result-meta-sha{ color: var(--tertiary); }
+
+/* 2026-08-04 新增：「已解析 N 条」高亮 banner — 数字大、强调成功
+   颜色与 .parse-status-hint.success 同源（绿系）但更重，让用户立刻看到量级 */
+
+.parse-row-count{
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 14px 18px;
+  margin: 0 0 12px 0;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #eaf7ee 0%, #d6f1df 100%);
+  border: 1px solid #b6e0c5;
+  color: #0a7a3a;
+}
+
+.parse-row-count i{ width: 20px; height: 20px; flex-shrink: 0; align-self: center; }
+
+.parse-row-count-num{
+  font-size: 32px;
+  font-weight: 700;
+  font-family: var(--mono, ui-monospace, monospace);
+  letter-spacing: -0.5px;
+}
+
+.parse-row-count-unit{
+  font-size: 14px;
+  font-weight: 500;
+  color: #4a8a64;
+}
+
+/* 2026-08-04 加：loading 状态（旧 archive 兜底 fetch 时显示 …） */
+
+.parse-row-count-loading{
+  background: #f3f5f7;
+  border-color: #d8dde3;
+  color: #6b7280;
+}
+
+.parse-row-count-loading i{ animation: parse-badge-spin 1s linear infinite; }
+
+/* 2026-08-04 加：fetch 失败状态 — 灰色 + alert 图标，让用户立刻看到失败 */
+
+.parse-row-count-failed{
+  background: #fef3f3;
+  border-color: #f4b5be;
+  color: #b00020;
+}
+
+.parse-row-count-failed i{ animation: none; }
+
+/* 2026-08-04 新增：右下角「已解析 N 条 · 用时 X 秒」toast
+   复用 .toast 类样式但固定在右下角（不顶在屏幕中央），3 秒自动消失 */
+
+.toast.parse-success-toast{
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  top: auto;
+  left: auto;
+  transform: translateY(16px);
+  opacity: 0;
+  transition: transform 250ms ease-out, opacity 250ms ease-out;
+  background: #0a7a3a;
+  color: #fff;
+  padding: 12px 18px;
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(10, 122, 58, 0.25);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 420px;
+  z-index: 9999;
+}
+
+.toast.parse-success-toast.show{
+  transform: translateY(0);
+  opacity: 1;
+}
+
+.toast.parse-success-toast.fade-out{
+  transform: translateY(8px);
+  opacity: 0;
+}
+
+.toast.parse-success-toast i{ width: 18px; height: 18px; }
+
+.toast.parse-success-toast strong{ font-weight: 600; }
+
+/* 解析日志容器 */
+
+.parse-log{
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #1f2226;
+  color: #e8eaed;
+  overflow: hidden;
+}
+
+.parse-log-header{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #15181c;
+  border-bottom: 1px solid #2a2e34;
+  font-size: 12px;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+.parse-log-header i{ width: 13px; height: 13px; }
+
+.parse-log-pulse{
+  margin-left: auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #52c41a;
+  box-shadow: 0 0 0 3px rgba(82, 196, 26, 0.2);
+  animation: parse-badge-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes parse-badge-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+
+.parse-log-body{
+  max-height: 280px;
+  overflow: auto;
+  padding: 8px 12px;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.parse-log-line{
+  margin: 0;
+  padding: 2px 0;
+  color: #e8eaed;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.parse-log-empty{
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.parse-truncated{
+  margin: 0;
+  padding: 6px 12px;
+  background: #3a2e1a;
+  color: #fbbf24;
+  font-size: 12px;
+  border-bottom: 1px solid #2a2e34;
+}
+
+/* 错误块 */
+
+.parse-error{
+  border: 1px solid #ffa39e;
+  border-radius: var(--radius);
+  background: var(--red-soft);
+  color: var(--red);
+  overflow: hidden;
+}
+
+.parse-error-header{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #ffe5e3;
+  border-bottom: 1px solid #ffc1bd;
+  font-size: 13px;
+}
+
+.parse-error-header i{ width: 14px; height: 14px; }
+
+.parse-error pre{
+  margin: 0;
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #5e1c1c;
+  max-height: 180px;
+  overflow: auto;
+}
+
+/* 按钮 — 主/幽灵/危险 */
+
+.parse-btn{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.parse-btn:hover{ border-color: var(--blue); }
+
+.parse-btn i{ width: 14px; height: 14px; }
+
+.parse-btn-primary{
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.parse-btn-primary:hover{ background: #194a8c; border-color: #194a8c; }
+
+.parse-btn-ghost{
+  background: transparent;
+}
+
+.parse-btn-danger-ghost{
+  background: transparent;
+  color: var(--red);
+  border-color: #ffa39e;
+}
+
+.parse-btn-danger-ghost:hover{
+  background: var(--red-soft);
+  border-color: var(--red);
+}
+
+.parse-btn:disabled{ opacity: 0.55; cursor: not-allowed; }
+
+/* Row-level parse badge (Phase 5R) */
+
+.parse-badge{
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  margin-left: 6px;
+  font-size: 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.parse-badge i{ width: 14px; height: 14px; }
+
+.parse-badge.success{ color: #0a7a3a; border-color: #b6e0c5; background: #eaf7ee; }
+
+.parse-badge.error{ color: #b00020; border-color: #f4b5be; background: #fdecee; }
+
+.parse-badge.warning{ color: #8a6300; border-color: #f0d99a; background: #fdf6e3; }
+
+.parse-badge.info{ color: #1e4ea1; border-color: #b7d3f0; background: #eaf2fc; }
+
+.parse-badge.spinning i{ animation: parse-badge-spin 1s linear infinite; }
+
+@keyframes parse-badge-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+.viewer-mode-group{
+  display: inline-flex;
+  gap: 6px;
+}
+
+/* 2026-08-03 新增：Excel 预览顶部工具条 + 打开完整文档按钮（PDF 同位置） */
+
+.excel-preview-toolbar{
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--line);
+  background: #fafafa;
+}
+
+.excel-open-full{
+  text-decoration: none;
+}
+
+/* 2026-08-04 新增：多 sheet 预览 — tab 切换条 */
+
+.excel-sheet-tabs{
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  padding: 6px 14px 0 14px;
+  border-bottom: 1px solid var(--line);
+  background: #f5f5f5;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.excel-sheet-tab{
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  padding: 6px 14px;
+  font: inherit;
+  color: var(--ink-muted, #555);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.excel-sheet-tab:hover{
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--ink, #222);
+}
+
+.excel-sheet-tab.active{
+  background: #ffffff;
+  color: var(--ink, #111);
+  border-color: var(--line, #e2e2e2);
+  font-weight: 600;
+  position: relative;
+  top: 1px; /* 让 active tab 边线和 sheet-host 顶部对齐 */
+}
+
+.excel-sheet-tab .sheet-tab-size{
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ink-faint, #888);
+}
+
+.excel-sheet-host{
+  background: #ffffff;
+}
+
+.excel-sheet-pane[hidden]{
+  display: none;
+}
+
+/* 2026-08-04 新增：列宽按内容最长字段自动估算后，表格 cell 单行截断 + hover 看全文 */
+
+.excel-preview table td,
+.excel-preview table th{
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.excel-preview table th[scope="row"]{
+  max-width: 44px;
+  text-align: right;
+  color: var(--ink-muted, #888);
+  font-variant-numeric: tabular-nums;
+}
+
+/* task 4: manual upload region cascader / multi-file list / supplement target */
+.region-cascader{
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── Period picker ── */
+
+/* ─────────────────────────────────────────────────────────────────────
+   清单定额档案台 (domain_type=quota) · P0-5A 专属样式（quota- 前缀，避免污染既有域）
+   ───────────────────────────────────────────────────────────────────── */
+
+/* ── P0-5A v3 两级标签筛选 ─────────────────────────────────────────── */
+
+/* 高级筛选区内容 */
+
+/* 补录弹窗 */
+
+/* ── P0-5A v2 简化表单样式 ───────────────────────────────────────── */
+
+/* 拖拽上传区 */
+
+/* 简化四字段表单 */
+
+/* 校验汇总（footer 上方） */
+
+/* inline 错误提示 */
+
+/* 简化分册列表 */
+
+/* 文件角色 badge（替代下拉，用户可见的角色标签） */
+
+/* 待归属文件池 */
+
+/* 高级信息折叠区 */
+
+/* 法律状态自动计算展示 */
+
+/* footer 提示（替换大块红色错误） */
+
+/* E2: 2026-08-03 下载按钮 details 折叠菜单 */
+
+.download-menu{
+  position: relative;
+  display: inline-block;
+}
+
+.download-menu summary{
+  list-style: none;
+  cursor: pointer;
+}
+
+.download-menu summary::-webkit-details-marker{
+  display: none;
+}
+
+.download-menu[open] summary{
+  background: var(--subtle);
+}
+
+.download-menu-body{
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  min-width: 140px;
+  z-index: 100;
+  padding: 4px 0;
+}
+
+.download-menu-item{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.download-menu-item i{
+  width: 16px;
+  height: 16px;
+}
+
+.download-menu-item:hover{
+  background: var(--subtle);
+}
+
+.download-menu-item.disabled{
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+/* 2026-08-05 新增：垃圾桶删除选项菜单（复用 download-menu 折叠模式） */
+
+.download-menu-list{
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  min-width: 200px;
+  z-index: 100;
+  padding: 6px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.download-menu-list .icon-button{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  color: var(--text);
+  font-size: 14px;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.download-menu-list .icon-button:hover{
+  background: var(--subtle);
+}
+
+.download-menu-label{
+  flex: 1;
+}
+
+/* ===== 2026-08-03 新增：文件选择器 modal ===== */
+
+.file-picker-dialog{
+  width: min(640px, calc(100vw - 48px));
+  max-height: calc(100vh - 96px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.file-picker-header{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.file-picker-header h2{
+  margin: 2px 0 0;
+  font-size: 15px;
+  line-height: 1.3;
+}
+
+.file-picker-body{
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+}
+
+.file-picker-item{
+  width: 100%;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: inherit;
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.file-picker-item:hover{
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.file-picker-item-text{
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.file-picker-item-text strong{
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-picker-item-text small{
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.file-picker-item-arrow{
+  width: 16px;
+  height: 16px;
+  color: var(--tertiary);
+}
+
+/* ===== 2026-08-03 新增：预览 details 菜单定位 ===== */
+
+.preview-menu{ position: relative; display: inline-block; }
+
+.preview-menu .download-menu-body{ z-index: 100; }
+
+.preview-menu-trigger{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--control-height);
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.08);
+  color: #f8fafc;
+  cursor: pointer;
+  white-space: nowrap;
+  list-style: none;
+  font-size: 13px;
+}
+
+.preview-menu-trigger::-webkit-details-marker{ display: none; }
+
+.preview-menu-trigger:hover{ border-color: var(--blue); }
+
+.preview-menu[open] .preview-menu-trigger{
+  background: rgba(255, 255, 255, 0.18);
+  border-color: var(--blue);
+}
+
+.preview-menu-trigger svg{ width: 16px; height: 16px; stroke-width: 2; }
+
+.preview-menu .download-menu-body{ min-width: 200px; }
+
+.preview-menu .download-menu-item{
+  white-space: nowrap;
+  padding: 7px 14px;
+}
+
+/* ===== 2026-08-03 新增：viewer 双 pane 预览（左 PDF / 右 Excel） ===== */
+
+.viewer-panes{
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  gap: 8px;
+  padding: 8px;
+  overflow: hidden;
+}
+
+.viewer-panes.dual-preview{
+  grid-template-columns: 1fr 1fr;
+}
+
+.viewer-panes.xlsx-only > #viewerCanvas,
+.viewer-panes.pdf-only > #viewerXlsxPane{
+  display: none !important;
+}
+
+.viewer-panes > #viewerCanvas,
+.viewer-panes > #viewerXlsxPane{
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.xlsx-pane{
+  background: var(--canvas, #fafafa);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 4px;
+}
+
+.xlsx-pane[hidden]{ display: none; }

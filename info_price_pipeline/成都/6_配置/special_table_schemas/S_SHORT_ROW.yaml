@@ -1,0 +1,33 @@
+schema_id: S_SHORT_ROW
+handler: extract_new_material_table
+applicable_sections: [NEW_MATERIAL, PC]
+
+trigger:
+  header_cols_gt: 1
+  row_cols:
+    min: 1
+    pattern: "row_cols < header_cols"
+
+pre_steps:
+  - name: pad_short_row
+    insert_empty_at: 0
+  - name: inherit_last_real_name
+    field: 产品名
+
+fields:
+  产品名:
+    source: ["last_real_name", "rows[i][0]"]
+  规格:
+    source: "rows[i][name_idx+1]"
+  单位:
+    source: "rows[i][name_idx+2]"
+  不含税价:
+    source: "rows[i][name_idx+3]"
+
+log:
+  - city: 成都
+    period: 06
+    table_idx: 1316
+    page: 180
+    extracted_rows: 19
+    timestamp: 2026-07-28

@@ -1,0 +1,30 @@
+schema_id: S_2D_MIRROR
+handler: extract_new_material_4col
+applicable_sections: [NEW_MATERIAL]
+
+trigger:
+  rows:
+    max_cols: ">=8"
+    header_first_duplicate_col: true
+
+pre_steps:
+  - name: split_new_material_2d
+    split_at: first_duplicate_header
+
+fields:
+  产品名:
+    source: ["table.caption", "rows[0][0]", {default: "新型材料"}]
+  规格:
+    source: "rows[i][1]"
+  单位:
+    source: "rows[i][2]"
+  不含税价:
+    source: "rows[i][3]"
+
+log:
+  - city: 成都
+    period: 06
+    table_idx: 1303
+    page: 178
+    extracted_rows: 56
+    timestamp: 2026-07-28

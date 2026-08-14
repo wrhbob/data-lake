@@ -1,0 +1,36 @@
+schema_id: S_D2_B
+handler: extract_d2_pivot_table
+applicable_sections: [NEW_MATERIAL, MARKET]
+
+trigger:
+  rows_0:
+    min_cols: 1
+    max_cols: 1
+  rows_1:
+    min_cols: 3
+    first_col_in: ["规格", "规格型号"]
+
+pre_steps:
+  - name: strip_leading_1cell_rows
+    max_strip: 5
+  - name: collect_pre_caption
+    save_to: pre_caption
+    pick: longest
+
+fields:
+  产品名:
+    source: ["pre_caption", "table.caption", {default: "新型材料"}]
+  规格:
+    template: "{value} {grade}"
+  单位:
+    source: "rows[1][1]"
+  不含税价:
+    source: "rows[i+1][j+1]"
+
+log:
+  - city: 成都
+    period: 06
+    table_idx: 1309
+    page: 179
+    extracted_rows: 44
+    timestamp: 2026-07-28

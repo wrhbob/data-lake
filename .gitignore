@@ -43,3 +43,18 @@ logs/
 
 # ── 解析脚本测试产物（数据/PDF/OCR 跑批结果，磁盘保留不入库）──
 quota/parser/tests/
+
+# ── 信息价解析脚本（已内迁到 info_price_pipeline/）────────────
+# 脚本 + 配置入库；运行时产物（OCR 缓存 / xlsx / 日志）不入库
+info_price_pipeline/**/2_输入/
+info_price_pipeline/**/3_中间产物/
+info_price_pipeline/**/4_输出/
+info_price_pipeline/**/5_日志/
+
+# ── 本地调试 / 比对临时产物（一次性 diff dump / 进程快照 / 备份）──
+*_diff.txt
+*.bak.*
+MERGE_DIFF_REPORT.md
+_ppid.txt
+_proc_tree.json
+_resp_list.json

@@ -185,7 +185,7 @@ python -m pytest tests/ -x -v            # 运行测试
 
 ## 服务运维 SOP（启动 / 停止 / 彻底杀干净）
 
-> 适用于本机开发 + 单机部署。**所有命令必须在仓库根目录 `d:\工程造价学习\data_lake0714\data_lake0714` 下执行**。
+> 适用于本机开发 + 单机部署。**所有命令必须在仓库根目录（main 仓根目录）下执行**。分发到他人机器后，把下面各条 `ROOT=` 改成实际放置路径即可。
 
 ### 1. 三个进程的角色
 
@@ -223,7 +223,7 @@ sweeper → worker → web
 ### 5. 启动 SOP
 
 ```bash
-ROOT="/d/工程造价学习/data_lake0714/data_lake0714"
+ROOT="/d/工程造价学习/data_lake0714/main"
 cd "$ROOT"
 
 # 1) sweeper — 后台守护,常驻
@@ -249,7 +249,7 @@ echo $! > logs/web.pid
 ### 6. 验证服务是否真活着
 
 ```bash
-ROOT="/d/工程造价学习/data_lake0714/data_lake0714"
+ROOT="/d/工程造价学习/data_lake0714/main"
 cd "$ROOT"
 
 # 进程状态
@@ -270,7 +270,7 @@ tasklist //FI "IMAGENAME eq python.exe"
 ### 7. 标准停止（优雅退出）
 
 ```bash
-ROOT="/d/工程造价学习/data_lake0714/data_lake0714"
+ROOT="/d/工程造价学习/data_lake0714/main"
 cd "$ROOT"
 
 bash file_asset_service/scripts/run_quota_parser_worker.sh stop    # worker
@@ -284,7 +284,7 @@ WPID=$(cat logs/web.pid 2>/dev/null)
 ### 8. 彻底杀干净（应急 / 重启前兜底）
 
 ```bash
-ROOT="/d/工程造价学习/data_lake0714/data_lake0714"
+ROOT="/d/工程造价学习/data_lake0714/main"
 cd "$ROOT"
 
 # 1) 优雅停（即使已死也不报错）
@@ -366,3 +366,62 @@ with get_engine().connect() as c:
 | 端口 8010 已被占用 | `netstat -ano | grep ":8010"` → 找到占用 pid → `taskkill //PID <pid> //F` |
 | sweeper "另一个 sweeper 已占 lockfile" | `/tmp/quota_parser_sweeper.lock` 残留,删掉重启（Windows 跳过 flock,不会撞这条） |
 | **web 启动后 init_db 卡住不退出（无 `[serve] shared NAS database ready`）** | **PG 端僵尸连接阻塞锁**：本机 client_addr 有 idle in transaction 1min+ 或 active wait=Lock。跑 §8 步骤 5 主动 `pg_terminate_backend()` 清掉, 再重启 web。诊断 SQL: `SELECT pid, state, now()-xact_start AS xact_age, wait_event_type FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND (state LIKE 'idle in transaction%' OR wait_event_type = 'Lock');` |
+
+---
+
+## 分发准备（发给他人前的检查清单）
+
+### 1. Python 环境（必读）
+
+**必须用 `file-asset` conda 环境**（不是 DLSE）。解释器：
+
+```
+/d/miniconda3/envs/file-asset/python.exe   # 本机
+```
+
+接收方需在自己机器上准备同名环境，并装齐下方依赖（本机已全装，可 `pip list` 对照）。
+
+### 2. 依赖清单（file-asset 环境实测版）
+
+| 包 | 版本 | 用途 |
+|---|---|---|
+| fastapi / uvicorn / starlette | 0.140 / 0.51 / 1.3 | web 服务 |
+| sqlalchemy / psycopg | 2.0.51 / 3.3.4 | PostgreSQL（共享 NAS） |
+| pydantic / python-dotenv | 2.13 / 1.2 | 配置 + 校验 |
+| requests / httpx | 2.34 / 0.28 | MinerU OCR API 调用 |
+| openpyxl | 3.1.5 | xlsx 读写（信息价 + 定额） |
+| pymupdf (fitz) | 1.28.0 | PDF 分块 / 页数统计 |
+| pyyaml | 6.0.3 | 成都 step2 城市模板加载 |
+| boto3 | 1.43.56 | MinIO / S3 对象存储 |
+| python-multipart | 0.0.32 | 文件上传 |
+
+### 3. 信息价脚本已内迁（相对路径，无需配绝对路径）
+
+信息价解析脚本已从仓库外的 `--v2-main` **内迁到 `info_price_pipeline/`**（6 城：成都/重庆/北京/武汉/湖北/广州）。
+
+`info_price_parse.py` 里 `PIPELINE_BASE` 用 `Path(__file__)` 推导到 `main/info_price_pipeline`；`.env` 里**不再需要** `INFO_PRICE_PIPELINE_BASE`（仅自定义布局时才覆盖）。换机器不会再有「文件夹找不到」问题。
+
+### 4. .env 配置（分发后必填）
+
+复制 `.env.example` → `.env`，填共享连接（值不写这里，见 `.env.example` 占位符）：
+
+- `FILE_ASSET_DATABASE_URL` — 共享 NAS PostgreSQL（当前入口 `djtsoft.x3322.net:5433`）
+- `FILE_ASSET_S3_*` — MinIO 连接（endpoint / access key / secret / region）
+- `FILE_ASSET_RAW_BUCKET` / `FILE_ASSET_EXTRACT_BUCKET` / `FILE_ASSET_REPORT_BUCKET`
+- `INFO_PRICE_MINERU_API_URL` — MinerU OCR 端点（当前 `http://172.16.20.23:8000`）
+
+> ⚠️ `.env` 含真实口令，**被 Git 忽略**。分发时只带 `.env.example`，不带 `.env`；接收方单独配置同一套共享连接（`git pull` 不会同步数据，也不应把 `.env` 入库）。
+
+### 5. 分发步骤
+
+1. 拷贝整个 `main/` 目录（含 `info_price_pipeline/`、`file_asset_service/`、`quota/`）
+2. 准备 `file-asset` conda 环境（装 §2 依赖）
+3. 复制 `.env.example` → `.env`，填共享 NAS / MinIO / MinerU 连接
+4. 按 §服务运维 SOP 启动：sweeper → worker → web（端口 8010）
+
+### 6. 不打包的内容
+
+- `info_price_pipeline/*/3_中间产物`、`4_输出`、`5_日志`（运行时产物，OCR 缓存 / 日志）
+- `.env`（真实口令）
+- `logs/`（本机日志 + pid）
+- `*.pyc` / `__pycache__` / `_baseline` / `*.bak*`（缓存 + 备份）

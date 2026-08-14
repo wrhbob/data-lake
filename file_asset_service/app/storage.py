@@ -62,6 +62,10 @@ class ObjectStore(Protocol):
     ) -> ObjectStream:
         ...
 
+    def delete_object(self, bucket: str, object_key: str) -> None:
+        """删除对象；不存在抛 KeyError（404 NoSuchKey），调用方决定是否幂等"""
+        ...
+
 
 @dataclass(frozen=True)
 class StoredObject:
@@ -110,6 +114,13 @@ class FakeObjectStore:
     def stat_object(self, bucket: str, object_key: str) -> ObjectStat:
         stored = self.objects[(bucket, object_key)]
         return ObjectStat(byte_size=len(stored.content), content_type=stored.content_type, etag=stored.etag)
+
+    def delete_object(self, bucket: str, object_key: str) -> None:
+        # 2026-08-10 增：delete_xlsx_output 调用，404 抛 KeyError 保持幂等语义
+        key = (bucket, object_key)
+        if key not in self.objects:
+            raise KeyError(key)
+        del self.objects[key]
 
 
 class S3ObjectStore:
@@ -189,6 +200,17 @@ class S3ObjectStore:
             content_type=response.get("ContentType"),
             etag=str(response.get("ETag", "")).strip('"') or None,
         )
+
+    def delete_object(self, bucket: str, object_key: str) -> None:
+        # 2026-08-10 增：delete_xlsx_output 调用；404 NoSuchKey 抛 KeyError 走幂等
+        from botocore.exceptions import ClientError
+
+        try:
+            self.client.delete_object(Bucket=bucket, Key=object_key)
+        except ClientError as exc:
+            if _is_missing_object_error(exc):
+                raise KeyError((bucket, object_key)) from exc
+            raise
 
 
 def _is_missing_object_error(exc: object) -> bool:

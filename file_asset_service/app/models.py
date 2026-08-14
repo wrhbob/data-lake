@@ -475,19 +475,23 @@ class Archive(Base):
     # 状态枚举：`pending / parsing / parsed / qa_passed / usable / failed_user /
     # failed_permanent / transient`（无 CheckConstraint，自由写入，由 adapter 层校验）。
     # 其余 12 列与 Manifest（quota-parser-result/v1）字段一一对齐（web-frontend SPEC §6.1）。
-    parse_status: Mapped[str | None] = mapped_column(String(32), index=True)
-    parse_profile: Mapped[str | None] = mapped_column(String(32))
-    parse_task_id: Mapped[str | None] = mapped_column(String(64))
-    parse_phase: Mapped[str | None] = mapped_column(String(16))
-    parse_parser_version: Mapped[str | None] = mapped_column(String(32))
-    parse_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    parse_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    parse_metrics: Mapped[dict | None] = mapped_column(archive_json_type())
-    parse_warnings: Mapped[list | None] = mapped_column(archive_json_type())
-    parse_error_code: Mapped[str | None] = mapped_column(String(32))
-    parse_error_message: Mapped[str | None] = mapped_column(Text)
-    candidate_xlsx_key: Mapped[str | None] = mapped_column(String(512))
-    final_xlsx_key: Mapped[str | None] = mapped_column(String(512))
+    # parse_* 13 字段（合并 main 类型语义 + info 字段精度）
+    # 项 1：CheckConstraint 保留 main 动态 sql_in_clause(28 role)
+    # 项 2：字段长度采用 info 版本（String(64)/Text/显式 nullable=True），向上兼容
+    # 项 3：parse_warnings 保留 main 的 list（语义清晰：警告数组）
+    parse_status: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    parse_profile: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parse_task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parse_phase: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parse_parser_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    parse_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parse_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parse_metrics: Mapped[dict | None] = mapped_column(archive_json_type(), nullable=True)
+    parse_warnings: Mapped[list | None] = mapped_column(archive_json_type(), nullable=True)
+    parse_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    parse_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    candidate_xlsx_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    final_xlsx_key: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     files: Mapped[list["ArchiveFile"]] = relationship(back_populates="archive", cascade="all, delete-orphan")
     data_source: Mapped[DataSource] = relationship()

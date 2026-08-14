@@ -1,0 +1,19 @@
+special_table_schemas:
+  - schema_id: S_D2_A
+    handler: extract_d2_pivot_table
+    file: S_D2_A.yaml
+  - schema_id: S_D2_B
+    handler: extract_d2_pivot_table
+    file: S_D2_B.yaml
+  - schema_id: S_2D_MIRROR
+    handler: extract_new_material_4col
+    file: S_2D_MIRROR.yaml
+  - schema_id: S_NESTED
+    handler: extract_new_material_table
+    file: S_NESTED.yaml
+  - schema_id: S_SHORT_ROW
+    handler: extract_new_material_table
+    file: S_SHORT_ROW.yaml
+  - schema_id: S_MULTI_PRODUCT
+    handler: extract_new_material_table
+    file: S_MULTI_PRODUCT.yaml

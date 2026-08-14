@@ -1,0 +1,116 @@
+city: 北京市
+province: 北京市
+cross_page_merge: false
+
+# 2026-07-30 北京 06 二次验证：
+# 印刷页 "10" → OCR page_idx=9 (一、工程造价信息价)
+# 公式: start_real = start + page_offset (印刷页 + offset = OCR page_idx)
+# 所以 offset = OCR - 印刷 = -1 (印刷页 10 → start_real = 10 + (-1) = 9 ✓)
+page_offset: -1
+
+# 北京 TOC 是 trailing 格式：
+# "一、工程造价信息价…… ……10" (章节名 页码，无括号)
+# 跟成都一致（成都也是 trailing，但成都 OCR 有括号 "(10)"）
+# 2026-07-29 修正：之前误判 leading，实测是 trailing
+toc_format: trailing
+
+# 章节范围（PDF 物理页 = OCR page_idx，0-indexed）
+# 2026-07-30 注：以下 page_range 仅作 step2 章节分类参考（page_to_section 硬边界不稳）
+# 真正的 sheet 分流靠 table_schemas 匹配（schema 优先）
+sections:
+  market:
+    page_range: [9, 104]
+    toc_label: 工程造价信息价/市场参考价
+  new_material:
+    page_range: [105, 118]
+    toc_label: 厂家参考价/绿色建材/花园城市
+
+# Sheet 输出配置（step6 读）
+# 2026-07-30 改：按 schema 优先，每个 schema 标 sheet 字段驱动 step6 分流
+# PC 表归 Sheet 2 市场参考价（用户原话 2026-07-30："PC 的 sheet 表头和信息价的表头一致，不用单独列"）
+sheet_config:
+  sheets:
+    - name: 工程造价信息价
+    - name: 市场参考价
+    - name: 厂家参考价
+    - name: 绿色建材
+    - name: 花园城市
+    - name: 元数据
+
+# 表结构配置（schema 优先 — 2026-07-30 重构）
+# 每张表独立匹配 schema，按 n_cols + header_keywords 命中分
+# 关键洞察：page_to_section 硬边界碰到 OCR 页码偏移不稳会错分，schema 不变
+# 所以：北京 chapter 划分完全靠 schema 匹配，不靠 toc/page
+table_schemas:
+
+  # ===== Sheet 1 工程造价信息价（章节一，6 列含代号，输出 5 列）=====
+  # OCR 实测：代号 | 产品名称 | 规格型号及特征 | 计量单位 | 工程造价信息价(含税) | 工程造价信息价(不含税)
+  # 2026-07-29 用户原话：代号列去掉不写
+  market_5col_bj_p1:
+    n_cols: 6
+    section: MARKET
+    sheet: 工程造价信息价
+    chapter: MARKET_1
+    header_keywords: ["代号", "产品名称", "规格型号及特征", "计量单位", "工程造价信息价"]
+
+  # ===== Sheet 2 市场参考价（章节二，6 列含代号，输出 5 列）=====
+  # OCR 实测：代号 | 产品名称 | 规格型号及特征 | 计量单位 | 市场参考价(含税) | 市场参考价(不含税)
+  market_5col_bj_p2:
+    n_cols: 6
+    section: MARKET
+    sheet: 市场参考价
+    chapter: MARKET_2
+    header_keywords: ["代号", "产品名称", "规格型号及特征", "计量单位", "市场参考价"]
+
+  # ===== Sheet 3 厂家参考价（章节三 p102-105 部分表，6 列含代号但无序号，输出 5 列）=====
+  # OCR 实测：代号 | 产品名称 | 规格型号及特征 | 计量单位 | 厂家参考价(含税) | 厂家参考价(不含税)
+  # 与章节二结构相同，区别只在 price 列名（"市场参考价" vs "厂家参考价"）
+  # 章节三后半段 p106+ 才是含"序号"列的 6 列 schema（recommend_6col_manufacturer）
+  market_5col_bj_p3:
+    n_cols: 6
+    section: NEW_MATERIAL
+    sheet: 厂家参考价
+    chapter: NM_3
+    header_keywords: ["代号", "产品名称", "规格型号及特征", "计量单位", "厂家参考价"]
+
+  # ===== Sheet 2 追加：PC 装配式（9 列含钢筋含量）=====
+  # 2026-07-30 用户原话：PC sheet 表头和信息价一致，不用单独列 → 追加到 Sheet 2 末尾
+  # OCR 实测：代号 | 产品名称 | 规格 | 钢筋含量 | 价格类型 | 单位 | 含税价 | 不含税价 | 说明
+  pc_9col_bj:
+    n_cols: 9
+    section: MARKET  # PC 归 MARKET（让 step5 残缺统计兼容）
+    sheet: 市场参考价
+    chapter: PC  # chapter 标记用于 step6 追加到 Sheet 2 末尾
+    header_keywords: ["构件名称", "钢筋含量", "到场价"]
+
+  # ===== Sheet 3 厂家参考价（章节四，6 列含序号）=====
+  # OCR 实测：序号 | 产品名称 | 规格型号及特征 | 计量单位 | 厂家参考价(含税) | 厂家参考价(不含税)
+  recommend_6col_manufacturer:
+    n_cols: 6
+    section: NEW_MATERIAL
+    sheet: 厂家参考价
+    chapter: NM_3
+    header_keywords: ["序号", "产品名称", "规格型号及特征", "计量单位", "厂家参考价"]
+    # 2026-07-30 删 exclude_pages：page 106 是章节三「PC阻燃」等真实表（非机械租赁）
+    # 2026-07-30 P1-6：manufacturer 章节范围（章节三/四 p104-106）→ tie-breaker bonus
+    valid_pages: [103, 104, 105, 106, 110, 111, 112]
+
+  # ===== Sheet 4 绿色建材（章节四，6 列含序号）=====
+  # OCR 实测：序号 | 产品名称 | 规格型号及特征 | 计量单位 | 绿色建材厂家参考价(含税) | 绿色建材厂家参考价(不含税)
+  recommend_6col_green:
+    n_cols: 6
+    section: NEW_MATERIAL
+    sheet: 绿色建材
+    chapter: NM_4
+    header_keywords: ["序号", "产品名称", "规格型号及特征", "计量单位", "绿色建材厂家参考价"]
+    # 2026-07-30 P1-6：green 章节范围（章节五 p107-109）→ tie-breaker bonus
+    valid_pages: [107, 108, 109]
+
+  # ===== Sheet 5 花园城市（章节五，7-8 列含多个规格列）=====
+  # OCR 实测：序号 | 高度(m)/胸径(cm)/地径(cm)/苗龄/盆径 | 高度(m) | 冠幅(m) | 计量单位 | 林草参考价(含税) | 林草参考价(不含税) | 备注
+  market_8col_bj_garden:
+    n_cols: 7
+    section: NEW_MATERIAL
+    sheet: 花园城市
+    chapter: NM_5
+    header_keywords: ["序号", "林草", "参考价"]

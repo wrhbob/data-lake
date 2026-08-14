@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel
 
 
@@ -358,42 +360,114 @@ class ArchiveResponse(BaseModel):
     preview_status: str
     created_at: str
     updated_at: str
+    # ===== 信息价 PDF → xlsx 解析（2026-08-10 apply 自 info：parse_* 字段提到基类）=====
+    # 主端点 /api/archives（main.py:1162）走 response_model=list[ArchiveSummaryResponse],
+    # 不在 schema 里的字段会被 Pydantic 过滤掉。cost_info 域 parse_status 永远 None,
+    # 字段冗余但无害。parse_supported 决定前端 ▶️ 解析按钮是否启用。
+    # parse_warnings 类型：list（与 models.py / archive_service.py 项 3 决策一致）
+    parse_supported: bool = False
+    parse_status: str | None = None
+    parse_task_id: str | None = None
+    parse_profile: str | None = None
+    parse_phase: str | None = None
+    parse_parser_version: str | None = None
+    parse_error_code: str | None = None
+    parse_error_message: str | None = None
+    parse_metrics: dict | None = None
+    parse_warnings: list = []
+    parse_started_at: str | None = None
+    parse_finished_at: str | None = None
+    candidate_xlsx_key: str | None = None
+    final_xlsx_key: str | None = None
 
 
 class ArchiveSummaryResponse(ArchiveResponse):
     file_count: int
     priced_source_count: int
     primary_file: ArchivePrimaryFileResponse | None = None
-    # v0.4 Bug#1 修：parse_* 字段从 quota 域扩到通用 ArchiveResponse。
-    # 主端点 /api/archives（main.py:1162）走 response_model=list[ArchiveSummaryResponse],
-    # 不在 schema 里的字段会被 Pydantic 过滤掉。cost_info 域 parse_status 永远 None,字段冗余但无害。
-    parse_status: str | None = None
-    parse_phase: str | None = None
-    parse_task_id: str | None = None
-    parse_started_at: str | None = None
-    parse_finished_at: str | None = None
-    parse_error_code: str | None = None
-    candidate_xlsx_key: str | None = None
-    final_xlsx_key: str | None = None
+    # parse_* 字段已统一在 ArchiveResponse 基类声明（apply 自 info）
+    # 2026-08-10 改：把 parse_* 字段从 quota 域子类提到通用 ArchiveResponse 基类，
+    # 避免 ArchiveSummaryResponse / ArchiveDetailResponse 重复声明，且与
+    # _serialize_archive_base (archive_service.py) 透出字段保持一致。
 
 
 class ArchiveDetailResponse(ArchiveResponse):
     files: list[ArchiveFileResponse]
-    # list 端点 (ArchiveSummaryResponse) v0.4 已补上 candidate_xlsx_key / final_xlsx_key,
-    # detail 端点 Pydantic 严格按 schema 过滤,补上这两字段否则前端 archiveFiles() 拿不到
-    # virtual entries 合成条件(len>1),附件池 sidebar 永远 display:none。
-    candidate_xlsx_key: str | None = None
-    final_xlsx_key: str | None = None
-    # v0.8: 详情页渲染「未配置解析脚本」提示条 (quota-ui.js:renderParseStatusSection) 需要
-    # parse_status / parse_warnings / parse_error_message / parse_parser_version.
-    # 这些字段 _serialize_archive_base 已写入 (archive_service.py), 但 Pydantic response_model
-    # 严格按 schema 过滤, 必须显式声明才能透出前端. ArchiveSummaryResponse (list 端点) v0.4
-    # 已带 parse_status 等基础字段, 这里补齐详情页用到的额外字段.
-    parse_status: str | None = None
-    parse_warnings: list = []
-    parse_error_message: str | None = None
-    parse_parser_version: str | None = None
+    # parse_* 字段已统一在 ArchiveResponse 基类声明（apply 自 info）
+    # v0.8: 详情页需要 parse_status / parse_warnings / parse_error_message / parse_parser_version,
+    # _serialize_archive_base 已写入,基类统一声明后所有子类自动继承,无需重复。
 
 
 class ArchiveFromIngestEventResponse(ArchiveDetailResponse):
     attached_to_existing: bool = False
+
+
+# ===== 信息价 PDF → xlsx 解析（2026-08-10 apply 自 info：6 个新 Pydantic 类）=====
+
+
+class ParseSubmitRequest(BaseModel):
+    """POST /api/archives/{id}/parse 请求体。
+
+    year/period 通常后端从 PDF 文件名自动推断,前端可手动覆盖。
+    city 默认走 detect_city(filename → title → region_code) 三级 fallback,
+    不接受前端传入（前端只准覆盖年份+期数）。
+    """
+
+    year: int
+    period: str
+
+
+class ParseSubmitResponse(BaseModel):
+    """POST /api/archives/{id}/parse 响应体。"""
+
+    task_id: str
+    archive_id: str
+    parse_status: str  # queued / running / succeeded / failed / cancelled
+    estimated_duration_seconds: str  # 经验值,前端展示 "预计 ~30s"
+
+
+class ParseCancelResponse(BaseModel):
+    """POST /api/archives/{id}/parse-cancel 响应体。
+
+    cancelled = True 表示已发终止信号(进程正在收拾),并非真正"已终止"。
+    already_terminal = True 表示任务已完成(succeeded/failed/cancelled),无需再 cancel。
+    """
+
+    cancelled: bool
+    already_terminal: bool
+
+
+class ParseDeleteResponse(BaseModel):
+    """DELETE /api/archives/{id}/parse-output 响应体。"""
+
+    deleted: bool
+    archive_id: str
+
+
+class ParseOutputResponse(BaseModel):
+    """GET /api/archives/{id}/parse-output 响应体(presigned URL,7天有效)。"""
+
+    bucket: str
+    object_key: str
+    download_url: str
+    expires_in: int
+    parse_finished_at: datetime | None
+
+
+class ParseStreamEvent(BaseModel):
+    """GET /api/archives/{id}/parse-stream 的 SSE event 帧。
+
+    客户端 EventSource 按 seq 增量追加到日志区,按 status 切换 UI 状态。
+    dropped_lines > 0 时前端显示 '前 N 行已截断' 提示(缓冲区 5000 行封顶)。
+    """
+
+    seq: int
+    status: str  # running / succeeded / failed / cancelled
+    line: str | None = None
+    final_xlsx_key: str | None = None
+    parse_error_code: str | None = None
+    parse_error_message: str | None = None
+    row_count: int | None = None
+    duration_seconds: float | None = None
+    truncated: bool = False
+    dropped_lines: int = 0

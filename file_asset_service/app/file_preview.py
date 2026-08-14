@@ -105,6 +105,82 @@ def render_excel_preview_html(
 """.strip()
 
 
+def render_excel_preview_multi_sheet_html(
+    *,
+    file_name: str,
+    content: bytes,
+    file_ext: str,
+    max_rows: int = MAX_PREVIEW_ROWS,
+    max_cols: int = MAX_PREVIEW_COLS,
+) -> str:
+    """2026-08-12 新增（apply 自 info）：多 sheet xlsx 预览。遍历所有 sheet 输出
+    sheet tab + 每个 sheet 一个 <article class="excel-sheet-pane">。
+
+    使用场景：信息价域（cost_info）xlsx 含元数据 sheet + 各市州 sheet，
+    前端需要 tab 切换。定额域（quota）xlsx 只有 1 个 sheet「定额条目」，
+    用方案 B 分页的 render_excel_preview_html 即可，不需要本函数。
+
+    单 sheet 时退化为旧行为（无 tab）。"""
+    previews = _excel_sheets(
+        content=content,
+        file_ext=file_ext,
+        max_rows=max_rows,
+        max_cols=max_cols,
+    )
+    if not previews:
+        return '<article class="excel-preview" data-preview-mode="ephemeral"><div class="formula-bar">空 Excel 文件</div></article>'
+    articles: list[str] = []
+    sheet_tabs: list[str] = []
+    for sheet_index, preview in enumerate(previews):
+        truncated = preview.source_rows > len(preview.rows) or preview.source_cols > max_cols
+        table_rows = "\n".join(
+            _render_row(
+                row_index,
+                row,
+                rendered_cols=preview.rendered_cols,
+                merge_spans=preview.merge_spans,
+                covered_cells=preview.covered_cells,
+                row_styles=preview.row_styles,
+                cell_styles=preview.cell_styles,
+                display_values=preview.display_values,
+                display_html=preview.display_html,
+            )
+            for row_index, row in enumerate(preview.rows, start=1)
+        )
+        truncated_note = " · 已截取前200行/60列，下载看完整" if truncated else ""
+        has_merged = "1" if preview.merge_spans else "0"
+        source_layout = "1" if preview.col_widths or preview.cell_styles else "0"
+        colgroup = _render_colgroup(preview.col_widths)
+        table_style = _table_style(preview)
+        is_first = sheet_index == 0
+        article = f"""
+<article class="excel-sheet-pane excel-preview" data-sheet-index="{sheet_index}" data-active="{1 if is_first else 0}" data-preview-mode="ephemeral" data-file-processing="0" data-source-cols="{preview.source_cols}" data-rendered-cols="{preview.rendered_cols}" data-merged="{has_merged}" data-source-layout="{source_layout}"{(" hidden" if not is_first else "")}>
+  <div class="formula-bar">{escape(file_name)} · {escape(preview.sheet_name)}{truncated_note}</div>
+  <div class="excel-table-wrap">
+    <table{table_style}>
+      {colgroup}
+      <tbody>
+        {table_rows}
+      </tbody>
+    </table>
+  </div>
+</article>
+""".strip()
+        articles.append(article)
+        sheet_tabs.append(
+            f'<button type="button" class="excel-sheet-tab{" active" if is_first else ""}" data-sheet-index="{sheet_index}" data-action="show-sheet">{escape(preview.sheet_name)}</button>'
+        )
+    if len(previews) == 1:
+        # 单 sheet 不显示 tab
+        return articles[0]
+    tab_bar = (
+        '<div class="excel-sheet-tabs" role="tablist">'
+        + "".join(sheet_tabs)
+        + "</div>"
+    )
+    return tab_bar + "\n" + "\n".join(articles)
+
+
 def render_html_notice_preview_html(
     *,
     file_name: str,
@@ -460,6 +536,85 @@ def _excel_rows(
             display_values=display_values,
             display_html=display_html,
         )
+    raise ValueError(f"UNSUPPORTED_EXCEL_EXT: {file_ext}")
+
+
+def _excel_sheets(
+    *,
+    content: bytes,
+    file_ext: str,
+    max_rows: int,
+    max_cols: int,
+) -> list[ExcelPreviewData]:
+    """2026-08-12 新增（apply 自 info）：遍历所有 sheet 生成预览数据列表。
+    render_excel_preview_multi_sheet_html 专用。定额域单 sheet 用 _excel_rows 即可。"""
+    if file_ext == "xlsx":
+        workbook = load_workbook(BytesIO(content), read_only=False, data_only=True)
+        results: list[ExcelPreviewData] = []
+        for sheet in workbook.worksheets:
+            source_rows = sheet.max_row or 0
+            source_cols = sheet.max_column or 0
+            row_count = min(source_rows, max_rows)
+            col_count = min(source_cols, max_cols)
+            merge_spans, covered_cells = _xlsx_merge_spans(sheet, max_row=row_count, max_col=col_count)
+            rendered_cols = _rendered_column_count(
+                values=lambda row_index, col_index: sheet.cell(row=row_index, column=col_index).value,
+                row_count=row_count,
+                col_count=col_count,
+                merge_spans=merge_spans,
+            )
+            rows = [
+                [sheet.cell(row=row_index, column=col_index).value for col_index in range(1, rendered_cols + 1)]
+                for row_index in range(1, row_count + 1)
+            ]
+            display_values = _xlsx_display_values(sheet, row_count=row_count, rendered_cols=rendered_cols)
+            results.append(ExcelPreviewData(
+                sheet_name=sheet.title,
+                rows=rows,
+                source_rows=source_rows,
+                source_cols=source_cols,
+                rendered_cols=rendered_cols,
+                merge_spans=merge_spans,
+                covered_cells=covered_cells,
+                display_values=display_values,
+            ))
+        workbook.close()
+        return results
+    if file_ext == "xls":
+        workbook = xlrd.open_workbook(file_contents=content, on_demand=True, formatting_info=True)
+        results: list[ExcelPreviewData] = []
+        for sheet in workbook.sheets():
+            row_count = min(sheet.nrows, max_rows)
+            col_count = min(sheet.ncols, max_cols)
+            merge_spans, covered_cells = _xlrd_merge_spans(sheet, max_row=row_count, max_col=col_count)
+            rendered_cols = _rendered_column_count(
+                values=lambda row_index, col_index: sheet.cell_value(row_index - 1, col_index - 1),
+                row_count=row_count,
+                col_count=col_count,
+                merge_spans=merge_spans,
+            )
+            rows = [sheet.row_values(row_index, 0, rendered_cols) for row_index in range(row_count)]
+            col_widths = _xlrd_column_widths(sheet, rendered_cols=rendered_cols)
+            row_styles = _xlrd_row_styles(sheet, row_count=row_count)
+            cell_styles = _xlrd_cell_styles(workbook, sheet, row_count=row_count, rendered_cols=rendered_cols, merge_spans=merge_spans)
+            display_values = _xlrd_display_values(workbook, sheet, row_count=row_count, rendered_cols=rendered_cols)
+            display_html = _xlrd_display_html(workbook, sheet, row_count=row_count, rendered_cols=rendered_cols, display_values=display_values)
+            results.append(ExcelPreviewData(
+                sheet_name=sheet.name,
+                rows=rows,
+                source_rows=sheet.nrows,
+                source_cols=sheet.ncols,
+                rendered_cols=rendered_cols,
+                merge_spans=merge_spans,
+                covered_cells=covered_cells,
+                col_widths=col_widths,
+                row_styles=row_styles,
+                cell_styles=cell_styles,
+                display_values=display_values,
+                display_html=display_html,
+            ))
+        workbook.release_resources()
+        return results
     raise ValueError(f"UNSUPPORTED_EXCEL_EXT: {file_ext}")
 
 

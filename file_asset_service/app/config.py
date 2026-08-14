@@ -37,6 +37,7 @@ class Settings:
     report_bucket: str
     nas_mirror_root: str | None
     parse_manifest_path: str | None
+    mineru_api_url: str  # 2026-08-07 新增:web UI 调 MinerU OCR 的端点(广州 A1 接入 + 子进程覆盖 DEFAULT_API)
 
 
 def get_settings() -> Settings:
@@ -51,4 +52,6 @@ def get_settings() -> Settings:
         report_bucket=os.getenv("FILE_ASSET_REPORT_BUCKET", "cost-report"),
         nas_mirror_root=os.getenv("FILE_ASSET_NAS_MIRROR_ROOT") or None,
         parse_manifest_path=os.getenv("FILE_ASSET_PARSE_MANIFEST_PATH") or None,
+        # 2026-08-07 新增:迁移时改 INFO_PRICE_MINERU_API_URL,默认指向内网 MinerU
+        mineru_api_url=os.getenv("INFO_PRICE_MINERU_API_URL", "http://172.16.20.23:8000"),
     )

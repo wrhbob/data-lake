@@ -164,7 +164,8 @@ def to_float(s: str) -> float:
     """安全转 float，失败返回 0.0。"""
     if not s:
         return 0.0
-    s = strip_numeric_brackets(s).replace(",", "").strip()
+    # 去掉逗号千分位（sc/gd）和空格千分位（sz OCR 把 2,741.35 读成 2 741.35）
+    s = strip_numeric_brackets(s).replace(",", "").replace(" ", "").strip()
     try:
         return float(s)
     except ValueError:
@@ -468,10 +469,11 @@ def find_cost_rows(grid, raw_rows=None, ctx: FeatureContext = None) -> dict:
 
 
 def parse_material_row(cells, start_cols, project_cols, ctx: FeatureContext, *,
-                       grid=None, grid_row_idx=None) -> dict | None:
+                       grid=None, grid_row_idx=None, total_cols: int | None = None) -> dict | None:
     """解析材料明细行（P2 分派，SPEC §4.2 P2）。
 
     P2=class-code-name-unit-qty（bj）→ 无单价形态（量价分离）
+    P2=class-name-unit-qty-right-price（sz）→ 价格在最右列（total_cols-1）
     其他（sc/cq/gd/hu）→ 有单价通用形态（cq 超集，兼容 sc 布局）
 
     返回统一 dict：name / unit / price / quantities / category /
@@ -481,7 +483,8 @@ def parse_material_row(cells, start_cols, project_cols, ctx: FeatureContext, *,
         return _material_row_no_price(cells, start_cols, project_cols,
                                       grid=grid, grid_row_idx=grid_row_idx)
     return _material_row_with_price(cells, start_cols, project_cols, ctx,
-                                    grid=grid, grid_row_idx=grid_row_idx)
+                                    grid=grid, grid_row_idx=grid_row_idx,
+                                    total_cols=total_cols)
 
 
 # B3 基础分类标签（材/料/机/机具/机械，所有省公共）。
@@ -492,13 +495,16 @@ _BASE_MAT_CATEGORY_LABELS = (
 
 
 def _material_row_with_price(cells, start_cols, project_cols, ctx: FeatureContext, *,
-                             grid=None, grid_row_idx=None) -> dict | None:
+                             grid=None, grid_row_idx=None,
+                             total_cols: int | None = None) -> dict | None:
     """有单价通用形态（P2=name/code/class-code 型，sc/cq/gd/hu 共用）。
 
     cq/gd 增量（相对 sc）：
       - col0="人工" 单独分组（cq 2018）
       - 编码列（6-12 位数字）跳过（cq/gd）
       - "机具"/"附项" 分类标签 + 99xx 编码→机 + is_appendix（gd，hu 亦含）
+    sz（P2=class-name-unit-qty-right-price）：价格在最右列（total_cols-1），
+      数量在 project_cols（1 表多子目横排时 project_cols 有 N 个）。
     """
     cell_positions = []
     for cell, sc in zip(cells, start_cols):
@@ -571,6 +577,27 @@ def _material_row_with_price(cells, start_cols, project_cols, ctx: FeatureContex
             "is_other_material": False, "is_appendix": False,
             "category": "工", "is_proportion": False,
         }
+    # B3-sz（P2=class-name-unit-qty-right-price）：col0 是分类标签 人工费/材料/机械
+    #   （带「费」后缀），col1-2 是名称（跨2），col3 单位，col4-N 数量，最右价格。
+    elif (ctx.profile.material_header_layout == MaterialHeaderLayout.CLASS_NAME_UNIT_QTY_RIGHT_PRICE
+          and raw_name in ("人工费", "材料", "机械", "材料费", "机械费")):
+        if raw_name in ("人工费",):
+            category = "工"
+        elif raw_name == "机械" or raw_name == "机械费":
+            category = "机"
+        else:
+            category = "料"
+        # 名称 = first_cell 之后的第一个 cell（col1，非编码）
+        nxt = sorted(
+            (c for c in cell_positions
+             if c["start_col"] > first_cell["end_col"] and c["text"].strip()),
+            key=lambda x: x["start_col"],
+        )
+        if not nxt:
+            return None
+        name_cell = nxt[0]
+        name = name_cell["text"].strip()
+        name_end_col = name_cell["end_col"]
     # B3：col0 分类标签（基础分类 材/料/机/机具/机械 + 特殊分类 未计价/附项/人工）
     #   特殊分类集合来自 ctx.material_categories（去空格后匹配，覆盖 OCR 空格变体）
     elif (raw_name in _BASE_MAT_CATEGORY_LABELS
@@ -641,18 +668,39 @@ def _material_row_with_price(cells, start_cols, project_cols, ctx: FeatureContex
     if category == "料" and any(kw in unit for kw in ctx.profile.machine_unit_keywords):
         category = "机"
 
-    # 找 price：unit 之后按 start_col 排序的第一个 cell（允许为空，不跳过空列）
-    candidates = sorted(
-        (c for c in cell_positions if c["start_col"] > unit_end_col),
-        key=lambda x: x["start_col"],
+    # 找 price。
+    # sz（P2=class-name-unit-qty-right-price）：价格在表格最右列（total_cols-1），
+    #   "2023年8月工料机参考价格(元)"，数量在 unit 与价格之间（project_cols）。
+    # 其他省：unit 之后按 start_col 排序的第一个 cell（允许为空，不跳过空列）。
+    is_sz_right_price = (
+        ctx.profile.material_header_layout == MaterialHeaderLayout.CLASS_NAME_UNIT_QTY_RIGHT_PRICE
+        and total_cols is not None
     )
-    if candidates:
-        price_cell = candidates[0]
-        price = strip_numeric_brackets(price_cell["text"].strip())
-        price_end_col = price_cell["end_col"]
+    if is_sz_right_price:
+        price_col = total_cols - 1
+        price_cell = next(
+            (c for c in cell_positions
+             if c["start_col"] <= price_col <= c["end_col"]),
+            None,
+        )
+        if price_cell is not None:
+            price = strip_numeric_brackets(price_cell["text"].strip())
+            price_end_col = price_cell["end_col"]
+        else:
+            price = ""
+            price_end_col = unit_end_col
     else:
-        price = ""
-        price_end_col = unit_end_col
+        candidates = sorted(
+            (c for c in cell_positions if c["start_col"] > unit_end_col),
+            key=lambda x: x["start_col"],
+        )
+        if candidates:
+            price_cell = candidates[0]
+            price = strip_numeric_brackets(price_cell["text"].strip())
+            price_end_col = price_cell["end_col"]
+        else:
+            price = ""
+            price_end_col = unit_end_col
 
     quantities = {}
     is_proportion = False
@@ -979,7 +1027,8 @@ def extract_table(html_text: str, working_content: str, unit_fallback: str,
                 cont_materials: list[dict] = []
                 for ri in range(material_start, len(raw_rows)):
                     mat = parse_material_row(raw_rows[ri], cell_cols[ri], project_cols, ctx,
-                                             grid=grid, grid_row_idx=ri)
+                                             grid=grid, grid_row_idx=ri,
+                                             total_cols=total_cols)
                     if mat is not None:
                         cont_materials.append(mat)
                 cont_rows: list[list[str]] = []
@@ -1125,7 +1174,7 @@ def extract_table(html_text: str, working_content: str, unit_fallback: str,
     if mat_start is not None:
         for ri in range(mat_start, len(raw_rows)):
             mat = parse_material_row(raw_rows[ri], cell_cols[ri], project_cols, ctx,
-                                     grid=grid, grid_row_idx=ri)
+                                     grid=grid, grid_row_idx=ri, total_cols=total_cols)
             if mat is not None:
                 materials.append(mat)
 
@@ -1665,6 +1714,14 @@ def _extract_sections_chinese(text, volume, cur_chapter, cur_section, cur_subsec
         if m:
             cn_num, title = m.group(1), m.group(2).strip()
             n_int = _cn_to_int(cn_num)
+            # 孤标章：OCR 把 `## 第一章 砌筑工程` 拆成 `## 第一章` + 下一行 `## 砌筑工程`
+            #   （湖南正文全部 10 章都是此形态）。title 为空时向后扫第一个非空行取章名。
+            if n_int is not None and not title:
+                for j in range(i + 1, n):
+                    s = lines[j].strip()
+                    if s:
+                        title = re.sub(_SECTION_PREFIX, "", s).strip()
+                        break
             if n_int is not None and title and not _is_chapter_in_toc(i):
                 sections.append((f"{volume}.{n_int}", title))
                 cur_chapter = n_int
@@ -1678,7 +1735,11 @@ def _extract_sections_chinese(text, volume, cur_chapter, cur_section, cur_subsec
         if m:
             cn_num, title = m.group(1), line_disp
             n_int = _cn_to_int(cn_num)
-            if n_int is not None and title and _has_work_content_within(lines, i, strict=strict):
+            # strict（hn）：规则条文是完整句子（以句号结尾），真章节是名词短语。
+            #   "十、镂花按图形外接矩形面积以 m^2 计算。" → 拒绝。
+            if (n_int is not None and title
+                    and (not strict or not _SENTENCE_END_RE.search(title))
+                    and _has_work_content_within(lines, i, strict=strict)):
                 if cur_chapter is None:
                     sections.append((f"{volume}.{n_int}", title))
                     cur_chapter = n_int
@@ -1689,18 +1750,29 @@ def _extract_sections_chinese(text, volume, cur_chapter, cur_section, cur_subsec
             i += 1
             continue
 
-        # 3. 1.小节名称（下一非空行是小节/小小节/工作内容；无节上下文拒绝）
+        # 3. 1.小节名称（下一非空行是低级章节/工作内容；无节上下文拒绝）
         m = SECTION_ZH_SUBSECTION_RE.match(line)
         if m:
             num, title = m.group(1), line_disp
-            if num.isdigit() and title and cur_section is not None:
-                if _validate_section_downstream(
-                    lines, i,
-                    allowed_next=(_VALIDATE_SUBSECTION_RE,
-                                  _VALIDATE_SUBSUBSECTION_RE,
-                                  _VALIDATE_SUBSUBSECTION_EMPTY_RE,
-                                  _WORK_CONTENT_RE),
-                ):
+            # strict（hn）：规则条文/注条目是完整句子（句号结尾），真小节是名词短语。
+            #   "3. 字涂色 (描漆) 另行套用…子目执行。" → 拒绝。
+            if (num.isdigit() and title and cur_section is not None
+                    and (not strict or not _SENTENCE_END_RE.search(title))):
+                # strict（profile `strict_section_downstream`，yn/ha/hn）：小节下方
+                #   只允许更低级章节（小小节）或 定额（工作内容）；拒绝同级小节——
+                #   规则条文（"1. 柱高按…计算。"）下方紧邻同级条文（"2. 有梁板…"），
+                #   非低级章节/定额 → 不当段行。
+                allowed_next = (
+                    _VALIDATE_SUBSUBSECTION_RE,
+                    _VALIDATE_SUBSUBSECTION_EMPTY_RE,
+                    _WORK_CONTENT_RE,
+                ) if strict else (
+                    _VALIDATE_SUBSECTION_RE,
+                    _VALIDATE_SUBSUBSECTION_RE,
+                    _VALIDATE_SUBSUBSECTION_EMPTY_RE,
+                    _WORK_CONTENT_RE,
+                )
+                if _validate_section_downstream(lines, i, allowed_next=allowed_next):
                     sections.append((f"{volume}.{cur_chapter}.{cur_section}.{int(num)}", title))
                     cur_subsection = int(num)
             i += 1
@@ -2012,20 +2084,62 @@ def process_md_file(md_path: Path, profile: FeatureFlagProfile,
     return all_rows, issues
 
 
+# 标准输出表头（与 quota-md-to-csv-v2 的 10 列 schema 对齐）
+STANDARD_HEADER = [
+    "类型", "项目编码", "名称", "项目特征", "计量单位",
+    "消耗量", "基价/单价", "验证", "标准换算", "标准换算来源",
+]
+
+
+def write_standard_xlsx(all_rows, out_xlsx: Path) -> int:
+    """把 baseline 的 10 列 rows 写为标准 xlsx（纯文本加粗表头，无底色）。
+
+    与云南/四川等标准产出的格式一致：单 sheet「定额条目」、表头行加粗、
+    不冻结、不加底色。返回写入的数据行数（不含表头）。
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "定额条目"
+
+    ws.append(STANDARD_HEADER)
+    for c in range(1, len(STANDARD_HEADER) + 1):
+        ws.cell(row=1, column=c).font = Font(bold=True)
+
+    n = 0
+    for r in all_rows:
+        ws.append(list(r))
+        n += 1
+
+    # 列宽（与云南标准一致）
+    for i, w in enumerate([8, 10, 41, 53, 10, 9, 11, 10, 10, 14], 1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    wb.save(out_xlsx)
+    return n
+
+
 def main(argv=None):
     import sys
 
     argv = sys.argv[1:] if argv is None else argv
     if len(argv) < 2:
-        print("用法: baseline.py <md路径> <profile名>")
+        print("用法: baseline.py <md路径> <profile名> [out_xlsx]")
         print("  profile 预置: sc-2018 cq-2018 gd-2018 hu-2018 bj-2021")
         return 2
     from profile_schema import get_preset_profile
 
     profile = get_preset_profile(argv[1])
     ctx = FeatureContext(profile=profile)
-    rows = process_md_file(Path(argv[0]), profile, ctx)
-    print(f"[baseline] {argv[0]} → {len(rows)} rows (profile={profile.name})")
+    all_rows, issues = process_md_file(Path(argv[0]), profile, ctx)
+    print(f"[baseline] {argv[0]} → {len(all_rows)} rows, {len(issues)} issues (profile={profile.name})")
+
+    # 默认 xlsx 输出 = md 同目录 <stem>_待审核.xlsx（可被 argv[2] 覆盖）
+    out_xlsx = Path(argv[2]) if len(argv) > 2 else Path(argv[0]).with_name(f"{Path(argv[0]).stem}_待审核.xlsx")
+    n = write_standard_xlsx(all_rows, out_xlsx)
+    print(f"[baseline] xlsx → {out_xlsx} ({n} 行)")
     return 0
 
 

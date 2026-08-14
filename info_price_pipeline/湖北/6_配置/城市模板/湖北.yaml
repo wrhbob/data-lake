@@ -1,0 +1,32 @@
+city: 湖北省
+province: 湖北省
+cross_page_merge: false
+# 湖北 2026-02 期: PDF 物理页码 = 印刷页码 = OCR page_idx (1:1 对齐, 无偏移)
+# nm_end: HB 没有 NM 章节, 留空 dict
+nm_end: {}
+districts:
+  - 武汉市
+  - 襄阳市
+  - 宜昌市
+  - 黄石市
+  - 十堰市
+  - 荆州市
+  - 荆门市
+  - 鄂州市
+  - 孝感市
+  - 黄冈市
+  - 咸宁市
+  - 随州市
+  - 恩施土家族苗族自治州
+  - 神农架林区
+table_schemas:
+  MARKET_14CITIES:
+    description: "Part 1+Part 2 价格表 (14 主城, 7 列垂直展开)"
+    headers: ["序号", "城市", "名称", "规格", "单位", "含税价", "除税价"]
+    page_range: "p20-63 (Part 1 p20-41, Part 2 p42-63)"
+    rule: "主表 8 cell + 续表 10 cell 配对, 7 城/page-pair, 22 page-pair"
+  PC_WUHAN_SINGLE:
+    description: "武汉装配式建筑工程材料综合信息价 (6 列单城)"
+    headers: ["序号", "名称", "含钢量(kg)", "单位", "含税价(元)", "除税价(元)"]
+    page_range: "p64"
+    rule: "1 张表, 序号独立 1→N"

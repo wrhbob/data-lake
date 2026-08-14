@@ -17,6 +17,7 @@ from app.archive_rules import (
     validate_archive_provenance,
 )
 from app.file_mirror import FileMirror
+from app.info_price_parse import detect_city_from_filename, detect_city
 from app.models import Archive, ArchiveEvent, ArchiveFile, AuditLog, CrawlLineage, CollectionTask, DataSource, FileAsset, IngestEvent, Outbox
 
 VALID_DOMAIN_TYPES = {"cost_info", "trading", "policy_regulation", "standard_atlas", "quota"}
@@ -237,7 +238,7 @@ def _add_event(
     return event
 
 
-def _serialize_archive_base(archive: Archive) -> dict[str, object]:
+def _serialize_archive_base(archive: Archive, primary_file_name: str | None = None) -> dict[str, object]:
     return {
         "archive_id": archive.archive_id,
         "domain_type": archive.domain_type,
@@ -266,6 +267,19 @@ def _serialize_archive_base(archive: Archive) -> dict[str, object]:
         "preview_status": archive.preview_status,
         "created_at": archive.created_at.isoformat(),
         "updated_at": archive.updated_at.isoformat(),
+        # parse_supported: True if any CITY_HANDLERS regex matches the primary
+        # PDF filename OR archive.title OR archive.region_code (see
+        # app.info_price_parse.detect_city).
+        # 2026-08-05 新增 title fallback：湖北省级 archive 的 PDF filename 被 crawler 洗成
+        # 数字 ID, anchor 在 title 「2026年第2期《湖北工程造价管理》」.
+        # 2026-08-07 新增 region_code fallback：广州(440100)PDF filename 也是数字 ID, anchor 在 region_code.
+        # Drives the ▶️ parse button in the UI.
+        "parse_supported": detect_city(
+            primary_file_name,
+            title=str(archive.title or ""),
+            region_code=str(archive.region_code or ""),
+        ) is not None if primary_file_name else False,
+        # Row-level parse badge state (UI polls /parse-status every 10s for live updates).
         # v0.4 Bug#1 修：list 端点必须透出 parse_* 字段,前端 quota-ui.js:resolveUiStatus
         # 直接读 row.parse_status 决定 5 态徽章(pending/parsing/review/done/failed)。
         # 关键:前端打的是 /api/archives?domain_type=quota(不是 /api/data-lake/quota/archives),
@@ -273,16 +287,19 @@ def _serialize_archive_base(archive: Archive) -> dict[str, object]:
         # 对 cost_info 域来说 parse_status 永远 None,字段冗余但无害;对 quota 域则必须透出。
         "parse_status": archive.parse_status,
         "parse_phase": archive.parse_phase,
+        "parse_profile": archive.parse_profile,
         "parse_task_id": archive.parse_task_id,
-        "parse_started_at": archive.parse_started_at.isoformat() if archive.parse_started_at else None,
-        "parse_finished_at": archive.parse_finished_at.isoformat() if archive.parse_finished_at else None,
+        "parse_parser_version": archive.parse_parser_version,
         "parse_error_code": archive.parse_error_code,
+        "parse_error_message": archive.parse_error_message,
+        "parse_metrics": dict(archive.parse_metrics) if archive.parse_metrics else None,
         # v0.8: 详情页需要展示「未配置解析脚本」提示,前端 quota-ui.js:renderArchiveDetailView
         # 读 parse_warnings 找 {code:"no_parser_for_province"} warning. 也透出 error_message
         # 给 failed_* 状态显示具体原因.
+        # 项 3 决策（与 models.py 一致）: parse_warnings 类型保留 main 的 list
         "parse_warnings": list(archive.parse_warnings or []),
-        "parse_error_message": archive.parse_error_message,
-        "parse_parser_version": archive.parse_parser_version,
+        "parse_started_at": archive.parse_started_at.isoformat() if archive.parse_started_at else None,
+        "parse_finished_at": archive.parse_finished_at.isoformat() if archive.parse_finished_at else None,
         "candidate_xlsx_key": archive.candidate_xlsx_key,
         "final_xlsx_key": archive.final_xlsx_key,
     }
@@ -479,7 +496,10 @@ def _archive_summary_rows(session: Session, archives: list[Archive], *, mirror: 
     for archive in archives:
         files = files_by_archive.get(archive.archive_id, [])
         primary_file = next((item for item in files if item[0].is_primary), files[0] if files else None)
-        row = _serialize_archive_base(archive)
+        primary_file_name = (
+            primary_file[1].file_name if primary_file and primary_file[1] else None
+        )
+        row = _serialize_archive_base(archive, primary_file_name=primary_file_name)
         _apply_source_config_metadata_fallback(row, sources_by_id.get(archive.source_id))
         # file_count = ArchiveFile 行数 + parse 产物 (candidate.xlsx / final.xlsx)
         # Parse 产物存在 Archive.candidate_xlsx_key / final_xlsx_key,落 MinIO 但不挂 ArchiveFile。
@@ -926,7 +946,22 @@ def get_archive_detail(session: Session, archive_id: str, *, mirror: FileMirror 
     archive = session.get(Archive, archive_id)
     if archive is None or archive.is_withdrawn:
         raise ValueError(f"ARCHIVE_NOT_FOUND: {archive_id}")
-    detail = _serialize_archive_base(archive)
+    detail_files = session.execute(
+        select(ArchiveFile, FileAsset)
+        .outerjoin(FileAsset, ArchiveFile.file_id == FileAsset.file_id)
+        .where(ArchiveFile.archive_id == archive.archive_id)
+        .order_by(ArchiveFile.sort_order, ArchiveFile.added_at)
+    ).all()
+    # 2026-08-04 修：单档案详情也要把 primary_file_name 传给 _serialize_archive_base，
+    # 否则 parse_supported 永远 False（默认走 `else False` 分支），前端 ▶️ 按钮被禁用
+    primary_file = next(
+        (item for item in detail_files if item[0].is_primary),
+        detail_files[0] if detail_files else None,
+    )
+    primary_file_name = (
+        primary_file[1].file_name if primary_file and primary_file[1] else None
+    )
+    detail = _serialize_archive_base(archive, primary_file_name=primary_file_name)
     _apply_source_config_metadata_fallback(detail, session.get(DataSource, archive.source_id))
     # 2026-08-04: 与 list_archives 同款过滤, 排除 OCR/parse 阶段中间产物 (parse_markdown /
     # parse_html / parse_candidate_xlsx / parse_final_xlsx), 避免前端 archiveFiles() 把它
@@ -934,12 +969,7 @@ def get_archive_detail(session: Session, archive_id: str, *, mirror: FileMirror 
     # UI_EXCLUDED_FILE_ROLES 模块常量注释。
     detail["files"] = [
         _serialize_archive_file(mounted, asset, archive=archive, mirror=mirror)
-        for mounted, asset in session.execute(
-            select(ArchiveFile, FileAsset)
-            .outerjoin(FileAsset, ArchiveFile.file_id == FileAsset.file_id)
-            .where(ArchiveFile.archive_id == archive.archive_id)
-            .order_by(ArchiveFile.sort_order, ArchiveFile.added_at)
-        ).all()
+        for mounted, asset in detail_files
         if mounted.file_role not in UI_EXCLUDED_FILE_ROLES
     ]
     return detail

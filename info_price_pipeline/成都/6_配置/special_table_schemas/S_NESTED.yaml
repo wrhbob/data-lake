@@ -1,0 +1,31 @@
+schema_id: S_NESTED
+handler: extract_new_material_table
+applicable_sections: [NEW_MATERIAL]
+
+trigger:
+  rows_mid:
+    cell_count_eq: 1
+  rows_after_mid:
+    first_col_eq: "规格"
+
+pre_steps:
+  - name: nested_split
+    split_at: first_1cell_row
+
+fields:
+  产品名:
+    source: ["table.caption", "pre_split_rows[0][0]", {default: "新型材料"}]
+  规格:
+    source: "rows[i][1]"
+  单位:
+    source: "rows[i][2]"
+  不含税价:
+    source: "rows[i][j+1]"
+
+log:
+  - city: 成都
+    period: 06
+    table_idx: 1295
+    page: 177
+    extracted_rows: 16
+    timestamp: 2026-07-28

@@ -206,6 +206,25 @@
 
     <section id="coverageBackfillModal" class="modal-backdrop" aria-label="官方源回填" aria-hidden="true" hidden></section>
 
+    <!-- 2026-08-12 apply 自 info index.html：信息价解析状态 modal -->
+    <section id="parseStatusModal" class="modal-backdrop" aria-label="解析进度" aria-hidden="true" hidden></section>
+
+    <!-- 2026-08-12 apply 自 info index.html：文件选择 modal（多 sheet preview 模式） -->
+    <section id="filePickerModal" class="modal-backdrop" aria-label="选择预览模式" aria-hidden="true" hidden>
+      <div class="file-picker-dialog">
+        <header class="file-picker-header">
+          <div>
+            <p class="eyebrow">Preview Mode</p>
+            <h2 id="filePickerTitle">选择预览模式</h2>
+          </div>
+          <button class="icon-button" type="button" title="关闭" data-action="close-file-picker">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div id="filePickerBody" class="file-picker-body"></div>
+      </div>
+    </section>
+
     <section id="viewer" class="viewer" aria-label="档案详情工作台" aria-hidden="true">
       <header class="viewer-toolbar">
         <div class="viewer-title">
@@ -239,7 +258,11 @@
           </div>
           <div id="attachmentList" class="attachment-list"></div>
         </aside>
-        <section id="viewerCanvas" class="viewer-canvas"></section>
+        <!-- 2026-08-12 apply 自 info index.html：viewer 双栏布局（viewerCanvas + viewerXlsxPane） -->
+        <div id="viewerPanes" class="viewer-panes">
+          <section id="viewerCanvas" class="viewer-canvas"></section>
+          <section id="viewerXlsxPane" class="xlsx-pane" hidden></section>
+        </div>
         <aside id="viewerForm" class="archive-form">
           <div class="form-heading">
             <div>

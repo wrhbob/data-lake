@@ -1,0 +1,30 @@
+schema_id: S_MULTI_PRODUCT
+handler: extract_new_material_table
+applicable_sections: [NEW_MATERIAL]
+
+trigger:
+  rows:
+    pattern: "连续多行第一列是不同产品名（不匹配 DN/Φ/× 前缀）"
+    inherit_pattern: "rows[i][0] 以 DN/Φ/× 开头 → 继承 last_real_name"
+
+pre_steps:
+  - name: track_last_real_name
+    field: 产品名
+
+fields:
+  产品名:
+    source: "last_real_name (cross-row inherit)"
+  规格:
+    source: "rows[i][0_or_1_after_name]"
+  单位:
+    source: "rows[i][after_spec]"
+  不含税价:
+    source: "rows[i][price_col]"
+
+log:
+  - city: 成都
+    period: 06
+    table_idx: 1322
+    page: 181
+    extracted_rows: 24
+    timestamp: 2026-07-28

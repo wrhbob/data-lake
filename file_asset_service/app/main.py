@@ -200,7 +200,7 @@ from app.database import get_db_session, init_db
 from app.file_mirror import FileMirror, FileMirrorRootUnconfigured, get_file_mirror
 from app.file_preview import DOCX_EXTENSIONS, DOWNLOAD_ONLY_EXTENSIONS, EXCEL_EXTENSIONS, HTML_EXTENSIONS, PDF_EXTENSIONS
 from app.file_preview import read_zip_image_preview_entry, zip_image_preview_entries
-from app.file_preview import render_docx_preview_html, render_excel_preview_html, render_html_notice_preview_html
+from app.file_preview import render_docx_preview_html, render_excel_preview_html, render_excel_preview_multi_sheet_html, render_html_notice_preview_html
 from app.info_price_coverage import build_coverage_matrix
 from app.info_price_downstream import (
     build_audit_view,
@@ -218,6 +218,16 @@ from app.models import (
     IngestEvent,
     QuotaArchiveProfile,
     QuotaPublicationSet,
+)
+from app.info_price_parse import (
+    ParseError,
+    cancel_parse_job,
+    delete_xlsx_output,
+    detect_city_from_filename,
+    detect_city,
+    read_xlsx_output,
+    stream_parse_events,
+    submit_parse_job,
 )
 from app.quota_api import router as quota_router
 from app.national_cost_info_regions import load_national_regions
@@ -244,6 +254,11 @@ from app.schemas import (
     DataSourceResponse,
     IngestEventResponse,
     IngestResponse,
+    ParseCancelResponse,
+    ParseDeleteResponse,
+    ParseOutputResponse,
+    ParseSubmitRequest,
+    ParseSubmitResponse,
     ProcessingRunResponse,
     TradingLoopRunRequest,
     TradingSchedulerRunRequest,
@@ -1545,6 +1560,255 @@ def create_app(*, init_schema: bool = True) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return build_audit_view(task, asset, payload)
+
+    # ===== PDF -> xlsx parse pipeline endpoints (cost_info row action) =====
+
+    def _parse_error_to_http(exc: Exception) -> HTTPException:
+        """Map info_price_parse.ParseError to FastAPI HTTPException with sensible status codes."""
+        error_code = getattr(exc, "error_code", "RUNPY_CRASH")
+        status_map = {
+            "ARCHIVE_NOT_FOUND": 404,
+            "NO_XLSX_AVAILABLE": 404,
+            "ARCHIVE_WITHDRAWN": 400,
+            "ARCHIVE_NO_FILE": 400,
+            "UNSUPPORTED_CITY": 400,
+            "INVALID_FILENAME": 400,
+            "PDF_DOWNLOAD_FAILED": 502,
+            "PYTHON_NOT_FOUND": 500,
+            "RUNPY_NOT_FOUND": 500,
+            "RUNPY_CRASH": 500,
+            "XLSX_NOT_FOUND": 500,
+            "TIMEOUT": 504,
+            "SEMAPHORE_QUEUE_FULL": 409,
+            "PARSE_ALREADY_RUNNING": 409,
+        }
+        return HTTPException(status_code=status_map.get(error_code, 400), detail=error_code)
+
+    @app.post("/api/archives/{archive_id}/parse", status_code=202)
+    def post_parse(
+        archive_id: str,
+        body: ParseSubmitRequest | None = None,
+        session: Session = Depends(get_db_session),
+        storage: ObjectStore = Depends(get_object_store),
+    ) -> ParseSubmitResponse:
+        """Start a parse job. Body.year + body.period override auto-detection."""
+        from app.database import get_session_factory
+        from app.models import ArchiveFile, FileAsset
+        archive = session.get(Archive, archive_id)
+        if archive is None:
+            raise HTTPException(status_code=404, detail="ARCHIVE_NOT_FOUND")
+        # 2026-08-13: 防重复提交——同一 archive 正在解析/排队中，拒绝再次提交，
+        # 否则会启动第二个 run.py 并行抢同一批 chunk/result.json（文件锁死锁）。
+        if archive.parse_status in ("queued", "running"):
+            raise HTTPException(status_code=409, detail="PARSE_ALREADY_RUNNING")
+        primary_row = session.execute(
+            select(ArchiveFile, FileAsset)
+            .outerjoin(FileAsset, ArchiveFile.file_id == FileAsset.file_id)
+            .where(ArchiveFile.archive_id == archive_id, ArchiveFile.is_primary == True)  # noqa: E712
+            .order_by(ArchiveFile.sort_order)
+            .limit(1)
+        ).first()
+        if primary_row is None:
+            raise HTTPException(status_code=400, detail="ARCHIVE_NO_FILE")
+        primary_file_name = primary_row[1].file_name if primary_row[1] else None
+        if not primary_file_name:
+            raise HTTPException(status_code=400, detail="ARCHIVE_NO_FILE")
+        # 2026-08-07 改：detect_city 走三级 fallback(filename → title → region_code)
+        # region_code 让广州(440100)能识别(广州 PDF filename 是数字 ID)
+        detected = detect_city(
+            primary_file_name,
+            title=str(archive.title or ""),
+            region_code=str(archive.region_code or ""),
+        )
+        if body is not None and body.year and body.period:
+            year = body.year
+            period = body.period
+            city = detected[0] if detected else "成都"
+        else:
+            if detected is None:
+                raise HTTPException(status_code=400, detail="INVALID_FILENAME")
+            city, params = detected
+            year, period = params["year"], params["period"]
+        try:
+            task_id = submit_parse_job(
+                session_factory=get_session_factory(),
+                storage=storage,
+                settings=get_settings(),
+                archive_id=archive_id,
+                year=year,
+                period=period,
+                city_code=city,
+            )
+        except ParseError as exc:
+            raise _parse_error_to_http(exc) from exc
+        return ParseSubmitResponse(
+            task_id=task_id,
+            archive_id=archive_id,
+            parse_status="queued",
+            estimated_duration_seconds="~30s",
+        )
+
+    @app.get("/api/archives/{archive_id}/parse-status")
+    def get_parse_status(archive_id: str) -> dict[str, object]:
+        """Lightweight badge endpoint (no streaming, no logs). Used by row-level poll."""
+        from app.database import get_session_factory
+        with get_session_factory()() as session:
+            archive = session.get(Archive, archive_id)
+            if archive is None:
+                raise HTTPException(status_code=404, detail="ARCHIVE_NOT_FOUND")
+            return {
+                "archive_id": archive.archive_id,
+                "parse_status": archive.parse_status,
+                "parse_phase": archive.parse_phase,
+                "parse_error_code": archive.parse_error_code,
+                "parse_started_at": archive.parse_started_at.isoformat() if archive.parse_started_at else None,
+                "parse_finished_at": archive.parse_finished_at.isoformat() if archive.parse_finished_at else None,
+                "final_xlsx_key": archive.final_xlsx_key,
+            }
+
+    @app.get("/api/archives/{archive_id}/parse-stream")
+    def get_parse_stream(
+        archive_id: str,
+        since: int = 0,
+    ) -> StreamingResponse:
+        """SSE stream of parse progress. ?since=N for Last-Event-ID reconnect."""
+        from app.database import get_session_factory
+        archive_row = get_session_factory()().get(Archive, archive_id)
+        if archive_row is None:
+            raise HTTPException(status_code=404, detail="ARCHIVE_NOT_FOUND")
+        task_id = archive_row.parse_task_id
+        if not task_id:
+            raise HTTPException(status_code=404, detail="NO_ACTIVE_TASK")
+        generator = stream_parse_events(task_id, since_seq=since)
+        return StreamingResponse(
+            generator,
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.post("/api/archives/{archive_id}/parse-cancel")
+    def post_parse_cancel(
+        archive_id: str,
+        session: Session = Depends(get_db_session),
+    ) -> ParseCancelResponse:
+        """Cancel a running parse job."""
+        archive = session.get(Archive, archive_id)
+        if archive is None:
+            raise HTTPException(status_code=404, detail="ARCHIVE_NOT_FOUND")
+        task_id = archive.parse_task_id
+        if not task_id:
+            return ParseCancelResponse(task_id="", cancelled=False, already_terminal=True)
+        cancelled, already_terminal = cancel_parse_job(task_id)
+        return ParseCancelResponse(task_id=task_id, cancelled=cancelled, already_terminal=already_terminal)
+
+    @app.get("/api/archives/{archive_id}/parse-output")
+    def get_parse_output(
+        archive_id: str,
+        session: Session = Depends(get_db_session),
+        storage: ObjectStore = Depends(get_object_store),
+    ) -> Response:
+        """2026-08-03 改：直接代理 MinIO xlsx 字节流给前端（同源返回，绕过 MinIO CORS preflight 拦截）。"""
+        from app.database import get_session_factory
+        archive_row = session.get(Archive, archive_id)
+        if archive_row is None:
+            raise HTTPException(status_code=404, detail="ARCHIVE_NOT_FOUND")
+        final_xlsx_key = archive_row.final_xlsx_key
+        if not final_xlsx_key:
+            raise HTTPException(status_code=404, detail="PARSE_OUTPUT_NOT_READY")
+        settings = get_settings()
+        try:
+            content = storage.get_object(settings.extract_bucket, final_xlsx_key)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="FILE_ASSET_OBJECT_NOT_FOUND") from exc
+        filename = (final_xlsx_key.split("/")[-1] or "parse-output.xlsx")
+        return Response(
+            content=content,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(content)),
+                "X-Parse-Finished-At": (archive_row.parse_finished_at.isoformat() if archive_row.parse_finished_at else ""),
+            },
+        )
+
+    @app.get("/api/archives/{archive_id}/parse-output-preview", response_class=HTMLResponse)
+    def get_parse_output_preview(
+        archive_id: str,
+        session: Session = Depends(get_db_session),
+        storage: ObjectStore = Depends(get_object_store),
+    ) -> HTMLResponse:
+        """2026-08-03 新增：解析输出的 xlsx HTML 预览（viewer 右 pane / 双预览用）。"""
+        archive_row = session.get(Archive, archive_id)
+        if archive_row is None:
+            raise HTTPException(status_code=404, detail="ARCHIVE_NOT_FOUND")
+        final_xlsx_key = archive_row.final_xlsx_key
+        if not final_xlsx_key:
+            raise HTTPException(status_code=404, detail="PARSE_OUTPUT_NOT_READY")
+        settings = get_settings()
+        try:
+            content = storage.get_object(settings.extract_bucket, final_xlsx_key)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="FILE_ASSET_OBJECT_NOT_FOUND") from exc
+        filename = final_xlsx_key.split("/")[-1] or "parse-output.xlsx"
+        # 信息价 xlsx 多 sheet（info_price_parse.py:731 遍历 wb.worksheets）,
+        # 走多 sheet tab 版渲染；定额单 sheet（service.py:190「定额条目」）走分页版,本端点不涉及。
+        html = render_excel_preview_multi_sheet_html(file_name=filename, content=content, file_ext="xlsx")
+        return HTMLResponse(
+            html,
+            headers={"X-Preview-Mode": "ephemeral", "X-Parse-Finished-At": (archive_row.parse_finished_at.isoformat() if archive_row.parse_finished_at else "")},
+        )
+
+    @app.get("/api/archives/{archive_id}/parse-output-full-preview", response_class=HTMLResponse)
+    def get_parse_output_full_preview(
+        archive_id: str,
+        session: Session = Depends(get_db_session),
+        storage: ObjectStore = Depends(get_object_store),
+    ) -> HTMLResponse:
+        """2026-08-03 新增：解析输出的 xlsx 完整版 HTML 预览（不截断行/列，viewer 内替换用）。"""
+        archive_row = session.get(Archive, archive_id)
+        if archive_row is None:
+            raise HTTPException(status_code=404, detail="ARCHIVE_NOT_FOUND")
+        final_xlsx_key = archive_row.final_xlsx_key
+        if not final_xlsx_key:
+            raise HTTPException(status_code=404, detail="PARSE_OUTPUT_NOT_READY")
+        settings = get_settings()
+        try:
+            content = storage.get_object(settings.extract_bucket, final_xlsx_key)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="FILE_ASSET_OBJECT_NOT_FOUND") from exc
+        filename = final_xlsx_key.split("/")[-1] or "parse-output.xlsx"
+        # 不截断行/列，渲染全表
+        # 信息价多 sheet（cost_info 域），走多 sheet tab 版
+        html = render_excel_preview_multi_sheet_html(
+            file_name=filename,
+            content=content,
+            file_ext="xlsx",
+            max_rows=99999,
+            max_cols=999,
+        )
+        return HTMLResponse(
+            html,
+            headers={"X-Preview-Mode": "full"},
+        )
+
+    @app.delete("/api/archives/{archive_id}/parse-output")
+    def delete_parse_output(
+        archive_id: str,
+        session: Session = Depends(get_db_session),
+        storage: ObjectStore = Depends(get_object_store),
+    ) -> ParseDeleteResponse:
+        """Delete the MinIO xlsx + reset archive parse_* fields (preserve history timestamps)."""
+        from app.database import get_session_factory
+        try:
+            delete_xlsx_output(
+                session_factory=get_session_factory(),
+                storage=storage,
+                settings=get_settings(),
+                archive_id=archive_id,
+            )
+        except ParseError as exc:
+            raise _parse_error_to_http(exc) from exc
+        return ParseDeleteResponse(archive_id=archive_id, deleted=True)
 
     return app
 
