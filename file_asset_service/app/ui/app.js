@@ -3216,8 +3216,10 @@ function openManualSupplementDialog(id) {
 }
 
 function archiveById(id) {
-  if (state.selectedArchive?.archive_id === id) return state.selectedArchive;
-  return state.archives.find((item) => item.archive_id === id) || null;
+  // 2026-08-14 修复：改用顶层 state（window.__appState），避免 IIFE 内死副本 state 导致查不到档案。
+  const s = window.__appState || state;
+  if (s.selectedArchive?.archive_id === id) return s.selectedArchive;
+  return (s.archives || []).find((item) => item.archive_id === id) || null;
 }
 
 async function openArchiveEditDialog(id) {
@@ -3397,7 +3399,7 @@ async function handleDeleteArchive(id) {
   renderApiState();
   try {
     await deleteManualArchive(archive);
-    await loadCurrentView();
+    await window.loadCurrentView();
     showToast("人工上传记录已删除，可重新补录。", "success");
   } catch (error) {
     state.loading = false;
@@ -4230,8 +4232,9 @@ function mirrorSummary(files) {
 function renderActions(item) {
   const file = primaryFile(item);
   const href = downloadUrl(file);
+  const isRegisterScript = isRegisterScriptArchive(item);
   const manualActions =
-    item.channel_type === "manual_upload"
+    item.channel_type === "manual_upload" && !isRegisterScript
       ? `
         <button class="icon-button" type="button" title="编辑元数据" data-action="edit-archive" data-id="${escapeHtml(item.archive_id)}">
           <i data-lucide="pencil"></i>
@@ -4241,12 +4244,27 @@ function renderActions(item) {
         </button>
       `
       : "";
+  // 2026-08-14 修复：删除按钮改 details 菜单（PDF 档案 / Excel 文件 两选项）。
+  // Excel 文件选项仅在已有解析结果时显示（部分信息价尚未解析，没有 Excel）。
+  const hasExcel = item.parse_status === "succeeded" || !!item.final_xlsx_key;
   const withdrawAction =
-    item.channel_type !== "manual_upload"
+    item.channel_type !== "manual_upload" || isRegisterScript
       ? `
-        <button class="icon-button danger-action" type="button" title="删除（撤下档案，不删除 NAS 原件）" data-action="withdraw-archive" data-id="${escapeHtml(item.archive_id)}">
-          <i data-lucide="trash-2"></i>
-        </button>
+        <details class="download-menu">
+          <summary class="icon-button danger-action" type="button" title="删除选项（PDF 档案 / Excel 文件）" data-action="delete-menu-toggle">
+            <i data-lucide="trash-2"></i>
+          </summary>
+          <div class="download-menu-list">
+            <button class="icon-button danger-action" type="button" title="删除 PDF 档案（撤下整档，Excel 一并删除）" data-action="withdraw-archive" data-id="${escapeHtml(item.archive_id)}">
+              <i data-lucide="file-text"></i><span class="download-menu-label">PDF 档案</span>
+            </button>
+            ${hasExcel ? `
+            <button class="icon-button danger-action" type="button" title="仅删除已解析的 Excel 文件" data-action="delete-archive-xlsx" data-id="${escapeHtml(item.archive_id)}">
+              <i data-lucide="file-spreadsheet"></i><span class="download-menu-label">Excel 文件</span>
+            </button>
+            ` : ""}
+          </div>
+        </details>
       `
       : "";
   const download = href
@@ -4900,8 +4918,16 @@ function handleClick(event) {
   if (action.dataset.action === "open-upload") openManualUploadDialog();
   if (action.dataset.action === "edit-archive") openArchiveEditDialog(action.dataset.id);
   if (action.dataset.action === "supplement-archive") openManualSupplementDialog(action.dataset.id);
-  if (action.dataset.action === "delete-archive") handleDeleteArchive(action.dataset.id);
-  if (action.dataset.action === "withdraw-archive") handleWithdrawArchive(action.dataset.id);
+  if (action.dataset.action === "delete-archive") {
+    // 2026-08-14: cost_info 的删除/撤档委托给 info 的 handleClick（新版：删 PDF 一并清 Excel），
+    // main 只处理 quota 域，避免同一按钮双 handler 触发两次 confirm/两次删除。
+    if (state.domain === "cost_info") return;
+    handleDeleteArchive(action.dataset.id);
+  }
+  if (action.dataset.action === "withdraw-archive") {
+    if (state.domain === "cost_info") return;
+    handleWithdrawArchive(action.dataset.id);
+  }
   if (action.dataset.action === "remove-upload-file") {
     const idx = Number(action.dataset.uploadIdx);
     if (Array.isArray(state.manualUpload.files) && idx >= 0 && idx < state.manualUpload.files.length) {
@@ -5175,7 +5201,17 @@ const domainConfigs = {
 
 
 /* ── IIFE 隔离 (2026-08-12): 包 info 整块, 解决与 main L1 的 262 个顶层声明冲突 ── */
+// 2026-08-14 修复：暴露 main 顶层 state 给 info IIFE。info 的「解析」函数（submitParseInBackground
+// 等）要操作可见列表的 state.archives，而不是 IIFE 内那份永不运行的死副本（IIFE 的 loadArchives
+// 已不在初始化里运行，state.archives 恒空 → 点▶️后 badge 找不到 row，永远停在「失败」）。
+// 仅影响信息价解析路径；定额解析走独立文件（quota-ui.js / quota-parse-api.js），不受影响。
+window.__appState = state;
 ;(function () {
+  // 2026-08-14 修复：info 解析函数统一走顶层（可见列表）的 state/renderRows/loadCurrentView。
+  // 顶层同名函数是 function 声明（已是 window 属性），state 是 const（需上面显式暴露）。
+  const _appState = () => (window.__appState || state);
+  const _appRenderRows = () => (window.renderRows || renderRows)();
+  const _appLoadCurrentView = () => (window.loadCurrentView || loadCurrentView)();
 const coverageFilterConfig = [
   { key: "region_code", label: "地区", kind: "region", coverage: true },
   { key: "period_year", label: "年份", kind: "year", coverage: true },
@@ -7656,7 +7692,7 @@ function closeParseStatusDialog() {
   // 用户反馈「关闭弹框后界面无反应」，可能是 state.archives 没及时更新（SSE 还在连但 row 还没改）
   // 用 loadCurrentView() 拉一遍 list 立即刷新
   if (typeof loadCurrentView === "function") {
-    loadCurrentView().catch(() => {});
+    _appLoadCurrentView().catch(() => {});
   }
   // 2026-08-04 改：SSE 偶发断开（30s 无事件浏览器自动重连失败）→ 补 row-level polling 兜底
   // 即使 SSE 终态事件没到达前端，polling 也会在 10s 内拉一次 /parse-status 让 badge 刷新
@@ -7691,11 +7727,11 @@ async function submitParseInBackground(archiveId) {
   };
   // 2026-08-05 改：点 ▶️ 的瞬间（T+0ms）立刻同步设 row 让用户立刻看到「排队」
   // 用户反馈：「点 ▶️ 状态栏必须立刻有变化」—— 不能等 fetch 完成再动
-  const row0 = (state.archives || []).find((r) => r.archive_id === archiveId);
+  const row0 = (_appState().archives || []).find((r) => r.archive_id === archiveId);
   if (row0) {
     row0.parse_status = "queued";
     row0._runningStartedAt = Date.now();
-    renderRows();
+    _appRenderRows();
   }
   // 拉 archive 抽 year/period（参考 openParseStatusDialog 的正则）
   try {
@@ -7731,11 +7767,11 @@ async function _runParseSubmit({ showModal }) {
   dialog.open = !!showModal;
   // Mirror to row so badge appears immediately, then start polling.
   // 2026-08-05 修：state.rows 从未定义 — 真实存储是 state.archives，5 处替换
-  const row = (state.archives || []).find((r) => r.archive_id === dialog.archive_id);
+  const row = (_appState().archives || []).find((r) => r.archive_id === dialog.archive_id);
   if (row) {
     row.parse_status = "queued";
     row._runningStartedAt = dialog.runningStartedAt;  // 2026-08-04 让 polling 也知道开始时间
-    renderRows();
+    _appRenderRows();
   }
   startParseBadgePolling();
   if (showModal) renderParseStatusModal();
@@ -7752,7 +7788,7 @@ async function _runParseSubmit({ showModal }) {
     const payload = await resp.json();
     dialog.task_id = payload.task_id;
     dialog.status = "running";
-    if (row) { row.parse_status = "running"; renderRows(); }  // 2026-07-31 改：补 renderRows() 让状态列 badge 切到「解析中」
+    if (row) { row.parse_status = "running"; _appRenderRows(); }  // 2026-07-31 改：补 renderRows() 让状态列 badge 切到「解析中」
     openParseEventSource(payload.task_id);
     if (showModal) renderParseStatusModal();
   } catch (err) {
@@ -7809,10 +7845,10 @@ function handleParseEvent(evt) {
   // 之前 SSE 只更 modal，状态列要等终态 schedule 2s 后才动（用户感觉「不及时」）
   // 现在每个 SSE event 都立刻同步
   // 2026-08-05 修：state.rows 实际从未定义 — 真实存储是 state.archives
-  const row = (state.archives || []).find((r) => r.archive_id === dialog.archive_id);
+  const row = (_appState().archives || []).find((r) => r.archive_id === dialog.archive_id);
   if (row && payload.status) {
     row.parse_status = payload.status;
-    renderRows();
+    _appRenderRows();
   }
   // Close EventSource on terminal state
   if (["succeeded", "failed", "cancelled"].includes(payload.status)) {
@@ -7911,7 +7947,7 @@ async function deleteParseOutput() {
     dialog.error_message = "";
     renderParseStatusModal();
     if (typeof loadCurrentView === "function") {
-      loadCurrentView().catch(() => {});
+      _appLoadCurrentView().catch(() => {});
     }
   } catch (err) {
     dialog.error_code = "DELETE_FAILED";
@@ -8587,8 +8623,10 @@ function openManualSupplementDialog(id) {
 }
 
 function archiveById(id) {
-  if (state.selectedArchive?.archive_id === id) return state.selectedArchive;
-  return state.archives.find((item) => item.archive_id === id) || null;
+  // 2026-08-14 修复：改用顶层 state（window.__appState），避免 IIFE 内死副本 state 导致查不到档案。
+  const s = window.__appState || state;
+  if (s.selectedArchive?.archive_id === id) return s.selectedArchive;
+  return (s.archives || []).find((item) => item.archive_id === id) || null;
 }
 
 async function openArchiveEditDialog(id) {
@@ -8768,7 +8806,7 @@ async function handleDeleteArchive(id) {
   renderApiState();
   try {
     await deleteManualArchive(archive);
-    await loadCurrentView();
+    await window.loadCurrentView();
     showToast("人工上传记录已删除，可重新补录。", "success");
   } catch (error) {
     state.loading = false;
@@ -8804,7 +8842,7 @@ async function handleWithdrawArchive(id) {
       }
     }
     await withdrawArchive(archive);
-    await loadCurrentView();
+    await _appLoadCurrentView();
     showToast("档案已撤下（PDF + Excel 一并清理），NAS 原件仍保留。", "success");
   } catch (error) {
     state.loading = false;
@@ -8828,7 +8866,7 @@ async function handleDeleteArchiveXlsx(id) {
     if (resp.ok) {
       const fresh = await resp.json();
       // 把最新数据合并回 state.archives
-      const target = (state.archives || []).find((r) => r.archive_id === id);
+      const target = (_appState().archives || []).find((r) => r.archive_id === id);
       if (target) Object.assign(target, {
         parse_status: fresh.parse_status,
         parse_metrics: fresh.parse_metrics,
@@ -8864,15 +8902,15 @@ async function handleDeleteArchiveXlsx(id) {
       throw new Error(`Excel 删除失败 (${resp.status}): ${errBody}`);
     }
     // 2026-08-05 改：删除后立即同步清 row 状态（不依赖 loadCurrentView 的延迟）
-    const target = (state.archives || []).find((r) => r.archive_id === archive.archive_id);
+    const target = (_appState().archives || []).find((r) => r.archive_id === archive.archive_id);
     if (target) {
       target.final_xlsx_key = "";
       target.parse_status = null;
       target.parse_metrics = null;
       target.parse_finished_at = null;
-      renderRows();
+      _appRenderRows();
     }
-    await loadCurrentView();  // 拉一遍后端权威数据兜底
+    await _appLoadCurrentView();  // 拉一遍后端权威数据兜底
     showToast("Excel 文件已删除（PDF 档案保留）。", "success");
   } catch (error) {
     state.loading = false;
@@ -9740,7 +9778,7 @@ function _scheduleTerminalTransition(dialog, payload) {
 
 function _applyTerminalTransition(dialog, payload) {
   // 2026-08-05 修：state.rows 实际从未定义 — 真实存储是 state.archives
-  const row = (state.archives || []).find((r) => r.archive_id === dialog.archive_id);
+  const row = (_appState().archives || []).find((r) => r.archive_id === dialog.archive_id);
   if (row) {
     row.parse_status = payload.status;
     row.parse_error_code = dialog.error_code;
@@ -9757,13 +9795,13 @@ function _applyTerminalTransition(dialog, payload) {
       };
     }
     row._runningStartedAt = null;  // 2026-08-04 防止后续 polling 重复 schedule
-    renderRows();
+    _appRenderRows();
   }
   stopParseBadgePolling();
   // 2026-08-04 改：modal 已经在 openParseStatusDialog 里开了，2s 后切 terminal 仍保持打开
   // 让用户看到「已完成 + 下载按钮」或「失败 + 重试按钮」
   if (typeof loadCurrentView === "function") {
-    loadCurrentView().catch(() => {});
+    _appLoadCurrentView().catch(() => {});
   }
   renderParseStatusModal();
   // 2026-08-04 新增：succeeded 时右下角飘 toast「已解析 N 条 · 用时 X 秒」（3 秒自动消失）
@@ -9821,7 +9859,7 @@ function startParseBadgePolling() {
   if (_parseBadgePollTimer) return;
   const tick = async () => {
     // 2026-08-05 修：state.rows 实际从未定义 — 真实存储是 state.archives
-    const rows = state.archives || [];
+    const rows = _appState().archives || [];
     const active = rows.filter((r) => r.parse_supported && ["queued", "running"].includes(r.parse_status));
     if (active.length === 0) { stopParseBadgePolling(); return; }
     for (const row of active) {
@@ -10738,6 +10776,13 @@ function handleClick(event) {
   if (action.dataset.action === "open-upload") openManualUploadDialog();
   if (action.dataset.action === "edit-archive") openArchiveEditDialog(action.dataset.id);
   if (action.dataset.action === "supplement-archive") openManualSupplementDialog(action.dataset.id);
+  // 2026-08-14: info 只处理 cost_info 域的删除/撤档/删Excel；quota 域交给 main 的 handleClick。
+  // 否则 archiveById 改用顶层 state 后，quota 会同时被 main + info 两个 handler 各删一次。
+  const isCostInfoDelete =
+    action.dataset.action === "delete-archive" ||
+    action.dataset.action === "withdraw-archive" ||
+    action.dataset.action === "delete-archive-xlsx";
+  if (isCostInfoDelete && window.__appState?.domain !== "cost_info") return;
   if (action.dataset.action === "delete-archive") handleDeleteArchive(action.dataset.id);
   if (action.dataset.action === "withdraw-archive") handleWithdrawArchive(action.dataset.id);
   if (action.dataset.action === "delete-archive-xlsx") handleDeleteArchiveXlsx(action.dataset.id);
