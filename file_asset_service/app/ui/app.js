@@ -4267,17 +4267,36 @@ function renderActions(item) {
         </details>
       `
       : "";
-  const download = href
-    ? `
-      <a class="icon-button" href="${escapeHtml(href)}" title="下载原件" download>
+  // 下载按钮：details 折叠菜单，PDF 原件 / Excel 解析结果 两选项。
+  // 2026-08-14 修复：版本合并后信息价下载退化为「直接下载 PDF」，此处恢复「选择下载 PDF 还是 Excel」。
+  // 仅作用于非 quota 域（cost_info/trading/policy_regulation/standard_atlas）；
+  // quota 域由 quota-ui.js 独立渲染，本函数不会跑到，不影响定额解析。
+  const download = `
+    <details class="download-menu">
+      <summary class="icon-button" type="button" title="下载选项（PDF 原件 / Excel 文件）">
         <i data-lucide="download"></i>
-      </a>
-    `
-    : `
-      <button class="icon-button" type="button" title="暂无原件可下载" disabled>
-        <i data-lucide="download"></i>
-      </button>
-    `;
+      </summary>
+      <div class="download-menu-body">
+        ${href
+          ? `
+          <a class="download-menu-item" href="${escapeHtml(href)}" title="下载原件 PDF" download>
+            <i data-lucide="file-text"></i> 下载原件
+          </a>
+        `
+          : `
+          <span class="download-menu-item disabled" title="暂无原件可下载">
+            <i data-lucide="file-text"></i> 暂无原件
+          </span>
+        `}
+        ${hasExcel ? `
+          <button type="button" class="download-menu-item" title="下载解析结果 xlsx"
+             onclick="window.__dlXlsx && window.__dlXlsx('${escapeHtml(item.archive_id)}')">
+            <i data-lucide="file-spreadsheet"></i> 下载 Excel
+          </button>
+        ` : ""}
+      </div>
+    </details>
+  `;
   return `
     <div class="row-actions">
       <button class="icon-button" type="button" title="预览归整" data-action="open-viewer" data-id="${escapeHtml(item.archive_id)}">
