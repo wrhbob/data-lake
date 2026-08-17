@@ -21,6 +21,7 @@
     versionSystem: "publicationSets",
     coverage: "coverage",
     pending: "reconciliation",
+    compare: "compare",
   });
 
   const TABS = Object.freeze([
@@ -28,6 +29,7 @@
     { view: "versionSystem", label: "版本体系", icon: "layers" },
     { view: "coverage", label: "覆盖矩阵", icon: "table-2" },
     { view: "pending", label: "待归档", icon: "inbox" },
+    { view: "compare", label: "定额对比", icon: "git-compare" },
   ]);
 
   // 第一层筛选（一级分类 → 二级筛选映射）
@@ -248,6 +250,15 @@
       open: false,
       archiveId: "",
       title: "",
+      submitting: false,
+      error: "",
+    },
+    // 跨省定额对比 modal（v0.12 2026-08-17）：keyword 必填，任意词 / 排除词 选填
+    compare: {
+      open: false,
+      keyword: "",
+      any_terms: "",
+      exclude_terms: "",
       submitting: false,
       error: "",
     },
@@ -782,6 +793,8 @@
         return renderCapabilityPlaceholder("publicationSets", "版本体系");
       case "coverage":
         return renderCapabilityPlaceholder("coverage", "覆盖矩阵");
+      case "compare":
+        return renderCompareView();
       default:
         return "";
     }
@@ -1070,6 +1083,247 @@
       error: "",
     };
     renderDeleteArchiveModal();
+  }
+
+  // ── 跨省定额对比（v0.12 2026-08-17） ─────────────────────────
+  // 来源：quota-compare/extract.py 已 commit（commit 659fa3a）
+  // 数据层：4 省已审核 final.xlsx → collect_hits → xlsx 字节
+  // 入口：定额对比 tab → 打开对比工具 → 弹窗 3 输入（keyword 必填）
+  function renderCompareView() {
+    const ready = state.flags.compare === true;
+    if (!ready) {
+      return `
+        <section class="quota-view-card">
+          <div class="quota-empty">
+            <i data-lucide="git-compare"></i>
+            <strong>定额对比待接入</strong>
+            <span>${escapeHtml(capReason("compare"))}</span>
+          </div>
+        </section>`;
+    }
+    return `
+      <section class="quota-view-card">
+        <div class="quota-compare-toolbar">
+          <i data-lucide="git-compare"></i>
+          <div class="quota-compare-toolbar__text">
+            <strong>跨省定额对比</strong>
+            <span>从所有已审核的 final.xlsx 抽取主题定额，按省份分组，输出单 sheet 跨省对比 xlsx。实际可对比的省份由当前已审核档案决定，无硬编码省份列表。</span>
+          </div>
+          <button class="primary-button" type="button" data-quota-action="open-compare-modal">
+            <i data-lucide="play"></i>
+            <span>打开对比工具</span>
+          </button>
+        </div>
+        <div class="quota-compare-tips">
+          <p><strong>使用提示</strong>：</p>
+          <ul>
+            <li><code>keyword</code> 必填，定额名称必须包含该词</li>
+            <li><code>any_terms</code> 选填（空格分隔），任一词命中即可；常用于「踢脚/踢脚线/踢脚板」这类同义扩展</li>
+            <li><code>exclude_terms</code> 选填（空格分隔），任一词出现即排除；常用于「挖/挖土」防误伤「挖掘机」</li>
+            <li>结果直接下载；不写入数据库，不污染原 final.xlsx</li>
+          </ul>
+        </div>
+      </section>
+    `;
+  }
+
+  function renderCompareModal() {
+    const modal = document.getElementById("quotaCompareModal");
+    if (!modal) return;
+    var c = state.compare || {};
+    if (!c.open) {
+      modal.hidden = true;
+      modal.setAttribute("aria-hidden", "true");
+      modal.innerHTML = "";
+      return;
+    }
+    modal.hidden = false;
+    modal.setAttribute("aria-hidden", "false");
+    const errorHtml = c.error
+      ? '<div class="quota-delete-error" role="alert"><i data-lucide="alert-circle"></i><span>' +
+        escapeHtml(c.error) + '</span></div>'
+      : "";
+    const submitLabel = c.submitting
+      ? "下载中…"
+      : '<i data-lucide="download"></i><span>运行并下载</span>';
+    modal.innerHTML = `
+      <form class="quota-delete-confirm-modal" data-quota-form="compare" onsubmit="return false;">
+        <header class="quota-delete-header">
+          <div>
+            <p class="eyebrow">跨省对比</p>
+            <h2>定额跨省对比</h2>
+          </div>
+          <button class="icon-button" type="button" data-quota-action="close-compare-modal" title="关闭">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div class="quota-delete-body">
+          <p class="quota-delete-subtitle">输入关键词（必填）与可选的扩展/排除词，浏览器自动下载跨省对比 xlsx。</p>
+          <div class="quota-compare-form">
+            <label class="quota-compare-field">
+              <span>关键词（必填）</span>
+              <input id="compareKeyword" type="text" placeholder="例如：踢脚、扶手、挖" autocomplete="off" />
+              <small>定额「名称」必须包含该词才会被命中。</small>
+            </label>
+            <label class="quota-compare-field">
+              <span>补充词（选填，空格分隔，与主词取并集）</span>
+              <input id="compareAnyTerms" type="text" placeholder="例如：踢脚线 踢脚板" autocomplete="off" />
+              <small>把同义词/别名也填进来，主词+所有补充词任一出现在定额名里都算命中。</small>
+            </label>
+            <label class="quota-compare-field">
+              <span>排除词（选填，空格分隔）</span>
+              <input id="compareExcludeTerms" type="text" placeholder="例如：挖掘机 挖孔 钻" autocomplete="off" />
+              <small>任一词出现即排除；常用于防误伤。</small>
+            </label>
+          </div>
+          ${errorHtml}
+        </div>
+        <footer class="quota-compose-footer">
+          <button class="secondary-button" type="button" data-quota-action="close-compare-modal">取消</button>
+          <button class="primary-button" type="button" data-quota-action="submit-compare" ${c.submitting ? "disabled" : ""}>
+            ${submitLabel}
+          </button>
+        </footer>
+      </form>
+    `;
+    // 把 modal 内 input 同步回 state（用户输入不丢）
+    syncCompareInputsFromDom();
+  }
+
+  function syncCompareInputsFromDom() {
+    const k = document.getElementById("compareKeyword");
+    const a = document.getElementById("compareAnyTerms");
+    const e = document.getElementById("compareExcludeTerms");
+    if (k) k.value = state.compare.keyword || "";
+    if (a) a.value = state.compare.any_terms || "";
+    if (e) e.value = state.compare.exclude_terms || "";
+  }
+
+  function syncCompareStateFromDom() {
+    const k = document.getElementById("compareKeyword");
+    const a = document.getElementById("compareAnyTerms");
+    const e = document.getElementById("compareExcludeTerms");
+    if (k) state.compare.keyword = k.value;
+    if (a) state.compare.any_terms = a.value;
+    if (e) state.compare.exclude_terms = e.value;
+  }
+
+  function openCompareModal() {
+    state.compare = {
+      open: true,
+      keyword: state.compare.keyword || "",
+      any_terms: state.compare.any_terms || "",
+      exclude_terms: state.compare.exclude_terms || "",
+      submitting: false,
+      error: "",
+    };
+    renderCompareModal();
+    refreshIcons();
+    // 自动聚焦第一个输入
+    setTimeout(() => {
+      const k = document.getElementById("compareKeyword");
+      if (k) k.focus();
+    }, 0);
+  }
+
+  function closeCompareModal() {
+    state.compare = {
+      open: false,
+      keyword: state.compare.keyword || "",
+      any_terms: state.compare.any_terms || "",
+      exclude_terms: state.compare.exclude_terms || "",
+      submitting: false,
+      error: "",
+    };
+    renderCompareModal();
+  }
+
+  async function submitCompare() {
+    syncCompareStateFromDom();
+    const keyword = (state.compare.keyword || "").trim();
+    if (!keyword) {
+      state.compare.error = "请输入关键词（必填）";
+      renderCompareModal();
+      refreshIcons();
+      return;
+    }
+    state.compare.error = "";
+    state.compare.submitting = true;
+    renderCompareModal();
+    refreshIcons();
+
+    try {
+      const body = new URLSearchParams();
+      body.set("keyword", keyword);
+      if (state.compare.any_terms) body.set("any_terms", state.compare.any_terms);
+      if (state.compare.exclude_terms) body.set("exclude_terms", state.compare.exclude_terms);
+      const resp = await fetch("/api/data-lake/quota/compare", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded; charset=utf-8" },
+        body: body.toString(),
+      });
+      if (!resp.ok) {
+        // 422 等带 {detail: ...} 的错误
+        let detail = "HTTP " + resp.status;
+        try {
+          const j = await resp.json();
+          if (j && j.detail) {
+            if (typeof j.detail === "string") {
+              detail = j.detail;
+            } else if (j.detail.message) {
+              detail = j.detail.message;
+              if (j.detail.code) detail = `[${j.detail.code}] ${detail}`;
+            } else {
+              detail = JSON.stringify(j.detail);
+            }
+          }
+        } catch (_) {}
+        state.compare.error = detail;
+        state.compare.submitting = false;
+        renderCompareModal();
+        refreshIcons();
+        return;
+      }
+      // 200 OK → xlsx 字节流
+      const blob = await resp.blob();
+      const total = resp.headers.get("X-Compare-Total") || "?";
+      const filename = parseContentDispositionFilename(resp.headers.get("Content-Disposition"))
+        || `${keyword}_跨省对比.xlsx`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // 给浏览器一点时间触发下载再回收
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      state.compare.submitting = false;
+      state.compare.error = "";
+      // 关闭 modal + toast
+      closeCompareModal();
+      setToast(`对比完成：${total} 条命中 → ${filename}`);
+    } catch (e) {
+      state.compare.error = (e && e.message) || "网络错误";
+      state.compare.submitting = false;
+      renderCompareModal();
+      refreshIcons();
+    }
+  }
+
+  function parseContentDispositionFilename(header) {
+    if (!header) return null;
+    // RFC 5987: filename*=UTF-8''...
+    const rfc5987 = /filename\*\s*=\s*[^']*''([^;]+)/i.exec(header);
+    if (rfc5987) {
+      try {
+        return decodeURIComponent(rfc5987[1]);
+      } catch (_) {}
+    }
+    // fallback: filename="..."
+    const ascii = /filename\s*=\s*"([^"]+)"/i.exec(header);
+    if (ascii) return ascii[1];
+    return null;
   }
 
   // 后端契约见 web-frontend/SPEC.md §5.10：DELETE /api/data-lake/quota/archives/{id}
@@ -1374,6 +1628,7 @@
     renderUploadModal();
     renderDeleteParseModal();
     renderDeleteArchiveModal();
+    renderCompareModal();
     refreshIcons();
   }
 
@@ -2366,6 +2621,18 @@
       submitDeleteArchive();
       return;
     }
+    if (action === "open-compare-modal") {
+      openCompareModal();
+      return;
+    }
+    if (action === "close-compare-modal") {
+      closeCompareModal();
+      return;
+    }
+    if (action === "submit-compare") {
+      submitCompare();
+      return;
+    }
     if (action.indexOf("open-archive:") === 0) {
       const id = action.slice("open-archive:".length);
       if (!id) return;
@@ -2733,6 +3000,7 @@
       else if (state.compose && state.compose.open) closeCompose();
       else if (state.deleteParse && state.deleteParse.open) closeDeleteParseModal();
       else if (state.deleteArchive && state.deleteArchive.open) closeDeleteArchiveModal();
+      else if (state.compare && state.compare.open) closeCompareModal();
       else if (state.dropdown && state.dropdown.open) {
         state.dropdown = { open: false, archiveId: "", variant: "pending" };
         render();
@@ -2988,6 +3256,11 @@
       deleteArchModal.hidden = true;
       deleteArchModal.innerHTML = "";
     }
+    const compareModal = document.getElementById("quotaCompareModal");
+    if (compareModal) {
+      compareModal.hidden = true;
+      compareModal.innerHTML = "";
+    }
   }
 
   // ── 地区下拉搜索 ──────────────────────────────────────────────────────
@@ -3051,6 +3324,11 @@
       openDeleteArchiveModal,
       closeDeleteArchiveModal,
       submitDeleteArchive,
+      openCompareModal,
+      closeCompareModal,
+      submitCompare,
+      renderCompareView,
+      renderCompareModal,
       renderUploadModal,
       handleAction,
       TAB_CAPABILITY,

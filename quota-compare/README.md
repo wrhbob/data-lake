@@ -13,8 +13,8 @@ quota-compare/
 │   ├── 广东上.xlsx / 广东中.xlsx / 广东下.xlsx
 │   ├── 河南上.xlsx / 河南下.xlsx
 │   └── 重庆上.xlsx / 重庆下.xlsx
-├── 人工挖土方_跨省对比.xlsx    # 74 条命中（四川 12 / 广东 22 / 河南 27 / 重庆 13）
-└── 踢脚线_跨省对比.xlsx       # 42 条命中（四川 6 / 广东 20 / 重庆 16）
+├── 人工挖土方_跨省对比.xlsx    # 1060 条命中（OR 语义：挖 + 土/淤泥/冻土/沟槽/基坑/槽坑，排除 机械/挖掘机/挖孔/钻；按省 四川 449 / 广东 225 / 河南 270 / 重庆 116）
+└── 踢脚线_跨省对比.xlsx       # 43 条命中（OR 语义：踢脚 + 踢脚线/踢脚板；按省 四川 6 / 广东 20 / 河南 0 / 重庆 17）
 ```
 
 > 两个 xlsx 都未被 Git 跟踪（`quota-compare/` 整体 untracked），改动靠人工 .xlsx 备份。
@@ -28,10 +28,11 @@ cd quota-compare
 PYTHONIOENCODING=utf-8 /d/miniconda3/envs/file-asset/python.exe extract.py "水磨石"
 ```
 
-### 加扩展词（OR 关系）
+### 加扩展词（与 keyword 取并集）
 
 ```bash
 python extract.py "踢脚" --any "踢脚线 踢脚板"
+# 命中：name 含「踢脚」或「踢脚线」或「踢脚板」
 ```
 
 ### 加排除词（防误伤）
@@ -39,6 +40,7 @@ python extract.py "踢脚" --any "踢脚线 踢脚板"
 ```bash
 python extract.py "挖" --any "土 淤泥 冻土 沟槽 基坑 槽坑" \
                     --exclude "机械 挖掘机 挖孔 钻"
+# 命中：name 含「挖」或上述任一词，且不含「机械/挖掘机/挖孔/钻」
 ```
 
 ### 批量跑内置主题
@@ -59,9 +61,12 @@ TOPICS = [
 
 ## 匹配规则（短路求值）
 
-1. `keyword` 必须在定额「名称」里出现
-2. 任一 `exclude` 词出现 → 排除
-3. 若给了 `--any`，至少一个 `any` 词必须出现
+1. 任一 `exclude` 词出现 → 排除
+2. `keyword` 与 `any` 是「补充词」平行关系（**OR 主导**）：
+   - `name` 含 `keyword` → 命中
+   - 任一 `any` 词在 `name` 里 → 命中
+   - 两者都未命中 → 不命中
+3. 都不填（理论上 `keyword` 必填）→ 任意 `name` 都命中
 
 ## 加新主题的工作流
 

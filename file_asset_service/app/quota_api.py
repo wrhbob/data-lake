@@ -53,6 +53,7 @@ _FEATURES = {
     "dictionaries": "ready",
     "jurisdictions": "ready",
     "compose": "ready",
+    "compare": "ready",
     "archiveFiles": "unavailable",
     "coverage": "unavailable",
     "publicationSets": "unavailable",

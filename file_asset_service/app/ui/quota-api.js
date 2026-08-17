@@ -36,6 +36,7 @@
     "archiveFiles",
     "deleteParse",
     "deleteArchive",
+    "compare",
   ]);
 
   // 端点映射（compose / archiveFiles / deleteParse / deleteArchive 为写）

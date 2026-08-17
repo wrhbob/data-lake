@@ -230,6 +230,7 @@ from app.info_price_parse import (
     submit_parse_job,
 )
 from app.quota_api import router as quota_router
+from app.quota_compare import router as quota_compare_router
 from app.national_cost_info_regions import load_national_regions
 from app.national_info_price_audit import build_audit_summary, load_source_audit_rows, validate_source_audit
 from app.runner import run_processing_task
@@ -356,6 +357,7 @@ def create_app(*, init_schema: bool = True) -> FastAPI:
         app.mount("/ui-assets", StaticFiles(directory=ui_dir), name="ui_assets")
 
     app.include_router(quota_router)
+    app.include_router(quota_compare_router)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

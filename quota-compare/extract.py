@@ -11,6 +11,11 @@
   2. 任一 exclude 词出现 → 排除
   3. 若给了 --any，至少一个 any 词必须出现
 
+数据层（web 后端复用）：
+  - normalize_rows(bytes)         9 列归一
+  - collect_hits(by_province,...)  按省聚合命中块
+  - write_xlsx_bytes(blocks_by_prov, sheet_title) -> bytes
+
 示例：
   # 踢脚线 / 踢脚板（任一命中）
   python extract.py "踢脚" --any "踢脚线 踢脚板"
@@ -25,6 +30,7 @@
 import argparse
 import openpyxl
 from collections import Counter
+from io import BytesIO
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -62,9 +68,14 @@ def split_terms(s: str) -> list[str]:
     return [t for t in s.split() if t]
 
 
-def normalize_rows(path: Path) -> list[list]:
-    """读「定额条目」sheet，找表头位置后归一为 9 列 list[list]。"""
-    wb = openpyxl.load_workbook(path, read_only=True)
+# ── 数据层（web 后端调用这一层）───────────────────────────────────
+
+def normalize_rows(xlsx_bytes: bytes) -> list[list]:
+    """读「定额条目」sheet，找表头位置后归一为 9 列 list[list]。
+
+    web 模式：直接传 final_xlsx 的字节流。
+    """
+    wb = openpyxl.load_workbook(BytesIO(xlsx_bytes), read_only=True)
     ws = wb["定额条目"] if "定额条目" in wb.sheetnames else wb.worksheets[0]
     rows = list(ws.iter_rows(values_only=True))
     wb.close()
@@ -86,17 +97,29 @@ def normalize_rows(path: Path) -> list[list]:
 
 
 def matches(name: str, *, keyword: str, any_terms: list[str], exclude_terms: list[str]) -> bool:
-    """硬匹配 + 兜底谓词。"""
+    """硬匹配 + 兜底谓词（OR 主导语义）。
+
+    规则（短路求值）：
+      1. exclude 优先：任一 exclude 词出现 → 排除
+      2. keyword 与 any_terms 是「补充词」平行关系，二者取并集：
+         name 含 keyword  → 命中；
+         任一 any 词在 name 里 → 命中；
+         keyword 和 any 都没占中 → 不命中。
+      3. 都没填（keyword 与 any_terms 都空）→ 任意 name 都命中（理论上不触发，
+         keyword 已 Form(..., description=...) 校验非空）。
+    """
     text = name or ""
     if not text:
         return False
-    if keyword and keyword not in text:
-        return False
     if any(ex in text for ex in exclude_terms):
         return False
-    if any_terms and not any(t in text for t in any_terms):
-        return False
-    return True
+    candidates = []
+    if keyword:
+        candidates.append(keyword)
+    candidates.extend(any_terms)
+    if not candidates:
+        return True
+    return any(t in text for t in candidates)
 
 
 def extract_blocks(rows: list[list], *, keyword: str, any_terms: list[str], exclude_terms: list[str]) -> list[list]:
@@ -131,25 +154,26 @@ def extract_blocks(rows: list[list], *, keyword: str, any_terms: list[str], excl
     return blocks
 
 
-def run_topic(*, keyword: str, sheet_title: str, output_stem: str,
-              any_terms: list[str], exclude_terms: list[str], verbose: bool) -> dict:
-    """跑一个主题生成一份 xlsx；verbose=True 列命中清单。"""
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = sheet_title
-    ws.append(HEADER)
+def collect_hits(by_province: dict, *, keyword: str, any_terms: list[str], exclude_terms: list[str]):
+    """按省聚合命中块 + 摘要 + 命中清单。
 
-    hit_report = []  # (prov, fn, code, name)
-    for prov, files in PROVINCES:
-        ws.append([f"==== {prov} ===="] + [None] * 9)
-        last_section_key = None  # 段祖先去重
-        seen_codes = set()       # 重复定额编码去重
+    Args:
+        by_province: {省份: [(filename, xlsx_bytes), ...]}，每个省多个册。
 
-        for fn in files:
-            path = SRC / fn
-            if not path.exists():
-                continue
-            rows = normalize_rows(path)
+    Returns:
+        (blocks_by_prov, summary, hit_report)
+        blocks_by_prov: {省份: [[段祖先..., 定行, 子行...], ...]} 给 write_xlsx_bytes 用
+        summary:       Counter(省份 -> 命中定额数)
+        hit_report:    [(prov, filename, code, name), ...] 给 CLI verbose 输出用
+    """
+    blocks_by_prov = {}
+    summary = Counter()
+    hit_report = []
+    for prov, files in by_province.items():
+        blocks_by_prov[prov] = []
+        seen_codes = set()             # 同省多册 / 同省重复编码去重
+        for filename, xlsx_bytes in files:
+            rows = normalize_rows(xlsx_bytes)
             blocks = extract_blocks(rows, keyword=keyword,
                                     any_terms=any_terms, exclude_terms=exclude_terms)
             for block in blocks:
@@ -158,38 +182,75 @@ def run_topic(*, keyword: str, sheet_title: str, output_stem: str,
                 if code in seen_codes:
                     continue
                 seen_codes.add(code)
-                sec_key = tuple(b[1] for b in block if str(b[0] or "").strip() == "段")
-                if sec_key != last_section_key:
-                    for b in block:
-                        if str(b[0] or "").strip() == "段":
-                            ws.append([prov] + b)
-                    last_section_key = sec_key
-                for b in block:
-                    if str(b[0] or "").strip() != "段":
-                        ws.append([prov] + b)
-                hit_report.append((prov, fn, code, ding[2]))
+                blocks_by_prov[prov].append(block)
+                summary[prov] += 1
+                hit_report.append((prov, filename, code, ding[2]))
+    return blocks_by_prov, summary, hit_report
 
+
+def write_xlsx_bytes(blocks_by_prov: dict, *, sheet_title: str) -> bytes:
+    """把 blocks_by_prov 写成一个 xlsx 文件，返回字节流。
+
+    与 CLI 的 run_topic 共享同样的输出格式（HEADER + 省份段 + 定 + 子行）。
+    web 后端拿到 bytes 直接 Response(...) 返回。
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = sheet_title
+    ws.append(HEADER)
+
+    for prov, blocks in blocks_by_prov.items():
+        ws.append([f"==== {prov} ===="] + [None] * 9)
+        last_section_key = None  # 段祖先去重
+        for block in blocks:
+            sec_key = tuple(b[1] for b in block if str(b[0] or "").strip() == "段")
+            if sec_key != last_section_key:
+                for b in block:
+                    if str(b[0] or "").strip() == "段":
+                        ws.append([prov] + b)
+                last_section_key = sec_key
+            for b in block:
+                if str(b[0] or "").strip() != "段":
+                    ws.append([prov] + b)
         # 省之间空 3 行
         for _ in range(3):
             ws.append([None] * 10)
 
     # = 开头的字符串被 openpyxl 默认当公式写入；强制改回文本
-    # （否则 Office 打开会弹「需要修复」）
     for row in ws.iter_rows():
         for cell in row:
             if isinstance(cell.value, str) and cell.value.startswith("="):
                 cell.data_type = "s"
 
-    out_path = ROOT / f"{sanitize_stem(output_stem)}.xlsx"
-    wb.save(out_path)
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
-    cnt = Counter(p for p, *_ in hit_report)
-    summary = {"output": out_path, "n": len(hit_report), "by_province": dict(cnt)}
+
+# ── CLI 层（仅命令行入口使用；web 后端不调）───────────────────────
+
+def run_topic(*, keyword: str, sheet_title: str, output_stem: str,
+              any_terms: list[str], exclude_terms: list[str], verbose: bool) -> dict:
+    """CLI 入口：读 PROVINCES×原始样本/*.xlsx，调 collect_hits，写文件。"""
+    by_province = {}
+    for prov, files in PROVINCES:
+        for fn in files:
+            path = SRC / fn
+            if not path.exists():
+                continue
+            by_province.setdefault(prov, []).append((fn, path.read_bytes()))
+
+    blocks_by_prov, summary, hit_report = collect_hits(
+        by_province, keyword=keyword, any_terms=any_terms, exclude_terms=exclude_terms
+    )
+    out_bytes = write_xlsx_bytes(blocks_by_prov, sheet_title=sheet_title)
+    out_path = ROOT / f"{sanitize_stem(output_stem)}.xlsx"
+    out_path.write_bytes(out_bytes)
 
     if verbose:
         print(f"\n=== [{sheet_title}] ===")
         print(f"输出: {out_path.name}")
-        print(f"命中: {len(hit_report)} 条  按省: {dict(cnt)}")
+        print(f"命中: {len(hit_report)} 条  按省: {dict(summary)}")
         cur = None
         for prov, fn, code, name in hit_report:
             if prov != cur:
@@ -197,9 +258,9 @@ def run_topic(*, keyword: str, sheet_title: str, output_stem: str,
                 cur = prov
             print(f"  [{fn}] {code}  {name}")
     else:
-        print(f"[{sheet_title}] → {out_path.name}  ({len(hit_report)} 条, 按省 {dict(cnt)})")
+        print(f"[{sheet_title}] → {out_path.name}  ({len(hit_report)} 条, 按省 {dict(summary)})")
 
-    return summary
+    return {"output": out_path, "n": sum(summary.values()), "by_province": dict(summary)}
 
 
 def main():
