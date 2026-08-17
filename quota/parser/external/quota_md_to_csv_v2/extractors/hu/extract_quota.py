@@ -1618,15 +1618,26 @@ def process_md_file(md_path: Path) -> tuple[list[list[str]], list[dict]]:
 
         if wc_match:
             rest = prefix[wc_match.end():]
-            end_match = re.search(r"单位[：:]|<table", rest)
+            # 2026-08-17 修复：湖北 OCR 输出"计量单位："（4 字前缀），旧正则 `单位[：:]`
+            # 会匹配 `计量单位` 中的子串 `单位`，导致工作内容末尾残留"计量"二字。
+            # 修复策略：先尝试"计量单位"（含 OCR 抖动空白），回退到普通"单位"，再回退 <table。
+            # \s* 严格只容忍空白字符，不容忍其他字符。
+            end_match = (
+                re.search(r"计\s*量\s*单位\s*[：:]", rest)
+                or re.search(r"(?<![计\s])\b单位\s*[：:]", rest)
+                or re.search(r"<table", rest)
+            )
             wc_text = rest[:end_match.start()] if end_match else rest
             wc_text = wc_text.strip()
             wc_text = re.sub(r"\s+", " ", wc_text)
         else:
             wc_text = ""
 
-        # 提取单位 fallback
-        unit_matches = list(re.finditer(r"单位[：:]\s*([^\n]+)", prefix))
+        # 提取单位 fallback（与工作内容结束符对称：先吞"计量单位"，再回退"单位"）
+        unit_matches = (
+            list(re.finditer(r"计\s*量\s*单位\s*[：:]\s*([^\n]+)", prefix))
+            or list(re.finditer(r"(?<![计\s])\b单位\s*[：:]\s*([^\n]+)", prefix))
+        )
         unit_text = unit_matches[-1].group(1).strip() if unit_matches else ""
         unit_fallback = normalize_unit(unit_text)
 
