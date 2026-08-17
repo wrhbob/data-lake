@@ -58,3 +58,9 @@ MERGE_DIFF_REPORT.md
 _ppid.txt
 _proc_tree.json
 _resp_list.json
+
+# ── quota-compare 跨省对比工具 ───────────────────────────
+# 输入：原始样本（按需人工放置，6.5MB 数据，不入库）
+quota-compare/原始样本/
+# Excel 打开时自动生成的临时锁文件
+quota-compare/~$*.xlsx
