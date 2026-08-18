@@ -1062,7 +1062,12 @@ select:focus-visible {
   line-height: 1.1;
 }
 
-.coverage-cell {
+/* 2026-08-17 修复：原全局 .coverage-cell{display:inline-flex;width:100%} 是给
+   info-price 覆盖矩阵的 <span class="coverage-cell"> 用的，但没限定父容器 →
+   污染了 quota 覆盖矩阵的 <td class="coverage-cell">，使 <td> 脱离 table-cell
+   显示模式变 inline-flex，5 个 td 在同一列垂直堆叠（用户报"全部挤到 2026"）。
+   限域到 span.coverage-cell 后 info-price 不变，quota td 走自己的样式。 */
+span.coverage-cell {
   min-height: 24px;
   display: inline-flex;
   align-items: center;
@@ -1078,11 +1083,11 @@ select:focus-visible {
   white-space: nowrap;
 }
 
-.coverage-cell span:first-child {
+span.coverage-cell span:first-child {
   font-weight: 600;
 }
 
-.coverage-cell.empty {
+span.coverage-cell.empty {
   color: var(--tertiary);
 }
 
