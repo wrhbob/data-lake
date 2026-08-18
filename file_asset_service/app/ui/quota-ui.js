@@ -36,9 +36,12 @@
   // v0.9 (2026-08-18): value 改用 book_category 单字段 (与 DB quota_publication_set.book_category 对齐)。
   //   历史用 quota_system_type 双层命名空间 (construction_regional / industry_specialty) 与 DB book_category 不一致,
   //   后端 /archives?primary=... 已迁到 book_category, 此处同步, 不再双层映射。
+  // v0.9.3 (2026-08-18): 清单规范 secondary 从 "scope" (按 pubset title group, 1 选项, 等于无筛选) 改为
+  //   "jurisdiction" (按省份下拉, 与建筑工程定额同形)。前端 jurisdiction chip 走静态 PROVINCE_REGIONS,
+  //   不读后端 fx.jurisdictions (见 getFacetItems HOTFIX-QA-CHIP-001), 改 secondary 即可。
   const PRIMARY_FILTERS = Object.freeze([
     { value: "all", label: "全部", secondary: null },
-    { value: "boq_standard", label: "清单规范", secondary: "scope" },
+    { value: "boq_standard", label: "清单规范", secondary: "jurisdiction" },
     { value: "construction_quota", label: "建筑工程定额", secondary: "jurisdiction" },
     { value: "industry_quota", label: "专业工程定额", secondary: "industry" },
   ]);
@@ -51,10 +54,12 @@
   }
 
   // 二级筛选标签（不含"全部"，由渲染函数自动添加）
+  // v0.9.3 (2026-08-18): industry "行业分类" → "专业", 与 quotaUploadModal 的"专业"下拉对齐 (upload 时
+  //   category=industry_quota 用的 label 就是 "专业")。前端语义一致, 后端不受影响。
   const SECONDARY_LABELS = Object.freeze({
     scope: "适用范围",
     jurisdiction: "地区",
-    industry: "行业分类",
+    industry: "专业",
   });
 
   const LIST_COLUMNS = Object.freeze([
@@ -760,10 +765,12 @@
   // 构造 GET /facets 查询参数：
   //   - primary 始终传（决定 jurisdictions/industries/scopes/years 的语义）
   //   - 建筑工程定额 + 选了具体省份 → 透传 jurisdiction_code 让 years 按省过滤
+  //   - v0.9.3: 清单规范 secondary 也是 "jurisdiction", 同样要透传 jurisdiction_code
   function _facetsParams() {
     var params = { primary: state.filters.primary };
     if (
-      state.filters.primary === "construction_quota" &&
+      (state.filters.primary === "construction_quota" ||
+       state.filters.primary === "boq_standard") &&
       state.filters.secondary &&
       state.filters.secondary !== "all"
     ) {
@@ -2456,7 +2463,8 @@
       discipline_code: f.discipline && f.discipline !== "all" ? f.discipline : undefined,
     };
     if (f.secondary && f.secondary !== "all") {
-      if (f.primary === "construction_quota") params.jurisdiction_code = f.secondary;
+      // v0.9.3: 清单规范 secondary 也用 "jurisdiction", 与建筑工程定额同走 jurisdiction_code
+      if (f.primary === "construction_quota" || f.primary === "boq_standard") params.jurisdiction_code = f.secondary;
       else if (f.primary === "industry_quota") params.industry_sector_code = f.secondary;
     }
     // 去掉所有 undefined，避免 URL 里出现 ?key=

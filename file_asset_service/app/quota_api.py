@@ -252,17 +252,25 @@ def get_facets(
         years = _facet_years(session, "industry_quota")
 
     elif primary == "boq_standard":
-        s_rows = session.execute(
+        # v0.9.3 (2026-08-18): 与 construction_quota 同形, 按 jurisdiction_code group 出 jurisdictions。
+        #   之前按 title group 出的 scopes 只有 1 选项 ("深圳市2019定额..."), 实际等于无筛选。
+        #   前端 jurisdiction chip 走静态 PROVINCE_REGIONS 不读 fx.jurisdictions (HOTFIX-QA-CHIP-001),
+        #   此处返回 jurisdictions 仅保持 3 类 facets 返回结构对齐 (便于审计 / 调试)。
+        j_rows = session.execute(
             select(
-                QuotaPublicationSet.title,
+                QuotaPublicationSet.jurisdiction_code,
                 func.count().label("cnt"),
             ).where(
                 QuotaPublicationSet.book_category == "boq_standard",
-                QuotaPublicationSet.title.isnot(None),
-            ).group_by(QuotaPublicationSet.title)
+                QuotaPublicationSet.jurisdiction_code.isnot(None),
+            ).group_by(QuotaPublicationSet.jurisdiction_code)
         ).all()
-        for title, cnt in s_rows:
-            scopes.append({"code": str(title), "label": str(title), "count": int(cnt)})
+        for code, cnt in j_rows:
+            div = session.scalar(
+                select(AdministrativeDivision.name).where(AdministrativeDivision.code == code)
+            )
+            label = div or str(code)
+            jurisdictions.append({"code": str(code), "label": label, "count": int(cnt)})
         years = _facet_years(session, "boq_standard")
 
     else:
