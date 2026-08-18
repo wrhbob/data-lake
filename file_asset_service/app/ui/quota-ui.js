@@ -33,11 +33,14 @@
   ]);
 
   // 第一层筛选（一级分类 → 二级筛选映射）
+  // v0.9 (2026-08-18): value 改用 book_category 单字段 (与 DB quota_publication_set.book_category 对齐)。
+  //   历史用 quota_system_type 双层命名空间 (construction_regional / industry_specialty) 与 DB book_category 不一致,
+  //   后端 /archives?primary=... 已迁到 book_category, 此处同步, 不再双层映射。
   const PRIMARY_FILTERS = Object.freeze([
     { value: "all", label: "全部", secondary: null },
     { value: "boq_standard", label: "清单规范", secondary: "scope" },
-    { value: "construction_regional", label: "建筑工程定额", secondary: "jurisdiction" },
-    { value: "industry_specialty", label: "专业工程定额", secondary: "industry" },
+    { value: "construction_quota", label: "建筑工程定额", secondary: "jurisdiction" },
+    { value: "industry_quota", label: "专业工程定额", secondary: "industry" },
   ]);
 
   function primaryMeta(primaryValue) {
@@ -760,7 +763,7 @@
   function _facetsParams() {
     var params = { primary: state.filters.primary };
     if (
-      state.filters.primary === "construction_regional" &&
+      state.filters.primary === "construction_quota" &&
       state.filters.secondary &&
       state.filters.secondary !== "all"
     ) {
@@ -2453,8 +2456,8 @@
       discipline_code: f.discipline && f.discipline !== "all" ? f.discipline : undefined,
     };
     if (f.secondary && f.secondary !== "all") {
-      if (f.primary === "construction_regional") params.jurisdiction_code = f.secondary;
-      else if (f.primary === "industry_specialty") params.industry_sector_code = f.secondary;
+      if (f.primary === "construction_quota") params.jurisdiction_code = f.secondary;
+      else if (f.primary === "industry_quota") params.industry_sector_code = f.secondary;
     }
     // 去掉所有 undefined，避免 URL 里出现 ?key=
     Object.keys(params).forEach((k) => {
@@ -3054,7 +3057,7 @@
     if (action.indexOf("set-secondary:") === 0) {
       state.filters.secondary = action.slice(14);
       // 建筑工程定额：切省份后重刷 facets，让 years 按省份过滤
-      if (state.filters.primary === "construction_regional" && state.flags.facets) {
+      if (state.filters.primary === "construction_quota" && state.flags.facets) {
         state.api.getFacets(_facetsParams()).then((r) => {
           state.facets = { status: r.status, data: r.data };
           render();

@@ -167,13 +167,10 @@ def _facet_years(session: Session, primary: str | None = None, jurisdiction_code
         QuotaPublicationSet.edition_year,
         func.count().label("cnt"),
     )
-    if primary:
-        if primary == "construction_regional":
-            stmt = stmt.where(QuotaPublicationSet.quota_system_type == "construction_regional")
-        elif primary == "industry_specialty":
-            stmt = stmt.where(QuotaPublicationSet.quota_system_type == "industry_specialty")
-        elif primary == "boq_standard":
-            stmt = stmt.where(QuotaPublicationSet.material_type == "boq_standard")
+    # v0.9 (2026-08-18): primary 改用 book_category 单字段 (生成列)。
+    #   旧 3 分支 (quota_system_type + material_type) 已废弃, 见 scripts/migration_2026_08_18_book_category.sql。
+    if primary and primary != "all":
+        stmt = stmt.where(QuotaPublicationSet.book_category == primary)
     if jurisdiction_code:
         stmt = stmt.where(QuotaPublicationSet.jurisdiction_code == jurisdiction_code)
     stmt = stmt.where(QuotaPublicationSet.edition_year.isnot(None))
@@ -204,8 +201,8 @@ def _facet_years(session: Session, primary: str | None = None, jurisdiction_code
 @router.get("/facets")
 def get_facets(
     response: Response,
-    primary: str | None = Query(None, description="all|construction_regional|industry_specialty|boq_standard"),
-    jurisdiction_code: str | None = Query(None, description="filter years by jurisdiction (construction_regional only)"),
+    primary: str | None = Query(None, description="all | boq_standard | construction_quota | industry_quota (book_category)"),
+    jurisdiction_code: str | None = Query(None, description="filter years by jurisdiction (construction_quota only)"),
     session: Session = Depends(get_db_session),
 ) -> dict:
     jurisdictions: list[dict] = []
@@ -213,13 +210,15 @@ def get_facets(
     scopes: list[dict] = []
     years: list[dict] = []
 
-    if primary == "construction_regional":
+    # v0.9 (2026-08-18): primary 改用 book_category 单字段 (生成列)。
+    #   旧 3 分支 (quota_system_type + material_type) 已废弃, 见 scripts/migration_2026_08_18_book_category.sql。
+    if primary == "construction_quota":
         j_rows = session.execute(
             select(
                 QuotaPublicationSet.jurisdiction_code,
                 func.count().label("cnt"),
             ).where(
-                QuotaPublicationSet.quota_system_type == "construction_regional",
+                QuotaPublicationSet.book_category == "construction_quota",
                 QuotaPublicationSet.jurisdiction_code.isnot(None),
             ).group_by(QuotaPublicationSet.jurisdiction_code)
         ).all()
@@ -229,15 +228,15 @@ def get_facets(
             )
             label = div or str(code)
             jurisdictions.append({"code": str(code), "label": label, "count": int(cnt)})
-        years = _facet_years(session, "construction_regional", jurisdiction_code=jurisdiction_code)
+        years = _facet_years(session, "construction_quota", jurisdiction_code=jurisdiction_code)
 
-    elif primary == "industry_specialty":
+    elif primary == "industry_quota":
         i_rows = session.execute(
             select(
                 QuotaPublicationSet.industry_sector_code,
                 func.count().label("cnt"),
             ).where(
-                QuotaPublicationSet.quota_system_type == "industry_specialty",
+                QuotaPublicationSet.book_category == "industry_quota",
                 QuotaPublicationSet.industry_sector_code.isnot(None),
             ).group_by(QuotaPublicationSet.industry_sector_code)
         ).all()
@@ -250,7 +249,7 @@ def get_facets(
             )
             label = label_row or str(code)
             industries.append({"code": str(code), "label": label, "count": int(cnt)})
-        years = _facet_years(session, "industry_specialty")
+        years = _facet_years(session, "industry_quota")
 
     elif primary == "boq_standard":
         s_rows = session.execute(
@@ -258,7 +257,7 @@ def get_facets(
                 QuotaPublicationSet.title,
                 func.count().label("cnt"),
             ).where(
-                QuotaPublicationSet.material_type == "boq_standard",
+                QuotaPublicationSet.book_category == "boq_standard",
                 QuotaPublicationSet.title.isnot(None),
             ).group_by(QuotaPublicationSet.title)
         ).all()
@@ -291,7 +290,7 @@ def get_facets(
 def list_quota_archives(
     response: Response,
     q: str | None = Query(None, description="search title"),
-    primary: str | None = Query(None, description="all|construction_regional|industry_specialty|boq_standard"),
+    primary: str | None = Query(None, description="all | boq_standard | construction_quota | industry_quota (book_category)"),
     jurisdiction_code: str | None = Query(None),
     industry_sector_code: str | None = Query(None),
     edition_year: str | None = Query(None),
@@ -313,13 +312,9 @@ def list_quota_archives(
 
     if q:
         stmt = stmt.where(Archive.title.ilike(f"%{q}%"))
-    if primary:
-        if primary == "construction_regional":
-            stmt = stmt.where(QuotaPublicationSet.quota_system_type == "construction_regional")
-        elif primary == "industry_specialty":
-            stmt = stmt.where(QuotaPublicationSet.quota_system_type == "industry_specialty")
-        elif primary == "boq_standard":
-            stmt = stmt.where(QuotaPublicationSet.material_type == "boq_standard")
+    # v0.9 (2026-08-18): primary 改用 book_category 单字段 (生成列)。
+    if primary and primary != "all":
+        stmt = stmt.where(QuotaPublicationSet.book_category == primary)
     if jurisdiction_code:
         stmt = stmt.where(QuotaPublicationSet.jurisdiction_code == jurisdiction_code)
     if industry_sector_code:
@@ -355,13 +350,9 @@ def list_quota_archives(
         )
     if q:
         count_stmt = count_stmt.where(Archive.title.ilike(f"%{q}%"))
-    if primary:
-        if primary == "construction_regional":
-            count_stmt = count_stmt.where(QuotaPublicationSet.quota_system_type == "construction_regional")
-        elif primary == "industry_specialty":
-            count_stmt = count_stmt.where(QuotaPublicationSet.quota_system_type == "industry_specialty")
-        elif primary == "boq_standard":
-            count_stmt = count_stmt.where(QuotaPublicationSet.material_type == "boq_standard")
+    # v0.9 (2026-08-18): 与主查询一致, count_stmt 也用 book_category 单字段。
+    if primary and primary != "all":
+        count_stmt = count_stmt.where(QuotaPublicationSet.book_category == primary)
     if jurisdiction_code:
         count_stmt = count_stmt.where(QuotaPublicationSet.jurisdiction_code == jurisdiction_code)
     if industry_sector_code:
