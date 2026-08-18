@@ -1145,11 +1145,12 @@ def create_app(*, init_schema: bool = True) -> FastAPI:
             rows = [row for row in rows if row.target_level == target_level]
         return [row.to_dict() for row in rows]
 
-    @app.get("/api/quota/coverage-matrix")
+    @app.get("/api/data-lake/quota/coverage-matrix")
     def quota_coverage_matrix_endpoint(
         session: Session = Depends(get_db_session),
     ) -> dict[str, object]:
         # 2026-08-17: 行=年份（desc，未知在末尾），列=省份，单元格=档案数
+        # 路径必须挂 /api/data-lake/quota 下（与 quota_api.py router prefix 一致）
         # 不接 query 参数：用户原话"只用展示一个矩阵，不用选省份"
         return build_quota_coverage_matrix(session)
 
