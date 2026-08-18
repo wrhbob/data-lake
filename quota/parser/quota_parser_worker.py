@@ -292,6 +292,33 @@ def _claim_one_job():
 
 
 # ─────────────────────────────────────────────────────────
+# 加载 archive + profile + pubset 三件套（v0.x book_category 路由用）
+# ─────────────────────────────────────────────────────────
+def _load_archive_with_pubset(
+    archive_id: str,
+) -> tuple[Archive | None, QuotaArchiveProfile | None, QuotaPublicationSet | None]:
+    """worker 自己的 archive+profile+pubset 加载。
+
+    - archive 缺失 → 返回 (None, None, None), 调用方按 failed_user 处理
+    - profile 缺失 (孤儿档案 / 旧数据) → 返回 (archive, None, None)
+    - pubset 缺失 (profile.publication_set_id 为空或 FK 断) → (archive, profile, None)
+    - 完整 → 三件套齐全, book_category 可读
+    """
+    from app.database import get_session_factory
+    from app.models import Archive, QuotaArchiveProfile, QuotaPublicationSet
+
+    with get_session_factory()() as session:
+        archive = session.get(Archive, archive_id)
+        if archive is None:
+            return None, None, None
+        profile = session.get(QuotaArchiveProfile, archive_id)
+        pubset: QuotaPublicationSet | None = None
+        if profile is not None and profile.publication_set_id:
+            pubset = session.get(QuotaPublicationSet, profile.publication_set_id)
+    return archive, profile, pubset
+
+
+# ─────────────────────────────────────────────────────────
 # 处理 job（mock/real 分流）
 # ─────────────────────────────────────────────────────────
 def _process_job(job) -> None:
@@ -320,11 +347,66 @@ def _process_mock_job(job) -> None:
 
 
 def _process_real_job(job) -> None:
-    """Real worker：下载 PDF → run_quota_pipeline → 上传产物 → 注册 archive_file →
-    写 archive.parse_* + manifest.json。
+    """Real worker 顶层分发器（v0.x book_category 路由）。
+
+    按 QuotaPublicationSet.book_category 把 job 路由到:
+      - construction_quota → _process_construction_quota (5 个省份 extractor)
+      - boq_standard       → _process_boq_standard_stub   (预留 stub, skipped_no_parser)
+      - industry_quota     → _process_industry_quota_stub (预留 stub, skipped_no_parser)
+      - None / 其它        → _mark_job_skipped_no_parser  (防御)
+
+    不再做 archive 加载 (handler 自己按需 load af_main/fa); 三件套读完后分发。
+    """
+    archive, profile, pubset = _load_archive_with_pubset(job.archive_id)
+    if archive is None:
+        _mark_job_failed(job, error_code="failed_user",
+                         message=f"archive {job.archive_id} 不存在")
+        return
+
+    book_category = pubset.book_category if pubset else None
+
+    # v0.x dispatch 表 (config.BOOK_CATEGORY_PARSER_REGISTRY)
+    from quota_parser.config import BOOK_CATEGORY_PARSER_REGISTRY
+
+    if book_category == "construction_quota":
+        _process_construction_quota(job, archive, profile, pubset)
+    elif book_category == "boq_standard":
+        _process_boq_standard_stub(job, archive, profile, pubset)
+    elif book_category == "industry_quota":
+        _process_industry_quota_stub(job, archive, profile, pubset)
+    elif book_category in BOOK_CATEGORY_PARSER_REGISTRY:
+        # 注册表里有但 worker 还没实装分支 — 防御 (避免新增 book_category 时静默走 default)
+        _mark_job_skipped_no_parser(
+            job,
+            book_category=book_category,
+            province=job.metadata_payload.get("province"),
+            detail=(
+                f"book_category={book_category!r} 已在 BOOK_CATEGORY_PARSER_REGISTRY 注册但 worker "
+                "未对应 _process_xxx 实现。请补 quota_parser_worker._process_xxx 函数。"
+            ),
+        )
+    else:
+        # None / 未知 book_category (孤儿档案 / 旧数据 / pubset 缺失)
+        _mark_job_skipped_no_parser(
+            job,
+            book_category=book_category,
+            province=job.metadata_payload.get("province"),
+            detail=(
+                f"无法识别 book_category={book_category!r} "
+                f"(profile={'有' if profile else '无'}, pubset={'有' if pubset else '无'}). "
+                "档案缺少 QuotaPublicationSet 关联或 metadata_status 不完整, 请检查入湖流程。"
+            ),
+        )
+
+
+def _process_construction_quota(job, archive, profile, pubset) -> None:
+    """建筑工程定额 (construction_quota) 解析路径。
+
+    原有 _process_real_job 真实 job 逻辑整体迁移：下载 PDF → run_quota_pipeline →
+    上传产物 → 注册 archive_file → 写 archive.parse_* + manifest.json。
+    行为零变化, 仅作用域从顶层 dispatcher 改到本函数。
     """
     from sqlalchemy import select
-    from sqlalchemy import text as sa_text
 
     from app.database import get_session_factory
     from app.models import Archive, ArchiveFile, FileAsset
@@ -340,11 +422,6 @@ def _process_real_job(job) -> None:
 
     # 1. 找主 PDF：ArchiveFile(main_document, is_primary) → FileAsset
     with get_session_factory()() as session:
-        archive = session.get(Archive, job.archive_id)
-        if archive is None:
-            _mark_job_failed(job, error_code="failed_user",
-                             message=f"archive {job.archive_id} 不存在")
-            return
         af_main = session.execute(
             select(ArchiveFile).where(
                 ArchiveFile.archive_id == job.archive_id,
@@ -370,7 +447,9 @@ def _process_real_job(job) -> None:
     province = job.metadata_payload.get("province")
     has_parser, np_detail = _guard_has_parser(province)
     if not has_parser:
-        _mark_job_skipped_no_parser(job, province=province or "<empty>", detail=np_detail)
+        _mark_job_skipped_no_parser(
+            job, province=province, book_category="construction_quota", detail=np_detail,
+        )
         return
 
     # 3. 下载 PDF 到本地 temp（get_object 拿 bytes → 落临时文件）
@@ -452,18 +531,18 @@ def _process_real_job(job) -> None:
     candidate_key = f"quota/{job.archive_id}/artifacts/parse_candidate_xlsx.xlsx"
     # 复算 candidate sha256（pipeline result 已带）
     with get_session_factory()() as session:
-        archive = session.get(Archive, job.archive_id)
-        archive.parse_status = result.status if result.status != "failed" else "parsed"
-        archive.parse_phase = "stage_a"
-        archive.parse_parser_version = result.parser_version
-        archive.parse_finished_at = datetime.now(UTC)
-        archive.parse_metrics = {**(result.metrics or {}), "chunks_total": chunks_total,
+        archive_row = session.get(Archive, job.archive_id)
+        archive_row.parse_status = result.status if result.status != "failed" else "parsed"
+        archive_row.parse_phase = "stage_a"
+        archive_row.parse_parser_version = result.parser_version
+        archive_row.parse_finished_at = datetime.now(UTC)
+        archive_row.parse_metrics = {**(result.metrics or {}), "chunks_total": chunks_total,
                                 "chunks_done": chunks_done,
                                 "ocr_api_url": ocr_api_url}
-        archive.parse_warnings = result.warnings or []
-        archive.parse_error_code = None
-        archive.parse_error_message = None
-        archive.candidate_xlsx_key = candidate_key if any(
+        archive_row.parse_warnings = result.warnings or []
+        archive_row.parse_error_code = None
+        archive_row.parse_error_message = None
+        archive_row.candidate_xlsx_key = candidate_key if any(
             a["kind"] == "parse_candidate_xlsx" for a in artifacts_meta
         ) else None
         session.commit()
@@ -499,6 +578,62 @@ def _process_real_job(job) -> None:
 
     # F5: 成功后清 work_root（产物已在 MinIO + DB）。
     cleanup_workspace(work_root, success=True)
+
+
+def _process_boq_standard_stub(job, archive, profile, pubset) -> None:
+    """清单规范 (boq_standard) 解析入口 (v0.x 预留 stub)。
+
+    当前行为：skipped_no_parser 终态 + TODO 文案, 等待业务方提需求后实装。
+    不消耗算力 (不下载 PDF / 不跑 OCR / 不调 pipeline)。
+
+    实装路径 (供后续参考):
+      1. 新建目录 quota/parser/external/quota_md_to_csv_v2/extractors/_boq/
+      2. 落 extract_quota.py (构造 quota_item / consumption / qa_printed_price 等)
+         模板参考 extractors/sc/extract_quota.py
+      3. 同步副本到 quota/parser/external/quota-md-to-csv-v2/extractors/_boq/ (CLI 链路)
+      4. config.BOOK_CATEGORY_PARSER_REGISTRY['boq_standard']: 'stub' → 'ready'
+      5. quota_parser_worker._process_boq_standard_stub 改名为 _process_boq_standard
+         (去掉 _stub 后缀, 替换函数体)
+    """
+    _mark_job_skipped_no_parser(
+        job,
+        book_category="boq_standard",
+        province=job.metadata_payload.get("province"),
+        detail=(
+            "清单规范 (boq_standard) 暂无解析脚本 — "
+            "等待业务方提需求后, 在 extractors/_boq/extract_quota.py 实装 "
+            "(见 quota_parser_worker._process_boq_standard_stub 注释)。"
+        ),
+    )
+
+
+def _process_industry_quota_stub(job, archive, profile, pubset) -> None:
+    """专业工程定额 (industry_quota) 解析入口 (v0.x 预留 stub)。
+
+    当前行为：skipped_no_parser 终态 + TODO 文案 (含 industry_sector_code), 等待业务方提需求后实装。
+    不消耗算力。
+
+    实装路径 (供后续参考):
+      1. 新建目录 quota/parser/external/quota_md_to_csv_v2/extractors/_industry/
+      2. 落 extract_quota.py, 行业子类按 industry_sector_code (12 项受控词表:
+         water_conservancy / electric_power / power_grid / railway / highway /
+         petroleum / petrochemical / coal / solar_power / waterway_port /
+         non_ferrous_metal / ict) 分流
+      3. 同步副本到 quota/parser/external/quota-md-to-csv-v2/extractors/_industry/ (CLI 链路)
+      4. config.BOOK_CATEGORY_PARSER_REGISTRY['industry_quota']: 'stub' → 'ready'
+      5. quota_parser_worker._process_industry_quota_stub 改名为 _process_industry_quota
+    """
+    sector = pubset.industry_sector_code if pubset else None
+    _mark_job_skipped_no_parser(
+        job,
+        book_category="industry_quota",
+        province=job.metadata_payload.get("province"),
+        detail=(
+            f"专业工程定额 (industry_quota, industry_sector_code={sector!r}) 暂无解析脚本 — "
+            "等待业务方提需求后, 在 extractors/_industry/extract_quota.py 实装 "
+            "(见 quota_parser_worker._process_industry_quota_stub 注释)。"
+        ),
+    )
 
 
 # ─────────────────────────────────────────────────────────
@@ -715,12 +850,24 @@ def _guard_has_parser(province: str | None) -> tuple[bool, str]:
     )
 
 
-def _mark_job_skipped_no_parser(job, *, province: str, detail: str) -> None:
+def _mark_job_skipped_no_parser(
+    job,
+    *,
+    detail: str,
+    province: str | None = None,
+    book_category: str | None = None,
+) -> None:
     """标 job done + archive.parse_status='skipped_no_parser' + warning.
 
     走 _mark_job_done 的 'done' 状态 (而不是 'failed'), 避免污染失败指标.
     archive.parse_status 用 'skipped_no_parser' 是新的 archive 解析子状态 (String(32) 无 CHECK,
     models.py:478; 与 web-frontend SPEC §3.1.2 五态枚举独立, 不影响 status 字段).
+
+    v0.x: 扩展支持 book_category 维度跳过。
+      - 调用方按原因传 province (没省份 extractor) / book_category (该书类别暂无实装)
+      - 至少一个非 None (否则无法定位原因)
+      - error_code / parse_warnings.code 统一 'no_parser' (UX 决策: 不细分,
+        用户只需知道"暂无解析脚本", 详细原因在 parse_warnings[].detail)
     """
     from sqlalchemy import update
     from sqlalchemy.orm.attributes import flag_modified
@@ -729,7 +876,11 @@ def _mark_job_skipped_no_parser(job, *, province: str, detail: str) -> None:
     from app.models import Archive
 
     now = datetime.now(UTC)
-    warning = {"code": "no_parser_for_province", "province": province, "detail": detail}
+    warning: dict = {"code": "no_parser", "detail": detail}
+    if province is not None:
+        warning["province"] = province
+    if book_category is not None:
+        warning["book_category"] = book_category
     with get_session_factory()() as session:
         # quota_parse_job: 走 ORM update (避开 raw SQL bind param 触发 system locale 编码)
         from app.models import QuotaParseJob
@@ -753,8 +904,8 @@ def _mark_job_skipped_no_parser(job, *, province: str, detail: str) -> None:
         flag_modified(archive, "parse_warnings")  # JSON 列必须显式 flag
         session.commit()
     logger.warning(
-        "skip-no-parser job_id=%s archive_id=%s province=%s reason=%s",
-        job.job_id, job.archive_id, province, detail,
+        "skip-no-parser job_id=%s archive_id=%s province=%s book_category=%s reason=%s",
+        job.job_id, job.archive_id, province, book_category, detail,
     )
 
 

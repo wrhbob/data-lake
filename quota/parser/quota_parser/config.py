@@ -109,3 +109,19 @@ EXTERNAL_ROOT = PARSER_ROOT / "external"
 MINERU_SCRIPT_DIR = EXTERNAL_ROOT / "mineru_pdf_parse" / "scripts"
 QUOTA_MD_TO_CSV_DIR = EXTERNAL_ROOT / "quota_md_to_csv_v2"
 QUOTA_CSV_FINALIZE_DIR = EXTERNAL_ROOT / "quota_csv_finalize"
+
+
+# v0.x (2026-08-18): book_category → 实装/预留状态。
+# worker 据此决定走省份 extractor 还是预留 stub。
+#   ready = 已有实装, 走 _process_construction_quota (5 个省份 extractor)
+#   stub  = 仅占位, 走 _process_boq_standard_stub / _process_industry_quota_stub
+#           (skipped_no_parser 终态 + TODO 文案, 等待业务方提需求后实装)
+# 实装时: (a) 把 "stub" → "ready" (b) 在 quota_parser_worker 替换对应 _stub 函数为实装
+#         (c) 落 extractors/_boq/extract_quota.py 或 extractors/_industry/extract_quota.py
+#         (d) 同步副本到 quota-md-to-csv-v2/extractors/ (CLI 链路)
+# 见 quota/parser/EXTRACTOR_ONBOARDING.md §2。
+BOOK_CATEGORY_PARSER_REGISTRY: dict[str, str] = {
+    "construction_quota": "ready",  # 实装: 5 个省份 extractor (sc/cq/gd/hu/bj)
+    "boq_standard":       "stub",   # 预留: 清单规范 extractor (等业务方提需求)
+    "industry_quota":     "stub",   # 预留: 专业工程定额 extractor (12 行业子类)
+}
