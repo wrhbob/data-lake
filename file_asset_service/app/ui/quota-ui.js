@@ -81,28 +81,6 @@
     // 提示信息走右下角 toast（点击"开始解析"时弹）+ 详情页 renderParseStatusSection。
   });
 
-  // 2026-08-18: parse_status 英文 → 中文文案，给覆盖矩阵 tooltip / 详情卡显示用。
-  // 档案列表 5 态徽章仍走 PARSE_STATUS_VARIANT（颜色），不动。这里只换文案。
-  // 映射表来源：worker.py / quota_api.py / mock_parse_runner 实际写入的取值集合。
-  const PARSE_STATUS_LABEL_ZH = Object.freeze({
-    pending:           "待解析",          // 入库未触发
-    parsing:           "解析中",          // worker 拉 job 后
-    parsed:            "已抽稿·待审",     // md/candidate 已落, 等用户传 reviewed.xlsx
-    candidate_ready:   "候选稿·待审",     // v0.5: candidate.xlsx 已落 MinIO
-    qa_passed:         "已审定",          // 用户上传 reviewed.xlsx → final.xlsx
-    usable:            "可用",            // 终态
-    failed_user:       "失败·可重试",     // 临时错误,可重跑
-    failed_permanent:  "失败·终止",       // 永久错误,需人介入
-    skipped_no_parser: "暂跳过·无 parser", // worker 找不到该省的 parser
-    cancelled:         "已取消",          // 用户手动取消
-    unknown:           "未知",            // 兜底
-  });
-
-  function parseStatusLabel(statusKey) {
-    if (!statusKey) return "未知";
-    return PARSE_STATUS_LABEL_ZH[statusKey] || statusKey;
-  }
-
   function resolveUiStatus(row) {
     // v0.4 Bug#1 修：5 态徽章由 parse_status 驱动（不是 row.status，row.status 是
     // archive 生命周期 status='pending_tag'，不在 PARSE_STATUS_VARIANT 表里）。
@@ -2312,14 +2290,34 @@
     // cellData: { year, province_name, archive_count, archive_titles, parse_statuses }
     const titles = (cellData && cellData.archive_titles) || [];
     const statuses = (cellData && cellData.parse_statuses) || {};
-    const statusKeys = Object.keys(statuses);
     const titleHtml = titles.length
       ? titles.map((t) => `<li>${escapeHtml(t)}</li>`).join("")
       : `<li class="quota-coverage-tooltip-empty">无档案标题</li>`;
-    // 2026-08-18: status key 走 parseStatusLabel() 转中文；找不到映射回退显示原文,避免吞错误
-    const statusHtml = statusKeys.length
-      ? statusKeys.map((k) => `<span class="quota-coverage-tooltip-pill">${escapeHtml(parseStatusLabel(k))} <em>${escapeHtml(String(statuses[k]))}</em></span>`).join("")
-      : "";
+
+    // 2026-08-18: parse_status 分布按 5 态变体聚合，与档案列表徽章对齐。
+    //   后端 parse_status 原始 key 多达 11 种 (pending/parsing/parsed/candidate_ready/
+    //   qa_passed/usable/failed_user/failed_permanent/skipped_no_parser/cancelled/unknown)，
+    //   档案列表徽章只用 5 态（pending/parsing/review/done/failed）。
+    //   覆盖矩阵之前直接渲染原始 key，用户看到「未知 / 已取消」这些档案列表根本不暴露的
+    //   状态名 → 困惑。修复：每条原始 key 先走 PARSE_STATUS_VARIANT 落到 5 态之一，再按
+    //   5 态聚合计数 + 显示档案列表同款中文文案。
+    const variantLabelMap = Object.freeze({
+      pending: "未解析",
+      parsing: "解析中",
+      review:  "待审核",
+      done:    "已完成",
+      failed:  "解析失败",
+    });
+    const variantCounts = { pending: 0, parsing: 0, review: 0, done: 0, failed: 0 };
+    Object.keys(statuses).forEach((rawKey) => {
+      const variant = PARSE_STATUS_VARIANT[rawKey] || "pending";
+      variantCounts[variant] = (variantCounts[variant] || 0) + (statuses[rawKey] | 0);
+    });
+    // 5 态顺序固定（按解析进度浅→深+失败）
+    const statusHtml = ["pending", "parsing", "review", "done", "failed"]
+      .filter((v) => variantCounts[v] > 0)
+      .map((v) => `<span class="quota-coverage-tooltip-pill">${escapeHtml(variantLabelMap[v])} <em>${escapeHtml(String(variantCounts[v]))}</em></span>`)
+      .join("");
     return `
       <header class="quota-coverage-tooltip-head">
         <strong>${escapeHtml(cellData.year)} · ${escapeHtml(cellData.province_name)}</strong>
