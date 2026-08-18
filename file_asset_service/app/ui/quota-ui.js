@@ -2337,8 +2337,15 @@
 
   // 事件委托到覆盖矩阵容器：mouseover / focus 进入带数据的 cell 即弹；mouseout / blur 隐藏。
   // 用 [_bound] 标记避免 render() 每次重新渲染后重复挂监听。
+  //
+  // 2026-08-18 修复：原来用 document.querySelector(".coverage-matrix-card")，但 index.html
+  // 里同时存在信息价覆盖矩阵的 <section id="coverageMatrixCard" class="coverage-matrix-card">，
+  // DOM 顺序在 #quotaShell 之前。quota 域切换时只是给信息价加 hidden 属性（不删元素），
+  // querySelector 返回第一个匹配 → 信息价的（隐藏的）卡片。结果 quota 覆盖矩阵的 hover
+  // 事件其实没绑上去，CSS hover 样式还能触发（box-shadow + 蓝色背景），但 JS tooltip
+  // 永远不弹。修复：限定到 #quotaShell .coverage-matrix-card。
   function bindCoverageTooltipEvents() {
-    const matrix = document.querySelector(".coverage-matrix-card");
+    const matrix = document.querySelector("#quotaShell .coverage-matrix-card");
     if (!matrix) return;
     if (matrix._tooltipBound) return;
     matrix._tooltipBound = true;
