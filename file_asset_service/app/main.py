@@ -61,6 +61,12 @@ def _run_quota_filtered_listing(
     Activation rule: any of the 6 quota params must be supplied AND domain_type
     must equal 'quota' (or be None — caller checks). Pure generic listings stay
     on the legacy code path so behavior is identical for non-quota callers.
+
+    v0.9.2 (2026-08-18): primary 三类改用 book_category 单字段 (boq_standard /
+      construction_quota / industry_quota) — 与 quota_api /facets /archives
+      一致, 走 QuotaPublicationSet.book_category GENERATED 列。前端 quota-ui.js
+      同步已 commit。历史值 construction_regional / industry_specialty 已废弃,
+      此处不再回退支持。
     """
     base = (
         select(Archive, QuotaArchiveProfile, QuotaPublicationSet)
@@ -95,12 +101,15 @@ def _run_quota_filtered_listing(
         )
 
     # ── quota-specific chip filters ─────────────────────────────
-    if primary == "construction_regional":
-        base = base.where(QuotaPublicationSet.quota_system_type == "construction_regional")
-    elif primary == "industry_specialty":
-        base = base.where(QuotaPublicationSet.quota_system_type == "industry_specialty")
+    # v0.9.2 (2026-08-18): primary 改用 book_category 单字段 (QuotaPublicationSet.book_category
+    #   是 GENERATED ALWAYS AS STORED 列, 见 scripts/migration_2026_08_18_book_category.sql),
+    #   与 quota_api /facets /archives?primary= 同源, 不再走 quota_system_type/material_type 双层。
+    if primary == "construction_quota":
+        base = base.where(QuotaPublicationSet.book_category == "construction_quota")
+    elif primary == "industry_quota":
+        base = base.where(QuotaPublicationSet.book_category == "industry_quota")
     elif primary == "boq_standard":
-        base = base.where(QuotaPublicationSet.material_type == "boq_standard")
+        base = base.where(QuotaPublicationSet.book_category == "boq_standard")
     if jurisdiction_code:
         base = base.where(QuotaPublicationSet.jurisdiction_code == jurisdiction_code)
     if industry_sector_code:
@@ -142,12 +151,13 @@ def _run_quota_filtered_listing(
             QuotaPublicationSet.publication_set_id == QuotaArchiveProfile.publication_set_id,
             isouter=True,
         )
-        if primary == "construction_regional":
-            count_stmt = count_stmt.where(QuotaPublicationSet.quota_system_type == "construction_regional")
-        elif primary == "industry_specialty":
-            count_stmt = count_stmt.where(QuotaPublicationSet.quota_system_type == "industry_specialty")
+        # v0.9.2: 同 base 分支, 用 book_category 单字段 (与 quota_api 保持一致)。
+        if primary == "construction_quota":
+            count_stmt = count_stmt.where(QuotaPublicationSet.book_category == "construction_quota")
+        elif primary == "industry_quota":
+            count_stmt = count_stmt.where(QuotaPublicationSet.book_category == "industry_quota")
         elif primary == "boq_standard":
-            count_stmt = count_stmt.where(QuotaPublicationSet.material_type == "boq_standard")
+            count_stmt = count_stmt.where(QuotaPublicationSet.book_category == "boq_standard")
         if jurisdiction_code:
             count_stmt = count_stmt.where(QuotaPublicationSet.jurisdiction_code == jurisdiction_code)
         if industry_sector_code:
@@ -1199,7 +1209,7 @@ def create_app(*, init_schema: bool = True) -> FastAPI:
         # ── quota 域 chip 筛选（仅在 domain_type=quota 时生效，2026-07-29 增）──
         primary: str | None = Query(
             None,
-            description="定额体系大类；与 quota_api /facets 同义：all|construction_regional|industry_specialty|boq_standard",
+            description="定额体系大类；与 quota_api /facets 同义：all|construction_quota|industry_quota|boq_standard (v0.9.2 起改用 book_category 单字段)",
         ),
         jurisdiction_code: str | None = Query(
             None,
