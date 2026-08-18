@@ -5701,25 +5701,6 @@ a.rail-button {
   border-radius: var(--radius);
   cursor: help;
 }
-.coverage-year-month-table .coverage-cell--total {
-  background: var(--blue-soft);
-  color: var(--text);
-  font-weight: 600;
-}
-.coverage-year-month-table .coverage-cell--grand {
-  background: var(--blue);
-  color: #fff;
-}
-.coverage-year-month-table .coverage-cell--total-label {
-  background: var(--blue);
-  color: #fff;
-  font-weight: 600;
-}
-.coverage-year-month-table .coverage-col-total {
-  background: var(--blue);
-  color: #fff;
-  font-weight: 600;
-}
 .coverage-year-month-table .coverage-cell[data-variant="pending"]  .coverage-cell-count { background: #f1f5f9; color: #475569; }
 .coverage-year-month-table .coverage-cell[data-variant="parsing"]  .coverage-cell-count { background: #dbeafe; color: #1d4ed8; }
 .coverage-year-month-table .coverage-cell[data-variant="review"]   .coverage-cell-count { background: #fef3c7; color: #b45309; }
@@ -5745,16 +5726,17 @@ a.rail-button {
   background-size: 8px 8px;
   cursor: default;
 }
-/* 省份列宽：5 个省份固定 min-width，行头(年份) 88px, 合计列 88px。 */
-.coverage-year-month-table thead th:nth-child(n+2):not(.coverage-col-total) {
+/* 省份列宽：第一列（省份名）随内容紧凑；年份列固定 min-width，便于多 cell 对齐。 */
+.coverage-year-month-table .coverage-province-head,
+.coverage-year-month-table tbody th[scope="row"] {
+  min-width: 80px;
+  width: 88px;
+}
+.coverage-year-month-table thead th:nth-child(n+2) {
   min-width: 96px;
 }
 .coverage-year-month-table tbody td.coverage-cell {
   min-width: 96px;
-}
-.coverage-year-month-table .coverage-col-total,
-.coverage-year-month-table td.coverage-cell--total {
-  min-width: 88px;
 }
 /* 2026-08-17: 自定义 hover tooltip（覆盖 matrix 详情）。portal 到 body 末尾。 */
 .quota-coverage-tooltip {

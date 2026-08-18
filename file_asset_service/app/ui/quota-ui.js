@@ -2185,25 +2185,23 @@
     const totalArchives = summary.total_archives || 0;
     const unknownYearCount = summary.unknown_year_count || 0;
 
-    // 表头：行表头占位 + (省code, 省名) 全列
+    // 2026-08-17 第二轮：用户要求行=省份, 列=年份, 不需要合计。
+// 表头：第一列 "省份"，其后为年份列表
     const headHtml = `
       <thead>
         <tr>
-          <th scope="col">年份</th>
-          ${provinces.map((p) => `<th scope="col" title="${escapeHtml(p.code)}">${escapeHtml(p.name)}</th>`).join("")}
-          <th scope="col" class="coverage-col-total">合计</th>
+          <th scope="col" class="coverage-province-head">省份 \\ 年份</th>
+          ${years.map((y) => `<th scope="col">${escapeHtml(y)}</th>`).join("")}
         </tr>
       </thead>`;
 
-    // 每行：年份标签 + 每省 cell + 行合计
-    const bodyRows = years.map((year) => {
-      let rowTotal = 0;
-      const cellsHtml = provinces.map((p) => {
+    // 每行：一个省份
+    const bodyRows = provinces.map((p) => {
+      const cellsHtml = years.map((year) => {
         const cell = cells[`${year}|${p.code}`] || cells[`${year}|${p.code || ""}`] || null;
         if (!cell) {
           return `<td class="coverage-cell coverage-cell--empty" aria-label="无档案"></td>`;
         }
-        rowTotal += cell.archive_count || 0;
         // 解析状态 → 5 态变体颜色（复用 PARSE_STATUS_VARIANT）。多状态时取"最差"（按解析深度）
         const variant = statusVariantForCells(cell.parse_statuses || {});
         return `
@@ -2213,38 +2211,16 @@
               data-province="${escapeHtml(p.code || "")}"
               data-variant="${variant}"
               tabindex="0"
-              aria-label="${escapeHtml(year)} ${escapeHtml(p.name || "未知省份")} 共 ${cell.archive_count || 0} 份档案">
+              aria-label="${escapeHtml(p.name || "未知省份")} ${escapeHtml(year)} 共 ${cell.archive_count || 0} 份档案">
             <span class="coverage-cell-count">${cell.archive_count || 0}</span>
           </td>`;
       }).join("");
-      // 行合计
-      const rowTotalHtml = `<td class="coverage-cell coverage-cell--total">${rowTotal}</td>`;
       return `
         <tr>
-          <th scope="row">${escapeHtml(year)}</th>
+          <th scope="row" title="${escapeHtml(p.code)}">${escapeHtml(p.name)}</th>
           ${cellsHtml}
-          ${rowTotalHtml}
         </tr>`;
     }).join("");
-
-    // 列合计：每省所有年份的档案数
-    const colTotalRow = (() => {
-      const tds = provinces.map((p) => {
-        let colTotal = 0;
-        for (const year of years) {
-          const cell = cells[`${year}|${p.code}`] || cells[`${year}|${p.code || ""}`] || null;
-          if (cell) colTotal += cell.archive_count || 0;
-        }
-        return `<td class="coverage-cell coverage-cell--total">${colTotal}</td>`;
-      }).join("");
-      // 总计 = 全部 cell 档案数（行合计或后端 summary 一致）
-      return `
-        <tr>
-          <th scope="row" class="coverage-cell--total-label">合计</th>
-          ${tds}
-          <td class="coverage-cell coverage-cell--total coverage-cell--grand">${totalArchives}</td>
-        </tr>`;
-    })();
 
     return `
       <section class="coverage-matrix-card" aria-label="定额覆盖矩阵">
@@ -2252,28 +2228,25 @@
           <header class="coverage-workbench-header">
             <div class="coverage-workbench-title">
               <span class="section-marker"></span>
-              <strong>全省 × 年份 覆盖矩阵</strong>
+              <strong>省份 × 年份 覆盖矩阵</strong>
             </div>
             <div class="coverage-workbench-summary">
-              <span>档案总数 <strong>${totalArchives}</strong></span>
-              <span aria-hidden="true">·</span>
-              <span>无年份 <strong>${unknownYearCount}</strong></span>
-              <span aria-hidden="true">·</span>
               <span>省份 <strong>${provinces.length}</strong></span>
               <span aria-hidden="true">·</span>
               <span>年份跨度 <strong>${years.length - (unknownYearCount > 0 ? 1 : 0)}</strong></span>
+              <span aria-hidden="true">·</span>
+              <span>无年份 <strong>${unknownYearCount}</strong></span>
+              <span aria-hidden="true">·</span>
+              <span>档案总数 <strong>${totalArchives}</strong></span>
             </div>
           </header>
           <div class="coverage-region-meta">
-            <strong>${escapeHtml(years.map((y) => y).join(" · "))}</strong>
-            <span>·</span>
-            <span>悬停单元格查看该 (年份 × 省份) 下的档案清单</span>
+            <span>悬停单元格查看该 (省份 × 年份) 下的档案清单；按 <kbd>Tab</kbd> 可逐格聚焦。</span>
           </div>
           <table class="coverage-year-month-table">
             ${headHtml}
             <tbody>
               ${bodyRows}
-              ${colTotalRow}
             </tbody>
           </table>
         </div>
