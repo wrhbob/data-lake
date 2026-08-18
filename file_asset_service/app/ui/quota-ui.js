@@ -81,6 +81,28 @@
     // 提示信息走右下角 toast（点击"开始解析"时弹）+ 详情页 renderParseStatusSection。
   });
 
+  // 2026-08-18: parse_status 英文 → 中文文案，给覆盖矩阵 tooltip / 详情卡显示用。
+  // 档案列表 5 态徽章仍走 PARSE_STATUS_VARIANT（颜色），不动。这里只换文案。
+  // 映射表来源：worker.py / quota_api.py / mock_parse_runner 实际写入的取值集合。
+  const PARSE_STATUS_LABEL_ZH = Object.freeze({
+    pending:           "待解析",          // 入库未触发
+    parsing:           "解析中",          // worker 拉 job 后
+    parsed:            "已抽稿·待审",     // md/candidate 已落, 等用户传 reviewed.xlsx
+    candidate_ready:   "候选稿·待审",     // v0.5: candidate.xlsx 已落 MinIO
+    qa_passed:         "已审定",          // 用户上传 reviewed.xlsx → final.xlsx
+    usable:            "可用",            // 终态
+    failed_user:       "失败·可重试",     // 临时错误,可重跑
+    failed_permanent:  "失败·终止",       // 永久错误,需人介入
+    skipped_no_parser: "暂跳过·无 parser", // worker 找不到该省的 parser
+    cancelled:         "已取消",          // 用户手动取消
+    unknown:           "未知",            // 兜底
+  });
+
+  function parseStatusLabel(statusKey) {
+    if (!statusKey) return "未知";
+    return PARSE_STATUS_LABEL_ZH[statusKey] || statusKey;
+  }
+
   function resolveUiStatus(row) {
     // v0.4 Bug#1 修：5 态徽章由 parse_status 驱动（不是 row.status，row.status 是
     // archive 生命周期 status='pending_tag'，不在 PARSE_STATUS_VARIANT 表里）。
@@ -2294,8 +2316,9 @@
     const titleHtml = titles.length
       ? titles.map((t) => `<li>${escapeHtml(t)}</li>`).join("")
       : `<li class="quota-coverage-tooltip-empty">无档案标题</li>`;
+    // 2026-08-18: status key 走 parseStatusLabel() 转中文；找不到映射回退显示原文,避免吞错误
     const statusHtml = statusKeys.length
-      ? statusKeys.map((k) => `<span class="quota-coverage-tooltip-pill">${escapeHtml(k)} <em>${escapeHtml(String(statuses[k]))}</em></span>`).join("")
+      ? statusKeys.map((k) => `<span class="quota-coverage-tooltip-pill">${escapeHtml(parseStatusLabel(k))} <em>${escapeHtml(String(statuses[k]))}</em></span>`).join("")
       : "";
     return `
       <header class="quota-coverage-tooltip-head">
