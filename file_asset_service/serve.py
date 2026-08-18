@@ -90,6 +90,14 @@ def _check_database() -> None:
     os.chdir(HERE)
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
+    # 2026-08-18: 也把 quota/parser/ 塞 sys.path，让 web adapter
+    # (file_asset_service/app/quota_parser/service.py:228) 能 import 真 pipeline
+    # (quota_parser.pipeline.finalize_reviewed_xlsx)。原因:reviewed xlsx 上传端点
+    # 走的是 web 进程, 不是 worker; worker 自己已经把两个路径都塞了 (quota_parser_worker.py:53-57),
+    # web 这里之前漏掉 → ModuleNotFoundError 500。
+    parser_root = ROOT / "quota" / "parser"
+    if str(parser_root) not in sys.path:
+        sys.path.insert(0, str(parser_root))
     from app.config import RuntimeConfigurationError, get_settings
     from app.database import init_db
 
