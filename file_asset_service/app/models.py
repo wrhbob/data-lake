@@ -5,6 +5,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     Date,
     DateTime,
     Float,
@@ -754,6 +755,22 @@ class QuotaPublicationSet(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     material_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     quota_system_type: Mapped[str | None] = mapped_column(String(32), index=True)
+    # v0.9 (2026-08-18): book_category 是 PG 生成列, 自动从 material_type + quota_system_type 派生。
+    # 单一字段表达 3 桶分类: boq_standard / construction_quota / industry_quota (其他 material_type 留 NULL).
+    # SQL: 见 scripts/migration_2026_08_18_book_category.sql
+    book_category: Mapped[str | None] = mapped_column(
+        String(32),
+        Computed(
+            "CASE "
+            "WHEN material_type = 'boq_standard' THEN 'boq_standard' "
+            "WHEN quota_system_type = 'construction_regional' THEN 'construction_quota' "
+            "WHEN quota_system_type = 'industry_specialty' THEN 'industry_quota' "
+            "ELSE NULL "
+            "END",
+            persisted=True,
+        ),
+        index=True,
+    )
     jurisdiction_level: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     jurisdiction_code: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     industry_sector_code: Mapped[str | None] = mapped_column(String(64), index=True)

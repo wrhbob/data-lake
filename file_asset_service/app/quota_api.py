@@ -1023,6 +1023,46 @@ QUOTA_UPLOAD_CATEGORY_LABELS = {
 
 _QUOTA_UPLOAD_VALID_CATEGORIES = set(QUOTA_UPLOAD_CATEGORY_LABELS.keys())
 
+# v0.9 (2026-08-18): category 驱动 (material_type, quota_system_type) 派生。
+# 历史 bug: category 进了 metadata 但后端硬编码 material_type=quota_base+system=construction_regional,
+# 三个选项之间没有任何 DB 列区分。新版用这张表决定写什么列。
+_CATEGORY_TYPE_MAP: dict[str, dict] = {
+    "boq_standard": {
+        "material_type": "boq_standard",
+        "quota_system_type": None,
+        "needs_industry": False,
+    },
+    "construction_quota": {
+        "material_type": "quota_base",
+        "quota_system_type": "construction_regional",
+        "needs_industry": False,
+    },
+    "industry_quota": {
+        "material_type": "quota_base",
+        "quota_system_type": "industry_specialty",
+        "needs_industry": True,
+    },
+}
+
+# v0.9 (2026-08-18): 专业工程定额 v1 受控词表 (12 项)
+#   短码 → 中文名. UI 行业下拉数据源;后端校验填了行业必须在词表内。
+#   词表维护流程: 走 quota_taxonomy.py + 同步 ADMIN 文档, 不在本表改。
+INDUSTRY_SECTOR_LABELS: dict[str, str] = {
+    "water_conservancy":  "水利工程",
+    "electric_power":     "电力工程",
+    "power_grid":         "电网工程",
+    "railway":            "铁路工程",
+    "highway":            "公路工程",
+    "petroleum":          "石油工程",
+    "petrochemical":      "石化工程",
+    "coal":               "煤炭工程",
+    "solar_power":        "光伏发电工程",
+    "waterway_port":      "水运港口工程",
+    "non_ferrous_metal":  "有色金属工业",
+    "ict":                "信息通信工程",
+}
+_VALID_INDUSTRY_SECTOR_CODES = set(INDUSTRY_SECTOR_LABELS.keys())
+
 
 # ── 省份简称白名单（手动上传 v0.3.2 引入） ──────────────────────────────
 # 格式：short_code → (jurisdiction_code, jurisdiction_label, default_profile, jurisdiction_level)
@@ -1043,6 +1083,9 @@ _UPLOAD_PROVINCE_MAP: dict[str, tuple[str, str, str, str]] = {
     # profile 是拼音长名（GB/T 28039），与 province 短码 1:1。
     # 完整语义见 quota/README.md §8（Profile 字段语义）。
     # 注意：陕西 shaanxi ≠ 山西 shanxi（GB/T 28039 拼写）；湖南 hunan（湘 xi 是省内简称，不进 profile）。
+    # v0.9 (2026-08-18): 加 nat = 全国 (清单规范特殊省份) — jurisdiction_code=000000, level=national.
+    #                    profile=None 因为全国清单无单一省解析器。
+    "nat": ("000000", "全国",              None,           "national"),
     "bj":  ("110000", "北京市",            "beijing",      "province"),
     "tj":  ("120000", "天津市",            "tianjin",      "province"),
     "hb":  ("130000", "河北省",            "hebei",        "province"),
@@ -1078,7 +1121,10 @@ _UPLOAD_PROVINCE_MAP: dict[str, tuple[str, str, str, str]] = {
 }
 
 _VALID_PROVINCE_CODES = set(_UPLOAD_PROVINCE_MAP.keys())
-_VALID_PROFILES = {_v[2] for _v in _UPLOAD_PROVINCE_MAP.values()}
+# v0.9 (2026-08-18): "全国" (nat) profile=None, 不进 profile 白名单。
+#   否则 quota_parser/service.py:_load_profiles() 用 sorted() 排时会因
+#   None vs str 不可比而 TypeError 退出。
+_VALID_PROFILES = {v[2] for v in _UPLOAD_PROVINCE_MAP.values() if v[2] is not None}
 
 # v0.8 删闸口: 「入库 ≠ 解析」。
 # - 之前 v0.7 在 upload 入口拒绝非 sc/cq 省 (理由: pipeline 会落 empty_candidate.xlsx 占位),
@@ -1128,11 +1174,15 @@ def _ensure_quota_publication_set(
     province: str | None,
     year: int | None,
     title: str,
+    category: str,
+    industry_sector_code: str | None = None,
 ) -> QuotaPublicationSet:
     """为手动上传的 archive 创建配套 pubset + profile（v0.3.2 引入）。
 
     - province 必填 → 决定 jurisdiction_code / jurisdiction_level
     - year 必填 → 决定 edition_year / edition_label
+    - category 必填 → 决定 material_type + quota_system_type (v0.9 接入)
+    - industry_sector_code 仅 industry_quota 必填,其余  必填 None
     - 同一 (province, year) 同一档案：复用已有 pubset（幂等）
     """
     if not province:
@@ -1145,13 +1195,45 @@ def _ensure_quota_publication_set(
             status_code=422,
             detail="MISSING_YEAR: 必须传 year（定额年份）",
         )
+    if category not in _CATEGORY_TYPE_MAP:
+        raise HTTPException(
+            status_code=422,
+            detail=f"INVALID_CATEGORY_IN_PUBSET: {category}",
+        )
+    cat_cfg = _CATEGORY_TYPE_MAP[category]
+
+    # industry_quota 必须带 industry_sector_code; 其它类型必须不带 (CHECK 强制)
+    if cat_cfg["needs_industry"]:
+        if not industry_sector_code:
+            raise HTTPException(
+                status_code=422,
+                detail="MISSING_INDUSTRY: industry_quota 必须传 industry_sector_code",
+            )
+        if industry_sector_code not in _VALID_INDUSTRY_SECTOR_CODES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"INVALID_INDUSTRY: {industry_sector_code}. 必须为 {sorted(_VALID_INDUSTRY_SECTOR_CODES)} 之一",
+            )
+        # industry 类型不依赖省份: jurisdiction_code 强制 000000, level=national.
+        # 不覆盖原 province 字段,前端仍要传(占位)但后端忽略。
+        province = "nat"
+    else:
+        if industry_sector_code is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="UNEXPECTED_INDUSTRY: 非 industry_quota 类型不能传 industry_sector_code",
+            )
 
     jurisdiction_code, jurisdiction_label, _, jurisdiction_level = _UPLOAD_PROVINCE_MAP[province]
     edition_label = str(year)
-
-    # biz_key 稳定可幂等：quota:upload:{province}:{year}:{title_slug}
     title_slug = re.sub(r"[^0-9A-Za-z]+", "-", title)[:32].strip("-") or "untitled"
-    biz_key = f"quota:upload:{province}:{year}:{title_slug}"
+
+    # biz_key 稳定可幂等:quota:upload:{province}:{year}:{title_slug}
+    # 行业工程用 industry_sector_code 隔离 (避免"电网2025"与"电力2025"撞 biz_key)。
+    if cat_cfg["needs_industry"]:
+        biz_key = f"quota:upload:{industry_sector_code}:{year}:{title_slug}"
+    else:
+        biz_key = f"quota:upload:{province}:{year}:{title_slug}"
 
     existing = session.scalar(
         select(QuotaPublicationSet).where(QuotaPublicationSet.biz_key == biz_key)
@@ -1159,16 +1241,28 @@ def _ensure_quota_publication_set(
     if existing is not None:
         pub_set = existing
     else:
+        # 标题生成: 全国清单特殊;省级通用模板;专业工程用行业名。
+        if cat_cfg["quota_system_type"] == "industry_specialty":
+            industry_label = INDUSTRY_SECTOR_LABELS[industry_sector_code]
+            pub_title = f"{industry_label}{year}定额（{title}）"
+        elif jurisdiction_code == "000000":
+            pub_title = f"全国{year}清单规范（{title}）"
+        else:
+            pub_title = f"{jurisdiction_label}{year}定额（{title}）"
+
         pub_set = QuotaPublicationSet(
             publication_set_id=str(uuid4()),
             biz_key=biz_key,
-            publication_family_code=f"upload-{province}-{year}",
-            title=f"{jurisdiction_label}{year}定额（{title}）",
-            material_type="quota_base",
-            quota_system_type="construction_regional",
+            publication_family_code=(
+                f"upload-{industry_sector_code}-{year}" if cat_cfg["needs_industry"]
+                else f"upload-{province}-{year}"
+            ),
+            title=pub_title,
+            material_type=cat_cfg["material_type"],
+            quota_system_type=cat_cfg["quota_system_type"],
             jurisdiction_level=jurisdiction_level,
             jurisdiction_code=jurisdiction_code,
-            industry_sector_code=None,
+            industry_sector_code=industry_sector_code if cat_cfg["needs_industry"] else None,
             issuer_name="manual_upload",
             standard_or_quota_code=None,
             edition_label=edition_label,
@@ -1268,16 +1362,19 @@ def _cleanup_empty_archive(session: Session, archive_id: str) -> None:
 async def upload_quota_files(
     response: Response,
     files: list[UploadFile] = File(...),
-    category: str = Form(...),
-    province: str | None = Form(None, description="省简称（sc/cq/bj/tj/gd/zj...）；必填，决定 jurisdiction_code"),
+    category: str = Form(..., description="boq_standard | construction_quota | industry_quota"),
+    province: str | None = Form(None, description="省简称（sc/cq/bj/tj/nat...）；boq_standard+construction_quota 必填，决定 jurisdiction_code"),
     year: int | None = Form(None, description="定额版本年（1900-2100）；必填，决定 edition_year"),
     profile: str | None = Form(None, description="解析 profile 名；缺省按 province 自动映射"),
+    industry_sector_code: str | None = Form(None, description="仅 industry_quota 必填；12 项行业 v1 词表短码（water_conservancy / electric_power / ...）"),
     session: Session = Depends(get_db_session),
     storage: ObjectStore = Depends(get_object_store),
 ) -> QuotaUploadResponse:
     """极简定额 PDF 上传：PDF → FileAsset → Archive(quota) → ArchiveFile → PubSet/Profile。
 
     v0.3.2 起新增必填 Form 字段：province、year。可选：profile（缺省按 province 自动映射）。
+    v0.9 起 category 真正驱动 (material_type, quota_system_type) — 3 种资料（清单规范 / 建筑工程定额 /
+        专业工程定额）走不同 DB 列，不再硬编码 quota_base+construction_regional。
 
     单文件粒度处理，一文件失败不影响其它。重复文件（同 tenant + 同 sha256）幂等返回。
     """
@@ -1287,17 +1384,43 @@ async def upload_quota_files(
             status_code=422,
             detail=f"INVALID_CATEGORY: {category}. 必须为 {sorted(_QUOTA_UPLOAD_VALID_CATEGORIES)} 之一",
         )
-    # province + year 校验（v0.3.2 必填）
-    if not province:
-        raise HTTPException(422, detail="MISSING_PROVINCE: 必须传 province（省份简称）")
-    if province not in _VALID_PROVINCE_CODES:
-        raise HTTPException(
-            422,
-            detail=f"INVALID_PROVINCE: {province}. 必须为 {sorted(_VALID_PROVINCE_CODES)} 之一",
-        )
+    cat_cfg = _CATEGORY_TYPE_MAP[category]
+    # province 校验（按 category 分流）
+    #   - industry_quota: province 占位但后端忽略(强制 nat)。允许传/不传;不传记占位。
+    #   - 其它: province 必填且在 _VALID_PROVINCE_CODES (32 省 + 深圳 + nat)。
+    if not cat_cfg["needs_industry"]:
+        if not province:
+            raise HTTPException(422, detail="MISSING_PROVINCE: 必须传 province（省份简称或全国）")
+        if province not in _VALID_PROVINCE_CODES:
+            raise HTTPException(
+                422,
+                detail=f"INVALID_PROVINCE: {province}. 必须为 {sorted(_VALID_PROVINCE_CODES)} 之一",
+            )
+    else:
+        # industry_quota: 强制要求 industry_sector_code; province 占位即可,允许传/不传
+        if province and province not in _VALID_PROVINCE_CODES:
+            raise HTTPException(
+                422,
+                detail=f"INVALID_PROVINCE: {province}. 必须为 {sorted(_VALID_PROVINCE_CODES)} 之一（或不传）",
+            )
+        if not industry_sector_code:
+            raise HTTPException(
+                422,
+                detail="MISSING_INDUSTRY: industry_quota 必须传 industry_sector_code",
+            )
+        if industry_sector_code not in _VALID_INDUSTRY_SECTOR_CODES:
+            raise HTTPException(
+                422,
+                detail=f"INVALID_INDUSTRY: {industry_sector_code}. 必须为 {sorted(_VALID_INDUSTRY_SECTOR_CODES)} 之一",
+            )
     if year is None or year < 1900 or year > 2100:
         raise HTTPException(422, detail=f"INVALID_YEAR: {year}（必须 1900-2100 整数）")
-    jurisdiction_code, jurisdiction_label, default_profile, jurisdiction_level = _UPLOAD_PROVINCE_MAP[province]
+    # industry_quota 时 province 强制 nat, 不再走 _UPLOAD_PROVINCE_MAP 的 province 查询;
+    # _ensure_quota_publication_set 内部会覆盖。这里 jurisdiction_code 仅用于 metadata/region_code。
+    jurisdiction_code, jurisdiction_label, default_profile, jurisdiction_level = (
+        _UPLOAD_PROVINCE_MAP["nat"] if cat_cfg["needs_industry"]
+        else _UPLOAD_PROVINCE_MAP[province]
+    )
     # profile 校验/缺省：v0.8 起 32 省 profile 全员预填, _VALID_PROFILES 与 _UPLOAD_PROVINCE_MAP
     # 第三列同步. 用户不传 → 沿用 province 对应 profile (即每个省自动有合法 profile).
     # 用户传值 → 必须落在 _VALID_PROFILES 内 (历史 sichuan/chongqing 等都还在).
@@ -1446,7 +1569,7 @@ async def upload_quota_files(
                 actor_id="ui:quota-upload",
             )
 
-            # ── 6b. 配套 pubset + profile（v0.3.2 引入）───────────────
+            # ── 6b. 配套 pubset + profile（v0.3.2 引入；v0.9 接入 category + industry）──
             if archive_created_by_us:
                 _ensure_quota_publication_set(
                     session,
@@ -1454,6 +1577,8 @@ async def upload_quota_files(
                     province=province,
                     year=year,
                     title=title,
+                    category=category,
+                    industry_sector_code=industry_sector_code,
                 )
         except Exception as attach_exc:  # noqa: BLE001
             # 防空 Archive 补偿：attach 失败时若 Archive 是本次新建的，回滚掉
