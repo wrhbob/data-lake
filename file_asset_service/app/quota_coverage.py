@@ -8,16 +8,20 @@
          + 该 cell 下所有档案的 archive_id + title（前端 hover 详情用）
 
 年份来源（优先级降序）：
-  1. title 正则 20\d{2}（最权威，直接出现于书名《...（2024）》）
-  2. metadata.year.value（manual 标注）
-  3. 缺失 → "未知" 行
+  1. QuotaPublicationSet.edition_year（最权威——档案列表 / facets 端点都基于这个字段）
+     └ 兜底：QuotaPublicationSet.edition_label（字符串形式的 4 位年份）
+  2. title 正则 20\d{2}（书名里出现的年份）
+  3. metadata.year.value（manual 标注）
+  4. 缺失 → "未知" 行
 
 省来源：region_code 前 2 位映射省名（复用 info_price_coverage 已有的 regionLabel 风格）。
 
-CLAUDE.md 入湖纪律提到的 discipline_code / edition_year / volume_code / cost_scope / book_kind
-是 Layer 1 (quota_book / quota_item) DDL 字段，**当前 archive 表无这些列**（实测 19 条 quota 档案
-metadata 100% 是 null），因此本版只能从 title / metadata.year 字符串解析；待入湖纪律落地后
-应直接改用 metadata.discipline_code 等结构化字段。
+关键改动 (2026-08-18)：
+  Archive 表本身没有 edition_year 列——quota 档案的版本年是挂在关联的
+  QuotaPublicationSet 上的（Archive → QuotaArchiveProfile → QuotaPublicationSet）。
+  这与档案列表 / facets 端点口径完全一致（quota_api.py:328 QuotaPublicationSet.edition_year）。
+  旧版 `_extract_year` 只看 title 正则 + Archive.metadata.year，导致 7/19 条档案被误判为
+  "未知"（湖南 1 + 广东 4 + 四川 2 — 这些 title 不带年份但都已入湖登记，年份在 pubset 上）。
 """
 from __future__ import annotations
 
@@ -28,7 +32,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.archive_rules import metadata_value
-from app.models import Archive, ArchiveFile
+from app.models import Archive, ArchiveFile, QuotaArchiveProfile, QuotaPublicationSet
 
 # ── 年份正则 ──
 # 容忍中英文括号：「（2024）」 / 「(2018)」 / 「_2018_」 / 「2020年版」 / 「2024」
@@ -83,14 +87,41 @@ class QuotaCoverageCell:
         }
 
 
-def _extract_year(archive: Archive) -> str | None:
-    """从 title 正则 / metadata.year.value 取 4 位年份。"""
-    # 1) title 正则（最权威）
+def _extract_year(
+    archive: Archive,
+    pubset: QuotaPublicationSet | None,
+) -> str | None:
+    """从 pubset / title / metadata 取 4 位年份。
+
+    优先级：
+      1. pubset.edition_year（int 列；与 /api/data-lake/quota/archives?edition_year=2018 同源）
+      2. pubset.edition_label（字符串兜底，例如 "2018"）
+      3. archive.title 正则 20\\d{2}
+      4. archive.metadata.year.value（manual 标注）
+    """
+    # 1) pubset.edition_year（最权威；archive list / facets 端点的 year 字段同源）
+    if pubset is not None and pubset.edition_year is not None:
+        return f"{int(pubset.edition_year):04d}"
+
+    # 2) pubset.edition_label 兜底（字符串）
+    if pubset is not None and pubset.edition_label:
+        match = YEAR_RE.search(str(pubset.edition_label))
+        if match:
+            return match.group(1)
+        try:
+            year_int = int(str(pubset.edition_label).strip())
+            if 1900 <= year_int <= 2099:
+                return f"{year_int:04d}"
+        except (ValueError, TypeError):
+            pass
+
+    # 3) title 正则（书名里出现的年份，例如《...（2024）》）
     if archive.title:
         match = YEAR_RE.search(archive.title)
         if match:
             return match.group(1)
-    # 2) metadata.year.value
+
+    # 4) metadata.year.value（manual 标注）
     metadata = archive.metadata_payload or {}
     raw = metadata_value(metadata.get("year"))
     if raw is not None:
@@ -138,26 +169,32 @@ def build_quota_coverage_matrix(session: Session) -> dict[str, object]:
         },
         "summary": {
           "total_archives": 19,
-          "year_coverage": {"2024": 3, "2020": 4, "2018": 5, "未知": 7},
-          "unknown_year_count": 7,
+          "year_coverage": {"2026": 4, "2025": 1, "2024": 3, "2020": 3, "2018": 8, "未知": 0},
+          "unknown_year_count": 0,
         }
       }
     """
     statement = (
-        select(Archive)
+        select(Archive, QuotaArchiveProfile, QuotaPublicationSet)
+        .join(QuotaArchiveProfile, QuotaArchiveProfile.archive_id == Archive.archive_id, isouter=True)
+        .join(
+            QuotaPublicationSet,
+            QuotaPublicationSet.publication_set_id == QuotaArchiveProfile.publication_set_id,
+            isouter=True,
+        )
         .options(selectinload(Archive.files).selectinload(ArchiveFile.file_asset))
         .where(Archive.domain_type == "quota")
         .where(Archive.is_current.is_(True))
         .where(Archive.is_withdrawn.is_(False))
     )
-    archives = list(session.scalars(statement).all())
+    rows = session.execute(statement).all()
 
     # ── 按 (year, province_code) 分组 ──
-    bucket: dict[tuple[str | None, str | None], list[Archive]] = {}
-    for archive in archives:
-        year = _extract_year(archive)
+    bucket: dict[tuple[str | None, str | None], list[tuple[Archive, QuotaPublicationSet | None]]] = {}
+    for archive, _profile, pubset in rows:
+        year = _extract_year(archive, pubset)
         province_code = _province_code_from_region(archive.region_code)
-        bucket.setdefault((year, province_code), []).append(archive)
+        bucket.setdefault((year, province_code), []).append((archive, pubset))
 
     # ── 收集行 (year) 与列 (province_code) ──
     years_with_data: set[str | None] = {y for y, _ in bucket.keys() if bucket[(y, _)]}
@@ -184,10 +221,10 @@ def build_quota_coverage_matrix(session: Session) -> dict[str, object]:
     for (year, province_code), items in bucket.items():
         if not items:
             continue
-        archive_ids = sorted(a.archive_id for a in items)
-        titles = sorted(a.title for a in items if a.title)
+        archive_ids = sorted(a.archive_id for a, _ in items)
+        titles = sorted(a.title for a, _ in items if a.title)
         statuses: dict[str, int] = {}
-        for a in items:
+        for a, _ in items:
             key = a.parse_status or "unknown"
             statuses[key] = statuses.get(key, 0) + 1
         # 行标签：None → "未知"（用户视角）
@@ -215,6 +252,7 @@ def build_quota_coverage_matrix(session: Session) -> dict[str, object]:
         "summary": {
             "total_archives": total_archives,
             "year_coverage": year_summary,
-            "unknown_year_count": sum(1 for a in archives if _extract_year(a) is None),
+            # "未知" 行计数 == 无年份档案数；year_summary 已在循环里按 year_label 聚合
+            "unknown_year_count": year_summary.get(UNKNOWN_YEAR_LABEL, 0),
         },
     }
