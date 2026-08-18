@@ -55,7 +55,8 @@ _FEATURES = {
     "compose": "ready",
     "compare": "ready",
     "archiveFiles": "unavailable",
-    "coverage": "unavailable",
+    # 2026-08-17: 覆盖矩阵接入真实接口（/api/quota/coverage-matrix），前端 quota-ui.js 覆盖矩阵 tab 已接线
+    "coverage": "ready",
     "publicationSets": "unavailable",
 }
 

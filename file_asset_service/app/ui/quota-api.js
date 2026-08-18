@@ -49,6 +49,10 @@
     reconciliation: { method: "GET", path: "/reconciliation" },
     publicationSets: { method: "GET", path: "/publication-sets" },
     coverage: { method: "GET", path: "/coverage" },
+    // 2026-08-17: 覆盖矩阵真实接入。/coverage-matrix 在 main.py:
+    //   GET /api/quota/coverage-matrix → build_quota_coverage_matrix(session)
+    // 行=年份(desc,未知末尾),列=省份(拼音升序),cell=该 (年份,省) 的档案数+ids+titles
+    coverageMatrix: { method: "GET", path: "/coverage-matrix" },
     compose: { method: "POST", path: "/compose" },
     archiveFiles: { method: "POST", path: "/archives/{id}/files" },
     // SPEC-QA-001 §5.8 / §5.10 — 危险操作；
@@ -246,6 +250,7 @@
       getReconciliation: (params) => request(ENDPOINTS.reconciliation.path, { params }),
       getPublicationSets: (params) => request(ENDPOINTS.publicationSets.path, { params }),
       getCoverage: (params) => request(ENDPOINTS.coverage.path, { params }),
+      getCoverageMatrix: () => request(ENDPOINTS.coverageMatrix.path),
       // 写操作留空接线，P0-5A 不允许经旧 Archive 接口真实写入
       compose: (payload) =>
         request(ENDPOINTS.compose.path, {

@@ -202,6 +202,7 @@ from app.file_preview import DOCX_EXTENSIONS, DOWNLOAD_ONLY_EXTENSIONS, EXCEL_EX
 from app.file_preview import read_zip_image_preview_entry, zip_image_preview_entries
 from app.file_preview import render_docx_preview_html, render_excel_preview_html, render_excel_preview_multi_sheet_html, render_html_notice_preview_html
 from app.info_price_coverage import build_coverage_matrix
+from app.quota_coverage import build_quota_coverage_matrix
 from app.info_price_downstream import (
     build_audit_view,
     build_review_view,
@@ -1143,6 +1144,14 @@ def create_app(*, init_schema: bool = True) -> FastAPI:
         if target_level:
             rows = [row for row in rows if row.target_level == target_level]
         return [row.to_dict() for row in rows]
+
+    @app.get("/api/quota/coverage-matrix")
+    def quota_coverage_matrix_endpoint(
+        session: Session = Depends(get_db_session),
+    ) -> dict[str, object]:
+        # 2026-08-17: 行=年份（desc，未知在末尾），列=省份，单元格=档案数
+        # 不接 query 参数：用户原话"只用展示一个矩阵，不用选省份"
+        return build_quota_coverage_matrix(session)
 
     @app.get("/api/info-price/national-completeness")
     def national_info_price_completeness_endpoint() -> dict[str, object]:

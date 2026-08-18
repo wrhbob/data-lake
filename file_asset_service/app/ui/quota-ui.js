@@ -262,6 +262,8 @@
       submitting: false,
       error: "",
     },
+    // 2026-08-17: 覆盖矩阵（行=年份,列=省份）。/api/quota/coverage-matrix 直接读 archive.metadata
+    coverage: { status: CAP.UNKNOWN, data: null, error: "" },
     toast: "",
   };
 
@@ -792,7 +794,7 @@
       case "versionSystem":
         return renderCapabilityPlaceholder("publicationSets", "版本体系");
       case "coverage":
-        return renderCapabilityPlaceholder("coverage", "覆盖矩阵");
+        return renderCoverageMatrixView();
       case "compare":
         return renderCompareView();
       default:
@@ -1630,6 +1632,9 @@
     renderDeleteArchiveModal();
     renderCompareModal();
     refreshIcons();
+    // 2026-08-17: 覆盖矩阵每次重渲染后都要重新绑 tooltip（事件委托已经挂在外层，但
+    // matrix DOM 整体替换了。Tooltip 容器的创建只需一次，由 ensureCoverageTooltipNode 完成。
+    bindCoverageTooltipEvents();
   }
 
   // ── 补录弹窗 ─────────────────────────────────────────────────────────
@@ -2119,6 +2124,273 @@
     render();
   }
 
+  // 2026-08-17: 覆盖矩阵懒加载。coverage 矩阵是派生数据，仅在用户切到该 tab 时拉。
+  // 失败时由 renderCoverageMatrixView 展示 fallback（不要把整个页面挡住）。
+  async function loadCoverageMatrix() {
+    if (!state.api || !state.flags.coverage) return;
+    if (state.coverage.status === CAP.READY) return;
+    // 5 态没法原生表达"加载中"，复用 UNKNOWN 标记 + 重新 render 触发空骨架
+    state.coverage = { status: CAP.UNKNOWN, data: null, error: "" };
+    if (state.active) render();
+    const r = await state.api.getCoverageMatrix();
+    state.coverage = { status: r.status, data: r.data, error: r.error || "" };
+    if (state.active) render();
+  }
+
+  // 2026-08-17: 覆盖矩阵视图（行=年份，列=省份，cell=档案数+hover 详情）。
+  // 复用 .coverage-workbench / .coverage-year-month-table styles.css 已有类
+  // (信息价覆盖矩阵同款)，避免重复定义。
+  function renderCoverageMatrixView() {
+    // 能力未就绪（features.coverage=unavailable / 401 / 404）走占位
+    if (!state.flags.coverage) {
+      return `
+        <section class="quota-view-card">
+          <div class="quota-empty">
+            <i data-lucide="table-2"></i>
+            <strong>覆盖矩阵待接入</strong>
+            <span>${escapeHtml(capReason("coverage"))}</span>
+          </div>
+        </section>`;
+    }
+
+    // 加载中 / 失败 / 就绪 分别走不同视图
+    if (state.coverage.status === CAP.UNKNOWN) {
+      return `
+        <section class="quota-view-card">
+          <div class="quota-empty">
+            <i data-lucide="loader-circle"></i>
+            <strong>正在加载覆盖矩阵</strong>
+            <span>汇总当前定额的 (年份 × 省份) 覆盖信息…</span>
+          </div>
+        </section>`;
+    }
+    if (state.coverage.status !== CAP.READY || !state.coverage.data) {
+      const msg = state.coverage.error || capReason("coverage");
+      return `
+        <section class="quota-view-card">
+          <div class="quota-empty">
+            <i data-lucide="alert-triangle"></i>
+            <strong>覆盖矩阵加载失败</strong>
+            <span>${escapeHtml(msg)}</span>
+            <button class="secondary-button" type="button" data-quota-action="coverage-retry">重试</button>
+          </div>
+        </section>`;
+    }
+
+    const data = state.coverage.data;
+    const years = data.years || [];
+    const provinces = data.provinces || [];
+    const cells = data.cells || {};
+    const summary = data.summary || {};
+    const totalArchives = summary.total_archives || 0;
+    const unknownYearCount = summary.unknown_year_count || 0;
+
+    // 表头：行表头占位 + (省code, 省名) 全列
+    const headHtml = `
+      <thead>
+        <tr>
+          <th scope="col">年份</th>
+          ${provinces.map((p) => `<th scope="col" title="${escapeHtml(p.code)}">${escapeHtml(p.name)}</th>`).join("")}
+          <th scope="col" class="coverage-col-total">合计</th>
+        </tr>
+      </thead>`;
+
+    // 每行：年份标签 + 每省 cell + 行合计
+    const bodyRows = years.map((year) => {
+      let rowTotal = 0;
+      const cellsHtml = provinces.map((p) => {
+        const cell = cells[`${year}|${p.code}`] || cells[`${year}|${p.code || ""}`] || null;
+        if (!cell) {
+          return `<td class="coverage-cell coverage-cell--empty" aria-label="无档案"></td>`;
+        }
+        rowTotal += cell.archive_count || 0;
+        // 解析状态 → 5 态变体颜色（复用 PARSE_STATUS_VARIANT）。多状态时取"最差"（按解析深度）
+        const variant = statusVariantForCells(cell.parse_statuses || {});
+        return `
+          <td class="coverage-cell"
+              data-has-data="1"
+              data-year="${escapeHtml(year)}"
+              data-province="${escapeHtml(p.code || "")}"
+              data-variant="${variant}"
+              tabindex="0"
+              aria-label="${escapeHtml(year)} ${escapeHtml(p.name || "未知省份")} 共 ${cell.archive_count || 0} 份档案">
+            <span class="coverage-cell-count">${cell.archive_count || 0}</span>
+          </td>`;
+      }).join("");
+      // 行合计
+      const rowTotalHtml = `<td class="coverage-cell coverage-cell--total">${rowTotal}</td>`;
+      return `
+        <tr>
+          <th scope="row">${escapeHtml(year)}</th>
+          ${cellsHtml}
+          ${rowTotalHtml}
+        </tr>`;
+    }).join("");
+
+    // 列合计：每省所有年份的档案数
+    const colTotalRow = (() => {
+      const tds = provinces.map((p) => {
+        let colTotal = 0;
+        for (const year of years) {
+          const cell = cells[`${year}|${p.code}`] || cells[`${year}|${p.code || ""}`] || null;
+          if (cell) colTotal += cell.archive_count || 0;
+        }
+        return `<td class="coverage-cell coverage-cell--total">${colTotal}</td>`;
+      }).join("");
+      // 总计 = 全部 cell 档案数（行合计或后端 summary 一致）
+      return `
+        <tr>
+          <th scope="row" class="coverage-cell--total-label">合计</th>
+          ${tds}
+          <td class="coverage-cell coverage-cell--total coverage-cell--grand">${totalArchives}</td>
+        </tr>`;
+    })();
+
+    return `
+      <section class="coverage-matrix-card" aria-label="定额覆盖矩阵">
+        <div class="coverage-workbench">
+          <header class="coverage-workbench-header">
+            <div class="coverage-workbench-title">
+              <span class="section-marker"></span>
+              <strong>全省 × 年份 覆盖矩阵</strong>
+            </div>
+            <div class="coverage-workbench-summary">
+              <span>档案总数 <strong>${totalArchives}</strong></span>
+              <span aria-hidden="true">·</span>
+              <span>无年份 <strong>${unknownYearCount}</strong></span>
+              <span aria-hidden="true">·</span>
+              <span>省份 <strong>${provinces.length}</strong></span>
+              <span aria-hidden="true">·</span>
+              <span>年份跨度 <strong>${years.length - (unknownYearCount > 0 ? 1 : 0)}</strong></span>
+            </div>
+          </header>
+          <div class="coverage-region-meta">
+            <strong>${escapeHtml(years.map((y) => y).join(" · "))}</strong>
+            <span>·</span>
+            <span>悬停单元格查看该 (年份 × 省份) 下的档案清单</span>
+          </div>
+          <table class="coverage-year-month-table">
+            ${headHtml}
+            <tbody>
+              ${bodyRows}
+              ${colTotalRow}
+            </tbody>
+          </table>
+        </div>
+      </section>`;
+  }
+
+  // 2026-08-17: 单元格颜色 — 多种 parse_status 取「最差」变体。
+  // 解析进度等序（差→好）: pending < parsing < review < done < failed (异常用 red)
+  // 实际大多数 cell 不会有 mixed 状态，但有也不会乱。
+  const _STATUS_VARIANT_PRIORITY = ["pending", "parsing", "review", "done", "failed"];
+  function statusVariantForCells(statuses) {
+    const keys = Object.keys(statuses || {});
+    if (!keys.length) return "pending";
+    // 命中：选最低优先度（解析最浅）。未命中 → pending
+    let best = "pending";
+    for (const sv of _STATUS_VARIANT_PRIORITY) {
+      for (const k of keys) {
+        const v = PARSE_STATUS_VARIANT[k] || "pending";
+        if (v === sv) { best = sv; break; }
+      }
+      if (best !== "pending") break;
+    }
+    return best;
+  }
+
+  // 2026-08-17: 自定义 hover tooltip（替代 native title — 后者延迟 1-2s + 多行换行浏览器不一致）。
+  // 在 body 末尾创建一个 portal 节点；事件委托在覆盖矩阵容器上，hover 进入 data-has-data="1"
+  // 的 cell 即弹出，列出 archive_titles + 状态分布 + 计数。
+  function ensureCoverageTooltipNode() {
+    let node = document.querySelector(".quota-coverage-tooltip");
+    if (node) return node;
+    node = document.createElement("div");
+    node.className = "quota-coverage-tooltip";
+    node.setAttribute("role", "tooltip");
+    node.hidden = true;
+    if (typeof document.body !== "undefined") document.body.appendChild(node);
+    return node;
+  }
+
+  function renderCoverageTooltipInner(cellData) {
+    // cellData: { year, province_name, archive_count, archive_titles, parse_statuses }
+    const titles = (cellData && cellData.archive_titles) || [];
+    const statuses = (cellData && cellData.parse_statuses) || {};
+    const statusKeys = Object.keys(statuses);
+    const titleHtml = titles.length
+      ? titles.map((t) => `<li>${escapeHtml(t)}</li>`).join("")
+      : `<li class="quota-coverage-tooltip-empty">无档案标题</li>`;
+    const statusHtml = statusKeys.length
+      ? statusKeys.map((k) => `<span class="quota-coverage-tooltip-pill">${escapeHtml(k)} <em>${escapeHtml(String(statuses[k]))}</em></span>`).join("")
+      : "";
+    return `
+      <header class="quota-coverage-tooltip-head">
+        <strong>${escapeHtml(cellData.year)} · ${escapeHtml(cellData.province_name)}</strong>
+        <span class="quota-coverage-tooltip-count">${escapeHtml(String(cellData.archive_count || 0))} 份档案</span>
+      </header>
+      <ul class="quota-coverage-tooltip-list">${titleHtml}</ul>
+      ${statusHtml ? `<footer class="quota-coverage-tooltip-foot">${statusHtml}</footer>` : ""}
+    `;
+  }
+
+  function showCoverageTooltip(cellEl, cellData) {
+    const node = ensureCoverageTooltipNode();
+    if (!node) return;
+    node.innerHTML = renderCoverageTooltipInner(cellData);
+    node.hidden = false;
+    // 默认位置：单元格右侧。溢出视口时翻转；底部超出往上。
+    const rect = cellEl.getBoundingClientRect();
+    const tipRect = node.getBoundingClientRect();
+    const margin = 8;
+    let left = rect.right + window.scrollX + margin;
+    let top = rect.top + window.scrollY;
+    if (rect.right + tipRect.width + margin > window.innerWidth) {
+      left = rect.left + window.scrollX - tipRect.width - margin;
+    }
+    if (left < margin) left = margin;
+    if (rect.top + tipRect.height + margin > window.innerHeight) {
+      top = window.scrollY + window.innerHeight - tipRect.height - margin;
+    }
+    if (top < window.scrollY + margin) top = window.scrollY + margin;
+    node.style.left = left + "px";
+    node.style.top = top + "px";
+  }
+
+  function hideCoverageTooltip() {
+    const node = document.querySelector(".quota-coverage-tooltip");
+    if (node) node.hidden = true;
+  }
+
+  // 事件委托到覆盖矩阵容器：mouseover / focus 进入带数据的 cell 即弹；mouseout / blur 隐藏。
+  // 用 [_bound] 标记避免 render() 每次重新渲染后重复挂监听。
+  function bindCoverageTooltipEvents() {
+    const matrix = document.querySelector(".coverage-matrix-card");
+    if (!matrix) return;
+    if (matrix._tooltipBound) return;
+    matrix._tooltipBound = true;
+    matrix.addEventListener("mouseover", function (event) {
+      const cell = event.target.closest('td.coverage-cell[data-has-data="1"]');
+      if (!cell || !state.coverage.data || !state.coverage.data.cells) return;
+      const key = cell.dataset.year + "|" + cell.dataset.province;
+      const cellData = state.coverage.data.cells[key];
+      if (cellData) showCoverageTooltip(cell, cellData);
+    });
+    matrix.addEventListener("mouseout", function (event) {
+      if (event.target.closest('td.coverage-cell[data-has-data="1"]')) hideCoverageTooltip();
+    });
+    matrix.addEventListener("focusin", function (event) {
+      const cell = event.target.closest('td.coverage-cell[data-has-data="1"]');
+      if (!cell || !state.coverage.data || !state.coverage.data.cells) return;
+      const key = cell.dataset.year + "|" + cell.dataset.province;
+      const cellData = state.coverage.data.cells[key];
+      if (cellData) showCoverageTooltip(cell, cellData);
+    });
+    matrix.addEventListener("focusout", function (event) {
+      if (event.target.closest('td.coverage-cell[data-has-data="1"]')) hideCoverageTooltip();
+    });
+  }
+
   // ── 列表筛选参数构造 + 仅列表的轻量重载 ───────────────────────────────
   function currentArchiveFilters() {
     const f = state.filters || {};
@@ -2504,6 +2776,10 @@
       if (tabEnabled(view) || view === "archives") state.view = view;
       state.addMenuOpen = false;
       render();
+      // 2026-08-17: 覆盖矩阵懒加载。切到 coverage tab 时如果还没拉过，触发加载
+      if (state.view === "coverage" && state.flags.coverage && state.coverage.status !== CAP.READY) {
+        loadCoverageMatrix();
+      }
       return;
     }
     if (action === "back-to-archives") {
@@ -2511,6 +2787,11 @@
       state.archiveDetail = { status: CAP.UNKNOWN, data: null, archiveId: null, error: "" };
       state.addMenuOpen = false;
       render();
+      return;
+    }
+    // 2026-08-17: 覆盖矩阵加载失败时，按钮触发重试
+    if (action === "coverage-retry") {
+      loadCoverageMatrix();
       return;
     }
     // ── ⋯ 下拉：点击触发按钮展开/收起 ──

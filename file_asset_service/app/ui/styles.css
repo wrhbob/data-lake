@@ -5680,3 +5680,160 @@ a.rail-button {
   font-size: 12px;
   color: var(--text-muted, #6b7280);
 }
+
+/* 2026-08-17: quota 覆盖矩阵 cell 着色（与 .coverage-year-month-table/.coverage-workbench 复用）
+   cell 用 data-variant 选择色，避免与 info-price 覆盖矩阵的 .coverage-period-cell 冲突。 */
+.coverage-year-month-table .coverage-cell {
+  position: relative;
+  padding: 4px 6px;
+  font-family: var(--mono);
+  font-size: 13px;
+  text-align: center;
+}
+.coverage-year-month-table .coverage-cell--empty {
+  color: var(--muted);
+  background: #fafbff;
+}
+.coverage-year-month-table .coverage-cell-count {
+  display: inline-block;
+  min-width: 22px;
+  padding: 0 6px;
+  border-radius: var(--radius);
+  cursor: help;
+}
+.coverage-year-month-table .coverage-cell--total {
+  background: var(--blue-soft);
+  color: var(--text);
+  font-weight: 600;
+}
+.coverage-year-month-table .coverage-cell--grand {
+  background: var(--blue);
+  color: #fff;
+}
+.coverage-year-month-table .coverage-cell--total-label {
+  background: var(--blue);
+  color: #fff;
+  font-weight: 600;
+}
+.coverage-year-month-table .coverage-col-total {
+  background: var(--blue);
+  color: #fff;
+  font-weight: 600;
+}
+.coverage-year-month-table .coverage-cell[data-variant="pending"]  .coverage-cell-count { background: #f1f5f9; color: #475569; }
+.coverage-year-month-table .coverage-cell[data-variant="parsing"]  .coverage-cell-count { background: #dbeafe; color: #1d4ed8; }
+.coverage-year-month-table .coverage-cell[data-variant="review"]   .coverage-cell-count { background: #fef3c7; color: #b45309; }
+.coverage-year-month-table .coverage-cell[data-variant="done"]     .coverage-cell-count { background: #dcfce7; color: #15803d; }
+.coverage-year-month-table .coverage-cell[data-variant="failed"]   .coverage-cell-count { background: #fee2e2; color: #b91c1c; }
+.coverage-year-month-table .coverage-cell .coverage-cell-count:hover {
+  filter: brightness(0.95);
+  box-shadow: 0 0 0 2px rgba(38, 108, 199, 0.18);
+}
+/* 整格 hover：单元格聚焦/鼠标进入时背景着色，提升「这格可看详情」的可发现性。 */
+.coverage-year-month-table .coverage-cell[data-has-data="1"]:hover {
+  background: #f4f8ff;
+  cursor: help;
+}
+.coverage-year-month-table .coverage-cell[data-has-data="1"]:focus {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+  background: #f4f8ff;
+}
+/* 空 cell：纯灰底，不要"-"字符占位（与数据 cell 等高但视觉上明确"无数据"） */
+.coverage-year-month-table .coverage-cell--empty {
+  background-image: linear-gradient(135deg, transparent 49%, #d8dde5 49%, #d8dde5 51%, transparent 51%);
+  background-size: 8px 8px;
+  cursor: default;
+}
+/* 省份列宽：5 个省份固定 min-width，行头(年份) 88px, 合计列 88px。 */
+.coverage-year-month-table thead th:nth-child(n+2):not(.coverage-col-total) {
+  min-width: 96px;
+}
+.coverage-year-month-table tbody td.coverage-cell {
+  min-width: 96px;
+}
+.coverage-year-month-table .coverage-col-total,
+.coverage-year-month-table td.coverage-cell--total {
+  min-width: 88px;
+}
+/* 2026-08-17: 自定义 hover tooltip（覆盖 matrix 详情）。portal 到 body 末尾。 */
+.quota-coverage-tooltip {
+  position: absolute;
+  z-index: 40;
+  max-width: 360px;
+  min-width: 220px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  pointer-events: none;
+}
+.quota-coverage-tooltip[hidden] {
+  display: none;
+}
+.quota-coverage-tooltip-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+.quota-coverage-tooltip-head strong {
+  font-size: 13px;
+  color: var(--text);
+}
+.quota-coverage-tooltip-count {
+  font-family: var(--mono);
+  color: var(--blue);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.quota-coverage-tooltip-list {
+  margin: 0;
+  padding: 0 0 0 16px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.quota-coverage-tooltip-list li {
+  list-style: disc;
+  margin: 2px 0;
+  color: var(--text);
+  word-break: break-word;
+}
+.quota-coverage-tooltip-list li.quota-coverage-tooltip-empty {
+  list-style: none;
+  margin-left: -16px;
+  color: var(--muted);
+  font-style: italic;
+}
+.quota-coverage-tooltip-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+.quota-coverage-tooltip-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+.quota-coverage-tooltip-pill em {
+  color: var(--blue);
+  font-style: normal;
+  font-weight: 600;
+}
