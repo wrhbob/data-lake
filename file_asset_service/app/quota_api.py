@@ -1185,11 +1185,6 @@ def _ensure_quota_publication_set(
     - industry_sector_code 仅 industry_quota 必填,其余  必填 None
     - 同一 (province, year) 同一档案：复用已有 pubset（幂等）
     """
-    if not province:
-        raise HTTPException(
-            status_code=422,
-            detail="MISSING_PROVINCE: 必须传 province（省份简称）",
-        )
     if year is None:
         raise HTTPException(
             status_code=422,
@@ -1203,6 +1198,9 @@ def _ensure_quota_publication_set(
     cat_cfg = _CATEGORY_TYPE_MAP[category]
 
     # industry_quota 必须带 industry_sector_code; 其它类型必须不带 (CHECK 强制)
+    # v0.9 fix: 必须先解析 category 与 industry_sector_code 互斥校验, 再做 province 校验。
+    #   否则 industry_quota 的 empty province 会在 province 校验 422, 后面的 province="nat"
+    #   覆盖永远到不了。已实测: industry_quota 不传 province 会撞 MISSING_PROVINCE。
     if cat_cfg["needs_industry"]:
         if not industry_sector_code:
             raise HTTPException(
@@ -1215,13 +1213,19 @@ def _ensure_quota_publication_set(
                 detail=f"INVALID_INDUSTRY: {industry_sector_code}. 必须为 {sorted(_VALID_INDUSTRY_SECTOR_CODES)} 之一",
             )
         # industry 类型不依赖省份: jurisdiction_code 强制 000000, level=national.
-        # 不覆盖原 province 字段,前端仍要传(占位)但后端忽略。
+        # 前端允许不传 province, 后端强制覆盖为 "nat" 后再做 _UPLOAD_PROVINCE_MAP 查表。
         province = "nat"
     else:
         if industry_sector_code is not None:
             raise HTTPException(
                 status_code=422,
                 detail="UNEXPECTED_INDUSTRY: 非 industry_quota 类型不能传 industry_sector_code",
+            )
+        # 非 industry 类型: province 必填 (前段省份或全国 nat)。
+        if not province:
+            raise HTTPException(
+                status_code=422,
+                detail="MISSING_PROVINCE: 必须传 province（省份简称或全国）",
             )
 
     jurisdiction_code, jurisdiction_label, _, jurisdiction_level = _UPLOAD_PROVINCE_MAP[province]

@@ -233,7 +233,7 @@
     compose: null,
     composeWarning: "",
     composeAdvancedOpen: false,
-    upload: { open: false, files: [], category: "", province: "", year: "", submitting: false },
+    upload: { open: false, files: [], category: "", province: "", industry_sector_code: "", year: "", submitting: false },
     // 列表行 ⋯ 下拉：open=false 时下拉隐藏
     dropdown: { open: false, archiveId: "", variant: "pending" },
     // 删除解析结果 modal：open=false 时隐藏
@@ -393,7 +393,14 @@
   // 完整语义见 quota/README.md §8.
   // 注意: code 用 province 短码 (sc/cq/bj/...) 不是 6 位 jurisdiction_code,
   //       因为 upload API 期望短码 (与 worker job.metadata_payload.province 对齐).
+  // v0.9 (2026-08-18): 加 nat = 全国, 用于 boq_standard (全国清单规范) 与
+  //   construction_quota (某些省份可能没有省级定额, 但全国通用可入档) 两种场景。
+  //   注意 nat 与 12 项专业工程 (industry_quota) 短码无任何冲突:
+  //   - province 短码是 2 字母拼音 (bj/tj/sc/cq/nat/...)
+  //   - industry_sector 短码是下划线连接的 2-3 词英文 (water_conservancy/electric_power/...)
+  //   后端 _UPLOAD_PROVINCE_MAP 同样首位插入 nat=("000000", "全国", None, "national")。
   const UPLOAD_PROVINCE_OPTIONS = Object.freeze([
+    { code: "nat", label: "全国" },
     { code: "bj",  label: "北京市" },
     { code: "tj",  label: "天津市" },
     { code: "hb",  label: "河北省" },
@@ -437,6 +444,47 @@
     }
     return html;
   }
+
+  // v0.9 (2026-08-18): 12 项专业工程 v1 受控词表, 与后端 quota_api.py:INDUSTRY_SECTOR_LABELS
+  //   必须保持完全一致 (短码 → 中文名一一对应)。后端校验 industry_sector_code
+  //   必须落在该词表内 (HTTP 422 INVALID_INDUSTRY)。词表维护: 走 quota_taxonomy.py 同步。
+  //   排序: 按拼音 a-z (前端可读性; 后端 _VALID_INDUSTRY_SECTOR_CODES 是 set, 顺序无所谓)。
+  const INDUSTRY_SECTOR_OPTIONS = Object.freeze([
+    { code: "coal",               label: "煤炭工程" },
+    { code: "electric_power",     label: "电力工程" },
+    { code: "highway",            label: "公路工程" },
+    { code: "ict",                label: "信息通信工程" },
+    { code: "non_ferrous_metal",  label: "有色金属工业" },
+    { code: "petrochemical",      label: "石化工程" },
+    { code: "petroleum",          label: "石油工程" },
+    { code: "power_grid",         label: "电网工程" },
+    { code: "railway",            label: "铁路工程" },
+    { code: "solar_power",        label: "光伏发电工程" },
+    { code: "water_conservancy",  label: "水利工程" },
+    { code: "waterway_port",      label: "水运港口工程" },
+  ]);
+  const VALID_INDUSTRY_SECTOR_CODES = new Set(INDUSTRY_SECTOR_OPTIONS.map(function (o) { return o.code; }));
+
+  function renderUploadIndustryOptions(selectedCode) {
+    var html = '<option value="">请选择专业</option>';
+    for (var i = 0; i < INDUSTRY_SECTOR_OPTIONS.length; i++) {
+      var r = INDUSTRY_SECTOR_OPTIONS[i];
+      var sel = (r.code === selectedCode) ? " selected" : "";
+      html += '<option value="' + escapeHtml(r.code) + '"' + sel + '>' + escapeHtml(r.label) + '</option>';
+    }
+    return html;
+  }
+
+  // v0.9 (2026-08-18): 资料分类 → 必填字段映射。
+  //   - boq_standard         : 需要 province (省份 或 全国)
+  //   - construction_quota   : 需要 province (省份 或 全国)
+  //   - industry_quota       : 需要 industry_sector_code (专业), province 占位
+  // UI 字段可见性/必填校验都走这张表。
+  const UPLOAD_CATEGORY_FIELDS = Object.freeze({
+    boq_standard:       { needsProvince: true,  needsIndustry: false, provinceLabel: "适用省份" },
+    construction_quota: { needsProvince: true,  needsIndustry: false, provinceLabel: "省份"        },
+    industry_quota:     { needsProvince: false, needsIndustry: true,  provinceLabel: null           },
+  });
 
   // 统计展示：未知/未就绪一律显示 —（禁止 0、禁止写死 8）
   function statVal(key) {
@@ -2457,7 +2505,7 @@
   // ── 极简上传弹窗 ─────────────────────────────────────────────────────
   function openUploadDialog() {
     state.addMenuOpen = false;
-    state.upload = { open: true, files: [], category: "", province: "", year: "", submitting: false };
+    state.upload = { open: true, files: [], category: "", province: "", industry_sector_code: "", year: "", submitting: false };
     render();
   }
 
@@ -2483,6 +2531,26 @@
     refreshIcons();
   }
 
+  // v0.9 (2026-08-18): 校验完整性函数。3 类资料 (boq/construction/industry) 必填字段不同。
+  //   - boq_standard         : province required
+  //   - construction_quota   : province required
+  //   - industry_quota       : industry_sector_code required, province 占位
+  function isUploadReady(u) {
+    if (!u) return false;
+    if (!(u.files || []).length) return false;
+    if (!u.category) return false;
+    var yearNum = parseInt(u.year, 10);
+    if (!u.year || isNaN(yearNum) || yearNum < 1900 || yearNum > 2100) return false;
+    if (u.submitting) return false;
+    var cfg = UPLOAD_CATEGORY_FIELDS[u.category];
+    if (!cfg) return false;
+    if (cfg.needsProvince && !u.province) return false;
+    if (cfg.needsIndustry && !u.industry_sector_code) return false;
+    // 互斥: 非 industry 类型不能带 industry_sector_code (后端会 422 UNEXPECTED_INDUSTRY)
+    if (!cfg.needsIndustry && u.industry_sector_code) return false;
+    return true;
+  }
+
   // 轻量：只刷新提交按钮 disabled（不重建表单，避免 input 失焦）
   // 注意: 2026-07-29 我们去掉了 disabled 属性,
   // 因为 disabled 会吞掉 click 事件, 用户点了没反应又看不到原因。
@@ -2490,10 +2558,7 @@
   function renderUploadSubmitButton() {
     var btn = document.querySelector("[data-upload-submit='1']");
     if (!btn) return;
-    var u = state.upload || {};
-    var yearNum = parseInt(u.year, 10);
-    var yearValid = u.year && !isNaN(yearNum) && yearNum >= 1900 && yearNum <= 2100;
-    var canSubmit = (u.files || []).length > 0 && u.category && u.province && yearValid && !u.submitting;
+    var canSubmit = isUploadReady(state.upload || {});
     // 仅做视觉提示（按钮变色/边框），不动 disabled 属性
     if (canSubmit) btn.classList && btn.classList.remove("is-disabled-soft");
     else btn.classList && btn.classList.add("is-disabled-soft");
@@ -2512,10 +2577,11 @@
     modal.setAttribute("aria-hidden", "false");
 
     const u = state.upload;
-    // 校验：files + category + province + year 都必填；year 范围 1900-2100
-    var yearNum = parseInt(u.year, 10);
-    var yearValid = u.year && !isNaN(yearNum) && yearNum >= 1900 && yearNum <= 2100;
-    var canSubmit = (u.files || []).length > 0 && u.category && u.province && yearValid && !u.submitting;
+    // v0.9: category 决定 province/industry 字段可见性。未选 category → 不渲染 province/industry。
+    //   - boq_standard + construction_quota → 显示 province (含 nat=全国), industry 不显示
+    //   - industry_quota                  → 显示 industry_sector_code, province 不显示
+    var catCfg = u.category ? UPLOAD_CATEGORY_FIELDS[u.category] : null;
+    var canSubmit = isUploadReady(u);
 
     const categoryOptions = [
       { value: "", label: "请选择资料分类" },
@@ -2531,6 +2597,28 @@
         '<i data-lucide="x"></i></button>' +
         '</div>';
     }).join("");
+
+    // 动态块: 哪个 category 适用哪个, 互斥。
+    var provinceBlock = "";
+    var industryBlock = "";
+    if (catCfg && catCfg.needsProvince) {
+      provinceBlock =
+        '<div class="quota-simple-field">' +
+          '<label>' + escapeHtml(catCfg.provinceLabel) + ' <span class="quota-required-marker" aria-label="必填">*</span></label>' +
+          '<select class="quota-field-input" data-qfield="upload.province">' +
+            renderUploadProvinceOptions(u.province) +
+          '</select>' +
+        '</div>';
+    }
+    if (catCfg && catCfg.needsIndustry) {
+      industryBlock =
+        '<div class="quota-simple-field">' +
+          '<label>专业 <span class="quota-required-marker" aria-label="必填">*</span></label>' +
+          '<select class="quota-field-input" data-qfield="upload.industry_sector_code">' +
+            renderUploadIndustryOptions(u.industry_sector_code) +
+          '</select>' +
+        '</div>';
+    }
 
     modal.innerHTML = `
       <form class="manual-upload-dialog quota-compose-dialog" data-quota-form="upload">
@@ -2553,9 +2641,11 @@
           <div class="quota-simple-form">
             <div class="quota-simple-row">
               <div class="quota-simple-field">
-                <label>省份 <span class="quota-required-marker" aria-label="必填">*</span></label>
-                <select class="quota-field-input" data-qfield="upload.province">
-                  ${renderUploadProvinceOptions(u.province)}
+                <label>资料分类 <span class="quota-required-marker" aria-label="必填">*</span></label>
+                <select class="quota-field-input" data-qfield="upload.category">
+                  ${categoryOptions.map(function (o) {
+                    return '<option value="' + escapeHtml(o.value) + '"' + (o.value === u.category ? ' selected' : '') + '>' + escapeHtml(o.label) + '</option>';
+                  }).join("")}
                 </select>
               </div>
               <div class="quota-simple-field">
@@ -2565,16 +2655,12 @@
                   placeholder="如 2026" min="1900" max="2100" step="1" />
               </div>
             </div>
+            ${(provinceBlock || industryBlock) ? `
             <div class="quota-simple-row">
-              <div class="quota-simple-field">
-                <label>资料分类 <span class="quota-required-marker" aria-label="必填">*</span></label>
-                <select class="quota-field-input" data-qfield="upload.category">
-                  ${categoryOptions.map(function (o) {
-                    return '<option value="' + escapeHtml(o.value) + '"' + (o.value === u.category ? ' selected' : '') + '>' + escapeHtml(o.label) + '</option>';
-                  }).join("")}
-                </select>
-              </div>
+              ${provinceBlock}
+              ${industryBlock}
             </div>
+            ` : ""}
           </div>
         </div>
         <footer class="quota-compose-footer">
@@ -2613,11 +2699,14 @@
     var yearNum = parseInt(u.year, 10);
     var yearValid = u.year && !isNaN(yearNum) && yearNum >= 1900 && yearNum <= 2100;
 
+    // v0.9: 按 category 分流必填字段 (boq/construction → province, industry → industry_sector_code)
+    var catCfg = u.category ? UPLOAD_CATEGORY_FIELDS[u.category] : null;
     // 一次性收集所有缺失字段
     var missing = [];
     if (effectiveFiles.length === 0) missing.push("文件");
     if (!u.category) missing.push("分类");
-    if (!u.province) missing.push("省份");
+    if (catCfg && catCfg.needsProvince && !u.province) missing.push("省份");
+    if (catCfg && catCfg.needsIndustry && !u.industry_sector_code) missing.push("专业");
     if (!yearValid) missing.push("合法年份(1900-2100)");
     if (typeof global.fetch !== "function") missing.push("fetch 不可用");
     if (missing.length > 0) {
@@ -2631,8 +2720,13 @@
     const formData = new FormData();
     effectiveFiles.forEach(function (f) { formData.append("files", f, f.name); });
     formData.append("category", u.category);
-    formData.append("province", u.province);
+    // industry_quota: province 占位, 后端允许不传; 非 industry: 必传 province。
+    // 一律 append (空字符串也行): 后端 _UPLOAD_PROVINCE_MAP 校验只看 sent value。
+    formData.append("province", u.province || "");
     formData.append("year", String(yearNum));
+    if (catCfg && catCfg.needsIndustry && u.industry_sector_code) {
+      formData.append("industry_sector_code", u.industry_sector_code);
+    }
 
     try {
       const response = await global.fetch("/api/data-lake/quota/upload", {
@@ -3158,12 +3252,26 @@
         return;
       }
       if (t.dataset && t.dataset.qfield === "upload.category") {
+        var prevCat = state.upload.category;
         state.upload.category = t.value;
-        renderUploadSubmitButton();
+        // v0.9: 切 category 时清空不再适用的字段, 避免遗留 province/industry_sector_code
+        //   撞后端 422 校验 (UNEXPECTED_INDUSTRY / MISSING_PROVINCE)。
+        var newCatCfg = UPLOAD_CATEGORY_FIELDS[state.upload.category];
+        if (prevCat !== state.upload.category) {
+          if (newCatCfg && !newCatCfg.needsProvince) state.upload.province = "";
+          if (newCatCfg && !newCatCfg.needsIndustry) state.upload.industry_sector_code = "";
+        }
+        // 切到不同 category → 字段可见性变化 → 必须重渲染整个 modal
+        renderUploadModal();
         return;
       }
       if (t.dataset && t.dataset.qfield === "upload.province") {
         state.upload.province = t.value;
+        renderUploadSubmitButton();
+        return;
+      }
+      if (t.dataset && t.dataset.qfield === "upload.industry_sector_code") {
+        state.upload.industry_sector_code = t.value;
         renderUploadSubmitButton();
         return;
       }
@@ -3508,7 +3616,7 @@
     state.active = false;
     state.addMenuOpen = false;
     state.compose = null;
-    state.upload = { open: false, files: [], category: "", province: "", year: "", submitting: false };
+    state.upload = { open: false, files: [], category: "", province: "", industry_sector_code: "", year: "", submitting: false };
     state.dropdown = { open: false, archiveId: "", variant: "pending" };
     state.deleteParse = {
       open: false, archiveId: "", title: "", submitting: false, error: "",
