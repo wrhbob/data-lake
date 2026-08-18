@@ -97,29 +97,25 @@ def normalize_rows(xlsx_bytes: bytes) -> list[list]:
 
 
 def matches(name: str, *, keyword: str, any_terms: list[str], exclude_terms: list[str]) -> bool:
-    """硬匹配 + 兜底谓词（OR 主导语义）。
+    """硬匹配 + 兜底谓词（AND 主导，补充词细化主词）。
 
     规则（短路求值）：
       1. exclude 优先：任一 exclude 词出现 → 排除
-      2. keyword 与 any_terms 是「补充词」平行关系，二者取并集：
-         name 含 keyword  → 命中；
-         任一 any 词在 name 里 → 命中；
-         keyword 和 any 都没占中 → 不命中。
-      3. 都没填（keyword 与 any_terms 都空）→ 任意 name 都命中（理论上不触发，
-         keyword 已 Form(..., description=...) 校验非空）。
+      2. AND：name 必须含 keyword；any_terms 非空时还必须含至少一个 any 词
+         - keyword 主类别，any_terms 子类细化（例：挖 + 人工 → 人工挖类）
+         - keyword 空 + any_terms 非空 → 等价于 any_terms OR 匹配（退化兜底）
+         - 都没填（理论上 keyword 已校验必填）→ 任意 name 都命中
     """
     text = name or ""
     if not text:
         return False
     if any(ex in text for ex in exclude_terms):
         return False
-    candidates = []
-    if keyword:
-        candidates.append(keyword)
-    candidates.extend(any_terms)
-    if not candidates:
-        return True
-    return any(t in text for t in candidates)
+    if keyword and keyword not in text:
+        return False
+    if any_terms and not any(t in text for t in any_terms):
+        return False
+    return True
 
 
 def extract_blocks(rows: list[list], *, keyword: str, any_terms: list[str], exclude_terms: list[str]) -> list[list]:

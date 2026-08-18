@@ -1120,7 +1120,7 @@
           <p><strong>使用提示</strong>：</p>
           <ul>
             <li><code>keyword</code> 必填，定额名称必须包含该词</li>
-            <li><code>any_terms</code> 选填（空格分隔），任一词命中即可；常用于「踢脚/踢脚线/踢脚板」这类同义扩展</li>
+            <li><code>any_terms</code> 选填（空格分隔），与主词 <strong>AND 关系</strong>：定额名必须同时含主词与任一补充词；常用于主类下钻子类，如「挖」+「土 淤泥 沟槽」</li>
             <li><code>exclude_terms</code> 选填（空格分隔），任一词出现即排除；常用于「挖/挖土」防误伤「挖掘机」</li>
             <li>结果直接下载；不写入数据库，不污染原 final.xlsx</li>
           </ul>
@@ -1168,9 +1168,9 @@
               <small>定额「名称」必须包含该词才会被命中。</small>
             </label>
             <label class="quota-compare-field">
-              <span>补充词（选填，空格分隔，与主词取并集）</span>
+              <span>补充词（选填，空格分隔，与主词取交集）</span>
               <input id="compareAnyTerms" type="text" placeholder="例如：踢脚线 踢脚板" autocomplete="off" />
-              <small>把同义词/别名也填进来，主词+所有补充词任一出现在定额名里都算命中。</small>
+              <small>定额名同时含主词与任一补充词才命中；补充词起到「细化主类」的作用（例：挖 + 土/淤泥/沟槽 = 人工挖土方类）。</small>
             </label>
             <label class="quota-compare-field">
               <span>排除词（选填，空格分隔）</span>

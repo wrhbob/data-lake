@@ -32,13 +32,14 @@ PROVINCES = [
     ("重庆", ["重庆上.xlsx", "重庆下.xlsx"]),
 ]
 
-# 关键命中数（OR 主导语义，2026-08-17 web 接入时确认）
-# 注：CLI TOPICS 「挖」any + exclude 组合下命中数从 74 → 1060（新语义下「土」/「淤泥」等
-# 词只要含就命中，不再要求含「挖」AND）。这是用户明确指示的语义变化。
+# 关键命中数（AND 主导语义：name 必须含 keyword AND (含任一 any 词)）
+# - 扶手: any 空 → 等价 keyword 单独匹配 → 117 条
+# - 踢脚: AND (踢脚 + 含踢脚线 OR 踢脚板) → 42 条（-1 是某条只含「踢脚」无「线/板」的定额）
+# - 挖:   AND (挖 + 含 土/淤泥/冻土/沟槽/基坑/槽坑 - 机械/挖掘机/挖孔/钻) → 74 条
 EXPECTED = {
     "扶手":  {"total": 117, "by_prov": {"四川": 21, "广东": 40, "河南": 2, "重庆": 54}},
-    "踢脚":  {"total": 43,  "by_prov": {"四川": 6,  "广东": 20, "河南": 0, "重庆": 17}},
-    "挖":    {"total": 1060, "by_prov": {"四川": 449, "广东": 225, "河南": 270, "重庆": 116}},
+    "踢脚":  {"total": 42,  "by_prov": {"四川": 6,  "广东": 20, "河南": 0, "重庆": 16}},
+    "挖":    {"total": 74,  "by_prov": {"四川": 12, "广东": 22, "河南": 27, "重庆": 13}},
 }
 
 
@@ -126,7 +127,7 @@ def test_write_xlsx_bytes_is_valid(by_province):
 @pytest.mark.parametrize("keyword,any_terms,exclude_terms,expected_total", [
     ("扶手", [], [], 117),
     ("挖",   ["土", "淤泥", "冻土", "沟槽", "基坑", "槽坑"],
-            ["机械", "挖掘机", "挖孔", "钻"], 1060),
+            ["机械", "挖掘机", "挖孔", "钻"], 74),
 ])
 def test_run_topic_smoke(keyword, any_terms, exclude_terms, expected_total, tmp_path, monkeypatch):
     """CLI 跑一次不写当前目录（用 tmp_path 替换 ROOT）。"""
