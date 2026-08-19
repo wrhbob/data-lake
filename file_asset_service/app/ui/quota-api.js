@@ -49,9 +49,10 @@
     reconciliation: { method: "GET", path: "/reconciliation" },
     publicationSets: { method: "GET", path: "/publication-sets" },
     coverage: { method: "GET", path: "/coverage" },
-    // 2026-08-17: 覆盖矩阵真实接入。/coverage-matrix 在 main.py:
-    //   GET /api/quota/coverage-matrix → build_quota_coverage_matrix(session)
-    // 行=年份(desc,未知末尾),列=省份(拼音升序),cell=该 (年份,省) 的档案数+ids+titles
+    // v0.9.4 (2026-08-19): 覆盖矩阵按 book_category 拆, 每类一张.
+    //   /coverage-matrix?book_category={boq_standard|construction_quota|industry_quota}
+    //   后端 main.py:1158 → build_quota_coverage_matrix(session, book_category=...)
+    //   行轴 axis-agnostic (省份 vs 专业);前端读 data.axis / data.row_label 决定文案.
     coverageMatrix: { method: "GET", path: "/coverage-matrix" },
     compose: { method: "POST", path: "/compose" },
     archiveFiles: { method: "POST", path: "/archives/{id}/files" },
@@ -250,7 +251,9 @@
       getReconciliation: (params) => request(ENDPOINTS.reconciliation.path, { params }),
       getPublicationSets: (params) => request(ENDPOINTS.publicationSets.path, { params }),
       getCoverage: (params) => request(ENDPOINTS.coverage.path, { params }),
-      getCoverageMatrix: () => request(ENDPOINTS.coverageMatrix.path),
+      // v0.9.4: bookCategory 是后端强校验的必填 query 参数.
+      getCoverageMatrix: (bookCategory) =>
+        request(ENDPOINTS.coverageMatrix.path, { params: { book_category: bookCategory } }),
       // 写操作留空接线，P0-5A 不允许经旧 Archive 接口真实写入
       compose: (payload) =>
         request(ENDPOINTS.compose.path, {

@@ -1157,12 +1157,28 @@ def create_app(*, init_schema: bool = True) -> FastAPI:
 
     @app.get("/api/data-lake/quota/coverage-matrix")
     def quota_coverage_matrix_endpoint(
+        book_category: str = Query(
+            ...,
+            description=(
+                "资料分类: boq_standard / construction_quota / industry_quota. "
+                "v0.9.4 (2026-08-19) 起强校验, 混合大矩阵不再支持。"
+            ),
+        ),
         session: Session = Depends(get_db_session),
     ) -> dict[str, object]:
-        # 2026-08-17: 行=年份（desc，未知在末尾），列=省份，单元格=档案数
-        # 路径必须挂 /api/data-lake/quota 下（与 quota_api.py router prefix 一致）
-        # 不接 query 参数：用户原话"只用展示一个矩阵，不用选省份"
-        return build_quota_coverage_matrix(session)
+        # v0.9.4 (2026-08-19): 每 book_category 一张矩阵 (行轴在 province/industry 间切换)。
+        # 必填 query 参数 → 缺失返 422;非法值显式返 400 (不依赖下游 ValueError 5xx 暴露)。
+        from fastapi import HTTPException
+        valid = {"boq_standard", "construction_quota", "industry_quota"}
+        if book_category not in valid:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"invalid book_category={book_category!r}; "
+                    f"must be one of {sorted(valid)}"
+                ),
+            )
+        return build_quota_coverage_matrix(session, book_category=book_category)
 
     @app.get("/api/info-price/national-completeness")
     def national_info_price_completeness_endpoint() -> dict[str, object]:

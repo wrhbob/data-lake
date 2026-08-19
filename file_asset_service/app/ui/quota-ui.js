@@ -46,6 +46,17 @@
     { value: "industry_quota", label: "专业工程定额", secondary: "industry" },
   ]);
 
+  // v0.9.4 (2026-08-19): 覆盖矩阵 sub-tab — 每类一张矩阵, 行轴在「省份」/「专业」间切换.
+  //   - construction_quota / boq_standard → row_label="省份" (province axis)
+  //   - industry_quota                     → row_label="专业" (industry axis)
+  // 默认激活 construction_quota (数据最多, 19 条省份档案).
+  const COVERAGE_BOOK_CATEGORIES = Object.freeze([
+    { value: "construction_quota", label: "建筑工程定额", rowLabel: "省份" },
+    { value: "boq_standard",       label: "清单规范",     rowLabel: "省份" },
+    { value: "industry_quota",     label: "专业工程定额", rowLabel: "专业" },
+  ]);
+  const COVERAGE_DEFAULT_BOOK_CATEGORY = "construction_quota";
+
   function primaryMeta(primaryValue) {
     for (var i = 0; i < PRIMARY_FILTERS.length; i++) {
       if (PRIMARY_FILTERS[i].value === primaryValue) return PRIMARY_FILTERS[i];
@@ -270,8 +281,15 @@
       submitting: false,
       error: "",
     },
-    // 2026-08-17: 覆盖矩阵（行=年份,列=省份）。/api/quota/coverage-matrix 直接读 archive.metadata
-    coverage: { status: CAP.UNKNOWN, data: null, error: "" },
+    // v0.9.4 (2026-08-19): 覆盖矩阵按 book_category 拆分; cache 缓存 3 类矩阵各自的
+    // {status,data,error}, bookCategory 记录当前激活 sub-tab.
+    coverage: {
+      bookCategory: COVERAGE_DEFAULT_BOOK_CATEGORY,
+      cache: Object.create(null),
+      status: CAP.UNKNOWN,
+      data: null,
+      error: "",
+    },
     toast: "",
   };
 
@@ -779,12 +797,31 @@
     return params;
   }
 
+  // 把后端 `{code, label, count}` 形态的 facet 条目统一映射到前端 `renderChipGroup`
+  // 期望的 `{value, label}` 形态。后端 2026-08-18 起统一用 `code` 字段（见 quota_api.py
+  // /facets），industries / jurisdictions / disciplines / 等都走这个形态。
+  // 之前 industries 直接 `return fx.industries || []` 没映射 → item.value 是 undefined
+  // → chip 的 data-quota-action 变成 "set-secondary:undefined"
+  // → selected === item.value 永远 false → 没有 active class 不显示蓝框
+  // → state.filters.secondary 被设成 "undefined" 字符串传给后端
+  // → /api/archives?industry_sector_code=undefined 返回 0 条
+  // 2026-08-19 修复：所有走 code 形态的 facet 都先经过这个映射。
+  function _mapCodeToValue(items) {
+    return (items || []).map(function (i) {
+      return {
+        value: i.code != null ? String(i.code) : i.value,
+        label: i.label != null ? String(i.label) : String(i.code || i.value || ""),
+        count: i.count,
+      };
+    });
+  }
+
   function getFacetItems(key) {
     // 后端 facets 数据为空 / 未就绪时仍允许静默兜底，避免"地区维度待接入"这种空位
     var fx = (state.facets && state.facets.data) || {};
     switch (key) {
       case "scope": case "scopes":
-        return fx.scopes || [];
+        return _mapCodeToValue(fx.scopes);
       case "jurisdiction": case "jurisdictions": {
         // HOTFIX-QA-CHIP-001 · 2026-07-29：地区 chip 一直显示 32 个省级单位（31 省 + 深圳市），
         // 不读后端 fx.jurisdictions。原因：之前 /facets 500 时静态兜底一直显示，
@@ -795,7 +832,7 @@
         });
       }
       case "industry": case "industries":
-        return fx.industries || [];
+        return _mapCodeToValue(fx.industries);
       case "years": {
         var fromYears = fx.years || [];
         if (fromYears.length) {
@@ -810,21 +847,21 @@
         });
       }
       case "disciplines":
-        return fx.disciplines || [];
+        return _mapCodeToValue(fx.disciplines);
       case "materialTypes":
-        return fx.materialTypes || [];
+        return _mapCodeToValue(fx.materialTypes);
       case "cities":
-        return fx.cities || [];
+        return _mapCodeToValue(fx.cities);
       case "issuers":
-        return fx.issuers || [];
+        return _mapCodeToValue(fx.issuers);
       case "metadataStatuses":
-        return fx.metadataStatuses || [];
+        return _mapCodeToValue(fx.metadataStatuses);
       case "archiveStatuses":
-        return fx.archiveStatuses || [];
+        return _mapCodeToValue(fx.archiveStatuses);
       case "sourceChannels":
-        return fx.sourceChannels || [];
+        return _mapCodeToValue(fx.sourceChannels);
       case "fileFormats":
-        return fx.fileFormats || [];
+        return _mapCodeToValue(fx.fileFormats);
       default:
         return [];
     }
@@ -2184,20 +2221,54 @@
 
   // 2026-08-17: 覆盖矩阵懒加载。coverage 矩阵是派生数据，仅在用户切到该 tab 时拉。
   // 失败时由 renderCoverageMatrixView 展示 fallback（不要把整个页面挡住）。
-  async function loadCoverageMatrix() {
+  //
+  // v0.9.4 (2026-08-19): 加 bookCategory 参数 + 多类缓存.
+  //   - 切换 bookCategory 时复用 cache[bookCategory], 避免重复请求.
+  //   - 同一 bookCategory 已 READY 则直接 hydrate, 跳过网络.
+  async function loadCoverageMatrix(bookCategory) {
     if (!state.api || !state.flags.coverage) return;
-    if (state.coverage.status === CAP.READY) return;
-    // 5 态没法原生表达"加载中"，复用 UNKNOWN 标记 + 重新 render 触发空骨架
-    state.coverage = { status: CAP.UNKNOWN, data: null, error: "" };
+    var cat = bookCategory || state.coverage.bookCategory || COVERAGE_DEFAULT_BOOK_CATEGORY;
+    // 同步当前激活 sub-tab (前端以 state.coverage.bookCategory 为准)
+    state.coverage.bookCategory = cat;
+    // 已有缓存 → 直接 hydrate 到顶层 + render
+    var cached = state.coverage.cache[cat];
+    if (cached) {
+      state.coverage.status = cached.status;
+      state.coverage.data = cached.data;
+      state.coverage.error = cached.error || "";
+      if (state.active) render();
+      return;
+    }
+    // 5 态没法原生表达"加载中",复用 UNKNOWN 标记 + 重新 render 触发空骨架
+    state.coverage.status = CAP.UNKNOWN;
+    state.coverage.data = null;
+    state.coverage.error = "";
     if (state.active) render();
-    const r = await state.api.getCoverageMatrix();
-    state.coverage = { status: r.status, data: r.data, error: r.error || "" };
+    const r = await state.api.getCoverageMatrix(cat);
+    var entry = { status: r.status, data: r.data, error: r.error || "" };
+    state.coverage.cache[cat] = entry;
+    // 只在当前激活 sub-tab 还是 cat 时回写顶层 (避免 stale 回填)
+    if (state.coverage.bookCategory === cat) {
+      state.coverage.status = entry.status;
+      state.coverage.data = entry.data;
+      state.coverage.error = entry.error || "";
+    }
     if (state.active) render();
+  }
+
+  // v0.9.4: 切换覆盖矩阵 sub-tab (3 类资料各一张). 委托给 quota-ui.js 的 action dispatcher.
+  function selectCoverageBookCategory(bookCategory) {
+    if (!bookCategory || bookCategory === state.coverage.bookCategory) return;
+    state.coverage.bookCategory = bookCategory;
+    loadCoverageMatrix(bookCategory);
   }
 
   // 2026-08-17: 覆盖矩阵视图（行=年份，列=省份，cell=档案数+hover 详情）。
   // 复用 .coverage-workbench / .coverage-year-month-table styles.css 已有类
   // (信息价覆盖矩阵同款)，避免重复定义。
+  //
+  // v0.9.4 (2026-08-19): 按 book_category 拆分, 头部加 3 个 sub-tab; 行轴 axis-agnostic
+  //   (省份 vs 专业), cell 上的 data-province → data-row, 内部 row_name 替代 province_name.
   function renderCoverageMatrixView() {
     // 能力未就绪（features.coverage=unavailable / 401 / 404）走占位
     if (!state.flags.coverage) {
@@ -2211,50 +2282,90 @@
         </section>`;
     }
 
+    // v0.9.4: sub-tab 行 (3 类资料各一张矩阵).
+    var activeCat = state.coverage.bookCategory || COVERAGE_DEFAULT_BOOK_CATEGORY;
+    var subTabsHtml = `
+      <div class="filter-chip-group coverage-subtabs" role="tablist" aria-label="覆盖矩阵资料分类">
+        ${COVERAGE_BOOK_CATEGORIES.map(function (opt) {
+          var active = opt.value === activeCat ? " active" : "";
+          return `<button class="filter-chip${active}" type="button" role="tab"
+            aria-selected="${opt.value === activeCat ? "true" : "false"}"
+            data-quota-action="coverage-tab:${opt.value}">${escapeHtml(opt.label)}</button>`;
+        }).join("")}
+      </div>`;
+
     // 加载中 / 失败 / 就绪 分别走不同视图
     if (state.coverage.status === CAP.UNKNOWN) {
       return `
-        <section class="quota-view-card">
-          <div class="quota-empty">
-            <i data-lucide="loader-circle"></i>
-            <strong>正在加载覆盖矩阵</strong>
-            <span>汇总当前定额的 (年份 × 省份) 覆盖信息…</span>
+        <section class="coverage-matrix-card" aria-label="定额覆盖矩阵">
+          <div class="coverage-workbench">
+            ${subTabsHtml}
+            <div class="quota-empty">
+              <i data-lucide="loader-circle"></i>
+              <strong>正在加载覆盖矩阵</strong>
+              <span>汇总当前定额的覆盖信息…</span>
+            </div>
           </div>
         </section>`;
     }
     if (state.coverage.status !== CAP.READY || !state.coverage.data) {
       const msg = state.coverage.error || capReason("coverage");
       return `
-        <section class="quota-view-card">
-          <div class="quota-empty">
-            <i data-lucide="alert-triangle"></i>
-            <strong>覆盖矩阵加载失败</strong>
-            <span>${escapeHtml(msg)}</span>
-            <button class="secondary-button" type="button" data-quota-action="coverage-retry">重试</button>
+        <section class="coverage-matrix-card" aria-label="定额覆盖矩阵">
+          <div class="coverage-workbench">
+            ${subTabsHtml}
+            <div class="quota-empty">
+              <i data-lucide="alert-triangle"></i>
+              <strong>覆盖矩阵加载失败</strong>
+              <span>${escapeHtml(msg)}</span>
+              <button class="secondary-button" type="button" data-quota-action="coverage-retry">重试</button>
+            </div>
           </div>
         </section>`;
     }
 
     const data = state.coverage.data;
+    const rowLabel = data.row_label || "省份";
+    const axis = data.axis || "province";
     const years = data.years || [];
-    const provinces = data.provinces || [];
+    const rows = data.rows || [];
     const cells = data.cells || {};
     const summary = data.summary || {};
     const totalArchives = summary.total_archives || 0;
     const unknownYearCount = summary.unknown_year_count || 0;
 
-    // 2026-08-17 第二轮：用户要求行=省份, 列=年份, 不需要合计。
-// 表头：第一列 "省份"，其后为年份列表
+    // axis-agnostic 表头：第一列 rowLabel, 其后为年份列表
     const headHtml = `
       <thead>
         <tr>
-          <th scope="col" class="coverage-province-head">省份 \\ 年份</th>
+          <th scope="col" class="coverage-province-head">${escapeHtml(rowLabel)} \\ 年份</th>
           ${years.map((y) => `<th scope="col">${escapeHtml(y)}</th>`).join("")}
         </tr>
       </thead>`;
 
-    // 每行：一个省份
-    const bodyRows = provinces.map((p) => {
+    // 空数据 (例如 boq_standard 暂无档案) → 显示 empty hint
+    if (!rows.length) {
+      return `
+        <section class="coverage-matrix-card" aria-label="定额覆盖矩阵">
+          <div class="coverage-workbench">
+            ${subTabsHtml}
+            <header class="coverage-workbench-header">
+              <div class="coverage-workbench-title">
+                <span class="section-marker"></span>
+                <strong>${escapeHtml(rowLabel)} × 年份 覆盖矩阵</strong>
+              </div>
+            </header>
+            <div class="quota-empty">
+              <i data-lucide="table-2"></i>
+              <strong>该分类暂无档案</strong>
+              <span>当前 book_category 暂无入湖档案, 矩阵为空。</span>
+            </div>
+          </div>
+        </section>`;
+    }
+
+    // 每行: 一个 row (province 或 industry)
+    const bodyRows = rows.map((p) => {
       const cellsHtml = years.map((year) => {
         const cell = cells[`${year}|${p.code}`] || cells[`${year}|${p.code || ""}`] || null;
         if (!cell) {
@@ -2266,10 +2377,10 @@
           <td class="coverage-cell"
               data-has-data="1"
               data-year="${escapeHtml(year)}"
-              data-province="${escapeHtml(p.code || "")}"
+              data-row="${escapeHtml(p.code || "")}"
               data-variant="${variant}"
               tabindex="0"
-              aria-label="${escapeHtml(p.name || "未知省份")} ${escapeHtml(year)} 共 ${cell.archive_count || 0} 份档案">
+              aria-label="${escapeHtml(p.name || "未知")} ${escapeHtml(year)} 共 ${cell.archive_count || 0} 份档案">
             <span class="coverage-cell-count">${cell.archive_count || 0}</span>
           </td>`;
       }).join("");
@@ -2286,20 +2397,21 @@
           <header class="coverage-workbench-header">
             <div class="coverage-workbench-title">
               <span class="section-marker"></span>
-              <strong>省份 × 年份 覆盖矩阵</strong>
-            </div>
-            <div class="coverage-workbench-summary">
-              <span>省份 <strong>${provinces.length}</strong></span>
-              <span aria-hidden="true">·</span>
-              <span>年份跨度 <strong>${years.length - (unknownYearCount > 0 ? 1 : 0)}</strong></span>
-              <span aria-hidden="true">·</span>
-              <span>无年份 <strong>${unknownYearCount}</strong></span>
-              <span aria-hidden="true">·</span>
-              <span>档案总数 <strong>${totalArchives}</strong></span>
+              <strong>${escapeHtml(rowLabel)} × 年份 覆盖矩阵</strong>
             </div>
           </header>
+          ${subTabsHtml}
+          <div class="coverage-workbench-summary">
+            <span>${escapeHtml(rowLabel)} <strong>${rows.length}</strong></span>
+            <span aria-hidden="true">·</span>
+            <span>年份跨度 <strong>${years.length - (unknownYearCount > 0 ? 1 : 0)}</strong></span>
+            <span aria-hidden="true">·</span>
+            <span>无年份 <strong>${unknownYearCount}</strong></span>
+            <span aria-hidden="true">·</span>
+            <span>档案总数 <strong>${totalArchives}</strong></span>
+          </div>
           <div class="coverage-region-meta">
-            <span>悬停单元格查看该 (省份 × 年份) 下的档案清单；按 <kbd>Tab</kbd> 可逐格聚焦。</span>
+            <span>悬停单元格查看该 (${escapeHtml(rowLabel)} × 年份) 下的档案清单；按 <kbd>Tab</kbd> 可逐格聚焦。</span>
           </div>
           <table class="coverage-year-month-table">
             ${headHtml}
@@ -2345,9 +2457,11 @@
   }
 
   function renderCoverageTooltipInner(cellData) {
-    // cellData: { year, province_name, archive_count, archive_titles, parse_statuses }
+    // cellData: { year, row_name, archive_count, archive_titles, parse_statuses }
+    //   v0.9.4: row_name 替代 province_name (axis-agnostic; "湖北" / "煤炭工程" / "未知")
     const titles = (cellData && cellData.archive_titles) || [];
     const statuses = (cellData && cellData.parse_statuses) || {};
+    const rowName = (cellData && (cellData.row_name != null ? cellData.row_name : cellData.province_name)) || "未知";
     const titleHtml = titles.length
       ? titles.map((t) => `<li>${escapeHtml(t)}</li>`).join("")
       : `<li class="quota-coverage-tooltip-empty">无档案标题</li>`;
@@ -2378,7 +2492,7 @@
       .join("");
     return `
       <header class="quota-coverage-tooltip-head">
-        <strong>${escapeHtml(cellData.year)} · ${escapeHtml(cellData.province_name)}</strong>
+        <strong>${escapeHtml(cellData.year)} · ${escapeHtml(rowName)}</strong>
         <span class="quota-coverage-tooltip-count">${escapeHtml(String(cellData.archive_count || 0))} 份档案</span>
       </header>
       <ul class="quota-coverage-tooltip-list">${titleHtml}</ul>
@@ -2428,10 +2542,11 @@
     if (!matrix) return;
     if (matrix._tooltipBound) return;
     matrix._tooltipBound = true;
+    // v0.9.4: cell 上挂的是 data-row (axis-agnostic), 不是 data-province.
     matrix.addEventListener("mouseover", function (event) {
       const cell = event.target.closest('td.coverage-cell[data-has-data="1"]');
       if (!cell || !state.coverage.data || !state.coverage.data.cells) return;
-      const key = cell.dataset.year + "|" + cell.dataset.province;
+      const key = cell.dataset.year + "|" + cell.dataset.row;
       const cellData = state.coverage.data.cells[key];
       if (cellData) showCoverageTooltip(cell, cellData);
     });
@@ -2441,7 +2556,7 @@
     matrix.addEventListener("focusin", function (event) {
       const cell = event.target.closest('td.coverage-cell[data-has-data="1"]');
       if (!cell || !state.coverage.data || !state.coverage.data.cells) return;
-      const key = cell.dataset.year + "|" + cell.dataset.province;
+      const key = cell.dataset.year + "|" + cell.dataset.row;
       const cellData = state.coverage.data.cells[key];
       if (cellData) showCoverageTooltip(cell, cellData);
     });
@@ -2898,6 +3013,11 @@
     // 2026-08-17: 覆盖矩阵加载失败时，按钮触发重试
     if (action === "coverage-retry") {
       loadCoverageMatrix();
+      return;
+    }
+    // v0.9.4 (2026-08-19): 覆盖矩阵 sub-tab 切换 (3 类资料各一张)
+    if (action.indexOf("coverage-tab:") === 0) {
+      selectCoverageBookCategory(action.slice("coverage-tab:".length));
       return;
     }
     // ── ⋯ 下拉：点击触发按钮展开/收起 ──
