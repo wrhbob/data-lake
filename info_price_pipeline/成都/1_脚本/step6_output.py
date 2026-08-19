@@ -417,6 +417,14 @@ def write_xlsx(clean_json, city, period, year, data_month, cycle_type, pdf_stem)
     code = city_to_code(city)
     out_dir = ROOT / "4_输出"
     out_dir.mkdir(parents=True, exist_ok=True)
+    # 2026-08-14 改：月刊 data_month 强制按出版期推断（出版期-1，1月刊=12）
+    # 月刊约定：数据采集月份=出版前一月。不信用户传值（之前传错过 2 次：传==period、传乱数 1）。
+    # 季刊/半年刊不强制（保持用户原值）。
+    if cycle_type in ("月刊", "月") and period.isdigit():
+        expected = str(int(period) - 1) if int(period) > 1 else "12"
+        if str(data_month) != expected:
+            print(f"[step6] ⚠ 月刊 data_month={data_month!r} ≠ 期望 {expected}（出版期{period}前1月），强制覆盖", flush=True)
+            data_month = expected
     # 2026-07-31 改：直接用 PDF stem 作输出文件名（PDF 名 → xlsx 名只换后缀）
     out_path = out_dir / f"{pdf_stem}.xlsx"
     # 2026-07-29 改：递归找空闲文件名（v2 / v3 / v4 ...），避免连续 _v2 同时被锁时丢异常

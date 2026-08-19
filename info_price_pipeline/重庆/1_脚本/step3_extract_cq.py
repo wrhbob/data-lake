@@ -1255,31 +1255,34 @@ def extract(classified_json, log_lines=None):
             result = extract_nm_rows(rows, schema_def, page_filing, page_contact, schema_name, cq_yaml, schema_state)
 
         # 注入 市/区
-        # 2026-08-11 改：行级 _segment 字段替代 body "苗木" 关键字检查（修 26.1 苗木 sheet 错位）
-        # 4 坑：①主标题列举(MAIN_SECTION_HEADERS) ②cap 优先 ③NM 重置 ④状态独立
+        # 2026-08-19 改：cap-level label 整表共享，_summary_seen 移到 for 循环外
+        # 原 bug：row loop 内 flip _summary_seen=True → row 0 标万州、row 1+ 标区县汇总
+        # 修：先决定整张表 label（_summary_seen flip 在循环外），所有 row 共享同一 label
         # dispatch 优先级：cap_label > 区县汇总表 > row-level segment > default
         # 2026-07-29 改：万州修复 — cap='2026年5月区县材料价格信息' 第一次出现实际是 万州区 数据
         # 根因：mineru 把页内大标题当第一张表 cap，覆盖了 万州区 cap
-        # 修：第一次出现此 cap → 标 万州区；后续出现 → 标 区县汇总
+        # 修：第一次出现此 cap → 整表标 万州区；后续出现 → 整表标 区县汇总
         district_label = _match_district(cap_text, districts)
         is_summary_table = section == "MARKET" and "区县材料价格信息" in cap_text
+        # 整表共享一个 label（cap-level 决定）
+        if district_label:
+            table_label = f"重庆市/{district_label}"
+        elif is_summary_table and not _summary_seen:
+            _summary_seen = True
+            table_label = "重庆市/万州区"
+        elif is_summary_table:
+            table_label = "重庆市/区县汇总"
+        elif section == "NEW_MATERIAL":
+            table_label = "重庆市/行业协会"
+        else:
+            table_label = "重庆市/"
         for r in result["rows"]:
-            # ① cap 优先：cap 有区县 label（荣昌区/武隆区 等）→ 整表用 cap, 无视 segment
-            if district_label:
-                r["市/区"] = f"重庆市/{district_label}"
-            # ② 区县汇总表（表级，整表一个 label，首次=万州, 后续=区县汇总）
-            elif is_summary_table:
-                if not _summary_seen:
-                    _summary_seen = True
-                    r["市/区"] = "重庆市/万州区"
-                else:
-                    r["市/区"] = "重庆市/区县汇总"
-            # ③ row-level segment（苗木 sheet 分流标记，step6 单出 sheet）
-            elif r.get("_segment") == "苗木":
+            # ① row-level segment（苗木 sheet 分流标记，step6 单出 sheet）
+            if r.get("_segment") == "苗木":
                 r["市/区"] = "苗木"
-            # ④ default
+            # ② default：cap-level table_label（整表共享）
             else:
-                r["市/区"] = "重庆市/行业协会" if section == "NEW_MATERIAL" else "重庆市/"
+                r["市/区"] = table_label
 
         out_tables.append({
             "section": section,

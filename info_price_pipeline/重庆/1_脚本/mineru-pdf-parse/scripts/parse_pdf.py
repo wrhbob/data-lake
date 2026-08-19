@@ -18,7 +18,7 @@ MinerU PDF 解析主入口。
   [output_dir]   可选，默认 = <pdf_dir>/<pdf_stem>/
 
 环境变量:
-  MINERU_API_URL  API 地址，默认 http://172.16.20.23:8000
+  MINERU_API_URL  API 地址，默认 http://171.212.159.15:8000
   PYTHONIOENCODING=utf-8  （推荐，避免 Windows GBK 乱码）
 """
 import argparse
@@ -32,7 +32,7 @@ from pathlib import Path
 import requests
 
 
-DEFAULT_API = os.environ.get("MINERU_API_URL", "http://172.16.20.23:8000")
+DEFAULT_API = os.environ.get("MINERU_API_URL", "http://171.212.159.15:8000")
 UPLOAD_NAME = "upload.pdf"  # 永远用 ASCII 文件名上传，规避 double-encode
 DEFAULT_BACKEND = "hybrid-engine"
 DEFAULT_EFFORT = "high"

@@ -17,7 +17,7 @@ quota_ocr.py — 从零写的 PDF → Markdown/HTML 解析脚本（同步 /file_
 
 用法:
     python quota_ocr.py <pdf_path> [-o OUTPUT_DIR]
-    python quota_ocr.py <pdf_path> --url http://172.16.20.23:8000
+    python quota_ocr.py <pdf_path> --url http://171.212.159.15:8000
 
 输出（默认在 PDF 同目录，与原 PDF 同 stem）:
     <stem>.md       ← md_content 原文（含 <table> HTML）
@@ -168,8 +168,8 @@ def main():
     ap.add_argument("pdf_path", help="源 PDF 绝对路径")
     ap.add_argument("-o", "--output-dir", default=None,
                     help="产物落盘目录（默认 = PDF 同目录）")
-    ap.add_argument("--url", default="http://172.16.20.23:8000",
-                    help="MinerU API base URL (default: http://172.16.20.23:8000)")
+    ap.add_argument("--url", default="http://171.212.159.15:8000",
+                    help="MinerU API base URL (default: http://171.212.159.15:8000)")
     ap.add_argument("--timeout", type=float, default=1800.0,
                     help="HTTP 超时秒数 (default: 1800 = 30 分钟)")
     args = ap.parse_args()

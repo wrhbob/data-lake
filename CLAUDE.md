@@ -408,7 +408,7 @@ with get_engine().connect() as c:
 - `FILE_ASSET_DATABASE_URL` — 共享 NAS PostgreSQL（当前入口 `djtsoft.x3322.net:5433`）
 - `FILE_ASSET_S3_*` — MinIO 连接（endpoint / access key / secret / region）
 - `FILE_ASSET_RAW_BUCKET` / `FILE_ASSET_EXTRACT_BUCKET` / `FILE_ASSET_REPORT_BUCKET`
-- `INFO_PRICE_MINERU_API_URL` — MinerU OCR 端点（当前 `http://172.16.20.23:8000`）
+- `INFO_PRICE_MINERU_API_URL` — MinerU OCR 端点（当前 `http://171.212.159.15:8000`）
 
 > ⚠️ `.env` 含真实口令，**被 Git 忽略**。分发时只带 `.env.example`，不带 `.env`；接收方单独配置同一套共享连接（`git pull` 不会同步数据，也不应把 `.env` 入库）。
 

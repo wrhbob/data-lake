@@ -3,6 +3,7 @@
 风险点：normalize_blocks() 的字段映射，按明天真实 schema 微调即可。
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -10,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import requests
 from utils import ROOT, save_cache, log_error, city_to_code
 
-API_BASE = "http://172.16.20.23:8000"
+API_BASE = os.environ.get("MINERU_API_URL", "http://171.212.159.15:8000")
 ENDPOINT = "/parse"  # ← 明天跑不通就改这里（常见：/file_parse /api/v1/parse）
 
 

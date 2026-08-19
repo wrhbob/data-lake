@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 # 默认 OCR 服务（局域网 MinerU）
-DEFAULT_OCR_API = "http://172.16.20.23:8000"
+DEFAULT_OCR_API = "http://171.212.159.15:8000"
 
 # env 覆盖
 ENV_OCR_URL = "QUOTA_PARSER_OCR_URL"

@@ -1740,7 +1740,7 @@ async def trigger_quota_parse(
             profile=profile or archive.parse_profile,  # v0.13.1: 已按 province 推 default profile (L1583-1592)
             created_by=(body or {}).get("created_by"),
             mock=is_parse_mock(),
-            ocr_api_url=os.environ.get("OCR_URL", "http://172.16.20.23:8000"),
+            ocr_api_url=os.environ.get("OCR_URL", "http://171.212.159.15:8000"),
             province=province_value,
         )
     except ValueError as e:

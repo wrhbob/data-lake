@@ -353,7 +353,7 @@ def _reconstruct_manifest(archive: Archive) -> dict[str, Any] | None:
         "parser_version": archive.parse_parser_version,
         "profile": archive.parse_profile,
         "province": archive.parse_profile,  # Profile == province（v0.3 1:1 对齐）
-        "ocr_api_url": "http://172.16.20.23:8000",
+        "ocr_api_url": "http://171.212.159.15:8000",
         "source_pdf_sha256": None,  # archive 未存原 PDF sha256（FileAsset.sha256 已有，跨表 join）
         "candidate_xlsx_sha256": (
             archive.parse_metrics.get("candidate_xlsx_sha256")

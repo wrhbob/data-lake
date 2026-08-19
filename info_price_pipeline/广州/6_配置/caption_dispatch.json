@@ -1,0 +1,96 @@
+{
+  "_comment": "广州 caption dispatch 配置 (2026-08-07) — 按章节标题关键词自动路由 extractor; 4 张新接 (装配式/蒸压加气/铝扣板/管材) + 1 张旧拆 (铝单板独立) + 1 张玻璃",
+  "phc": {
+    "kw": ["预应力高强混凝土管桩"],
+    "extractor": "_process_phc_table",
+    "sheet": "金属材料"
+  },
+  "asphalt": {
+    "kw": ["沥青混凝土税前综合价格"],
+    "extractor": "_process_table_5",
+    "sheet": "金属材料"
+  },
+  "aluminum_single": {
+    "kw": ["铝单板税前综合价"],
+    "extractor": "_process_table_3",
+    "sheet": "金属材料",
+    "_note": "md[9] 铝单板 5 列单表 (anchor+inherit, 无 split); 与铝扣板 5+5 不同"
+  },
+  "aluminum_dropdown": {
+    "kw": ["铝扣板税前综合价格"],
+    "extractor": "_process_table_dropdown",
+    "sheet": "金属材料",
+    "_note": "md[8] 铝扣板 5+5 split + anchor n=10/inherit n=8 (anchor name rowspan)"
+  },
+  "glass_products": {
+    "kw": ["玻璃及玻璃制品税前综合价格", "玻璃制品税前综合价格"],
+    "extractor": "_process_table_dropdown",
+    "sheet": "金属材料",
+    "_note": "md[10] 玻璃及玻璃制品 2026-08-07: 5+5 (n=10) / 5+4 / 4+5 (n=9 mixed anchor+inherit) / 4+4 (n=8 inherit) / 4+5 placeholder skip"
+  },
+  "prefab": {
+    "kw": ["建筑装配式构件税前综合价格"],
+    "extractor": "_process_table_8",
+    "sheet": "建筑装配式构件",
+    "_note": "md[6] 装配式 9 anchor × 4 inherit = 36 行; 区间值 price_low~price_high; 2026-08-06 独立 sheet (6 列 schema)"
+  },
+  "aac_board": {
+    "kw": ["蒸压加气混凝土板税前综合价格"],
+    "extractor": "_process_table_7",
+    "sheet": "金属材料",
+    "_note": "md[7] 蒸压加气混凝土板 anchor n=6 + inherit n=3; 单值放除税价 + 执行标准 GB/T 15762-2020"
+  },
+  "mortar": {
+    "kw": ["干混砂浆税前综合价格", "湿拌砂浆税前综合价格"],
+    "extractor": "_process_table_6",
+    "sheet": "砂浆",
+    "_note": "table[5] 干混+湿拌砂浆 3 段共用, anchor + 继承式, 进新 sheet「砂浆」"
+  },
+  "galvanized_plastic_pipe": {
+    "kw": ["镀锌钢塑复合管税前综合价格"],
+    "extractor": "_process_table_pipe",
+    "sheet": "钢管",
+    "_note": "md[11] 2026-08-07: 镀锌钢塑复合管 (per-row name 模式); anchor n=15 (7+1+7) + inherit n=12 (6+6); 24 行"
+  },
+  "galvanized_pipe": {
+    "kw": ["镀锌钢管(水煤气管)税前综合价格", "镀锌钢管税前综合价格"],
+    "extractor": "_process_table_pipe",
+    "sheet": "钢管",
+    "_note": "md[12-14] 2026-08-07: 镀锌钢管(水煤气管) (caption name 模式); 抽 name='镀锌钢管(水煤气管)' 去 (1/2/3) 后缀; 共 126 行 (44+44+38)"
+  },
+  "stainless_iron_pipe": {
+    "kw": ["不锈钢管、铸铁管、燃气焊管", "不锈钢管、铸铁管、燃气管"],
+    "extractor": "_process_table_15",
+    "sheet": "钢管",
+    "_note": "md[15] 2026-08-07: 不锈钢管/铸铁管/燃气焊管 2 段 (规格格式不同: 段1 'DN15壁厚(mm)0.8' 段2 'Φ159*6'); 33 行 (26+7-占位符)"
+  },
+  "cable": {
+    "kw": ["电线电缆税前综合价格", "电线电缆线槽税前综合价格"],
+    "extractor": "_process_table_cable",
+    "sheet": "电线电缆",
+    "_note": "2026-08-10: 修 26.5 期章节顺序变化导致电线电缆 144 行漏抽; 用 caption 关键词路由, 不依赖 md[N] 索引; 覆盖 md[16-21] (26.6) 和 md[18-21] (26.5)"
+  },
+  "tray": {
+    "kw": ["镀锌桥架税前综合价格", "铝合金桥架税前综合价格", "不锈钢桥架税前综合价格"],
+    "extractor": "_process_table_tray",
+    "sheet": "镀锌桥架",
+    "_note": "2026-08-10: 修 26.5 期镀锌桥架错位 (母线槽 144 行混进); 用 caption 路由避开母线槽表; 覆盖 md[23-28] (26.6) 和 md[22-27] (26.5)"
+  },
+  "busway": {
+    "kw": ["密集型铜导体母线槽"],
+    "extractor": "_process_table_busway",
+    "sheet": "金属材料",
+    "_note": "2026-08-10: 母线槽 4 张表全部走 busway caption 路由 (不论 26.5/26.6, 不论 (1)/(2)/(3)/(4)); 修 26.5 期错位进桥架 sheet 的 bug; skip_col 由 row 长度动态判定 (n=11/9 走 skip=5/4)"
+  },
+  "concrete_inherit": {
+    "kw": [],
+    "extractor": "_process_table_4",
+    "sheet": "金属材料",
+    "_note": "混凝土继承式无章节标题关键词, 由 raw_idx fallback 触发 (table[3] 预拌 + table[4] 水下段 row[0-15])"
+  },
+  "default": {
+    "kw": [],
+    "extractor": "_process_table",
+    "sheet": "金属材料"
+  }
+}

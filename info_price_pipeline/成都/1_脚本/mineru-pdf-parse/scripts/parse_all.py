@@ -28,7 +28,7 @@ from pathlib import Path
 
 import requests
 
-DEFAULT_API = os.environ.get("MINERU_API_URL", "http://172.16.20.23:8000")
+DEFAULT_API = os.environ.get("MINERU_API_URL", "http://171.212.159.15:8000")
 SCRIPT_DIR = Path(__file__).parent
 PARSE_PDF = SCRIPT_DIR / "parse_pdf.py"
 HEALTH_CHECK = SCRIPT_DIR / "health_check.py"

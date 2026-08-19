@@ -12,7 +12,7 @@ allowed-tools: Bash(python *), Bash(curl *), Bash(ls *), Bash(mkdir *), Bash(cp 
 
 # MinerU PDF 解析 Skill
 
-把任意 PDF 交给**本地 MinerU 服务**（默认 `http://172.16.20.23:8000`）解析，
+把任意 PDF 交给**本地 MinerU 服务**（默认 `http://171.212.159.15:8000`）解析，
 输出 `result.json` / `<stem>.md` / `<stem>.html` 到源 PDF 同位置的同名文件夹。
 
 ---
@@ -58,7 +58,7 @@ allowed-tools: Bash(python *), Bash(curl *), Bash(ls *), Bash(mkdir *), Bash(cp 
 | `[output_dir]` | ❌ | `<pdf_dir>/<pdf_stem>/`（同名文件夹） | 输出目录 |
 
 环境变量（可选）：
-- `MINERU_API_URL`：MinerU API 地址，默认 `http://172.16.20.23:8000`
+- `MINERU_API_URL`：MinerU API 地址，默认 `http://171.212.159.15:8000`
 - `PYTHONIOENCODING=utf-8`：避免 Windows bash 打印中文路径乱码
 
 ## 输出（每个 PDF 一个同名文件夹）
@@ -75,7 +75,7 @@ allowed-tools: Bash(python *), Bash(curl *), Bash(ls *), Bash(mkdir *), Bash(cp 
 
 ### Step 0 · 健康检查（必做，不通直接报错退出）
 
-调 `python scripts/health_check.py`（或手动 `curl http://172.16.20.23:8000/health`）：
+调 `python scripts/health_check.py`（或手动 `curl http://171.212.159.15:8000/health`）：
 
 - ✅ `{"status":"healthy","version":"3.4.4",...}` → 继续
 - ❌ 任何其他情况 → **直接报错并给出排查步骤**（见下方脚本）

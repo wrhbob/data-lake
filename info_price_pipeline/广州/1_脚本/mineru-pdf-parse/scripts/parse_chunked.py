@@ -22,7 +22,7 @@ MinerU 分段串行解析（避免大 PDF 让 uvicorn OOM）。
   --backend       hybrid-engine / vlm-engine / pipeline（默认 hybrid-engine）
   --effort        high / medium（默认 high；仅 hybrid-engine 生效）
   --no-merge      只产出分块结果，不合并成总 .md/.html
-  --api-url       MinerU API 地址（默认 http://172.16.20.23:8000）
+  --api-url       MinerU API 地址（默认 http://171.212.159.15:8000）
 
 输出结构:
   <pdf_dir>/<pdf_stem>/
@@ -53,7 +53,7 @@ import fitz          # PyMuPDF
 import requests
 
 SCRIPT_DIR = Path(__file__).parent
-DEFAULT_API = os.environ.get("MINERU_API_URL", "http://172.16.20.23:8000")
+DEFAULT_API = os.environ.get("MINERU_API_URL", "http://171.212.159.15:8000")
 EXTRACT_SCRIPT = SCRIPT_DIR.parent.parent / "pdf-page-extract" / "pdf_page_extract.py"
 
 

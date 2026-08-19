@@ -3,12 +3,12 @@ MinerU API 健康检查脚本（v0.2 函数化版本）。
 
 函数级入口（Worker 使用）:
     from external.mineru_pdf_parse.scripts.health_check import health_check
-    info = health_check(api_url="http://172.16.20.23:8000")
+    info = health_check(api_url="http://171.212.159.15:8000")
     if not info["ok"]:
         raise OcrUnavailableError(...)
 
 CLI 入口（开发调试，本地人类使用）:
-    python health_check.py --url http://172.16.20.23:8000
+    python health_check.py --url http://171.212.159.15:8000
 
 退出码（CLI）:
     0  → 健康，可以继续调用
@@ -35,7 +35,7 @@ def check(url: str, timeout: float = 3.0) -> dict[str, Any]:
 
 
 def health_check(
-    api_url: str = "http://172.16.20.23:8000",
+    api_url: str = "http://171.212.159.15:8000",
     timeout: float = 3.0,
 ) -> dict[str, Any]:
     """v0.2 函数级入口。
@@ -113,8 +113,8 @@ def health_check(
 
 def main():
     ap = argparse.ArgumentParser(description="检查本地 MinerU API 是否健康")
-    ap.add_argument("--url", default="http://172.16.20.23:8000",
-                    help="MinerU API base URL (default: http://172.16.20.23:8000)")
+    ap.add_argument("--url", default="http://171.212.159.15:8000",
+                    help="MinerU API base URL (default: http://171.212.159.15:8000)")
     ap.add_argument("--timeout", type=float, default=3.0,
                     help="HTTP 超时秒数 (default: 3)")
     args = ap.parse_args()

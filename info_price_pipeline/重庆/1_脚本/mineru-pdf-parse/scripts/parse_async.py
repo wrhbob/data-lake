@@ -15,7 +15,7 @@ from pathlib import Path
 
 import requests
 
-DEFAULT_API = "http://172.16.20.23:8000"
+DEFAULT_API = "http://171.212.159.15:8000"
 
 
 def submit_task(pdf: Path, api_url: str, backend="hybrid-engine", effort="high") -> str:

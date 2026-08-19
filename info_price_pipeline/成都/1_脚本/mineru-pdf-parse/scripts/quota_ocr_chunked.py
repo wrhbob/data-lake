@@ -73,7 +73,7 @@ QUOTA_OCR_SCRIPT = HERE / "quota_ocr.py"
 
 CONTAINER_NAME = "PDF2Markdown"
 MINERU_LOG = "/tmp/mineru-api.log"
-HEALTH_URL = "http://172.16.20.23:8000/health"
+HEALTH_URL = "http://171.212.159.15:8000/health"
 HEALTH_MAX_WAIT = 240  # 含 VLLM preload 的冷启动最长 4 分钟
 DEFAULT_CHUNK_SIZE = 100
 

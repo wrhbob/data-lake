@@ -22,7 +22,7 @@ MinerU 分段串行解析（避免大 PDF 让 uvicorn OOM）。
   --backend       hybrid-engine / vlm-engine / pipeline（默认 hybrid-engine）
   --effort        high / medium（默认 high；仅 hybrid-engine 生效）
   --no-merge      只产出分块结果，不合并成总 .md/.html
-  --api-url       MinerU API 地址（默认 http://172.16.20.23:8000）
+  --api-url       MinerU API 地址（默认 http://171.212.159.15:8000）
 
 输出结构:
   <pdf_dir>/<pdf_stem>/
@@ -53,7 +53,7 @@ import fitz          # PyMuPDF
 import requests
 
 SCRIPT_DIR = Path(__file__).parent
-DEFAULT_API = os.environ.get("MINERU_API_URL", "http://172.16.20.23:8000")
+DEFAULT_API = os.environ.get("MINERU_API_URL", "http://171.212.159.15:8000")
 EXTRACT_SCRIPT = SCRIPT_DIR.parent.parent / "pdf-page-extract" / "pdf_page_extract.py"
 
 
@@ -91,9 +91,6 @@ def client_cleanup(*objs):
 
 def split_pdf(pdf: Path, chunk_size: int, out_dir: Path) -> list[Path]:
     """拆 PDF 成 chunk_size 页/段，返回每段 PDF 路径列表。"""
-    # 2026-08-13: 拆段前清理残留 chunk（上次失败残留导致 Permission denied）
-    if out_dir.exists():
-        shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     doc = fitz.open(pdf)
     total = doc.page_count
@@ -236,7 +233,7 @@ def merge_chunks(chunks: list[Path], result_paths: list[Path], pdf: Path, out_di
         "version": "1.0",
         "file_names": [pdf.name],
         "results": {
-            "upload": {
+            pdf.name: {
                 "md_content": "\n\n".join(merged_md),
                 "content_list": json.dumps(merged_content_list, ensure_ascii=False),
                 "middle_json": json.dumps({"pdf_info": merged_middle_pages}, ensure_ascii=False),

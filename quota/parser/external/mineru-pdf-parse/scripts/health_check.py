@@ -3,7 +3,7 @@ MinerU API 健康检查脚本。
 
 用法:
     python health_check.py
-    python health_check.py --url http://172.16.20.23:8000
+    python health_check.py --url http://171.212.159.15:8000
 
 退出码:
     0  → 健康，可以继续调用
@@ -28,8 +28,8 @@ def check(url: str, timeout: float = 3.0) -> dict:
 
 def main():
     ap = argparse.ArgumentParser(description="检查本地 MinerU API 是否健康")
-    ap.add_argument("--url", default="http://172.16.20.23:8000",
-                    help="MinerU API base URL (default: http://172.16.20.23:8000)")
+    ap.add_argument("--url", default="http://171.212.159.15:8000",
+                    help="MinerU API base URL (default: http://171.212.159.15:8000)")
     ap.add_argument("--timeout", type=float, default=3.0,
                     help="HTTP 超时秒数 (default: 3)")
     args = ap.parse_args()

@@ -44,7 +44,7 @@ import requests
 
 
 SCRIPT_DIR = Path(__file__).parent
-DEFAULT_API = os.environ.get("MINERU_API_URL", "http://172.16.20.23:8000")
+DEFAULT_API = os.environ.get("MINERU_API_URL", "http://171.212.159.15:8000")
 EXTRACT_SCRIPT = SCRIPT_DIR.parent.parent / "pdf-page-extract" / "pdf_page_extract.py"
 
 

@@ -53,5 +53,5 @@ def get_settings() -> Settings:
         nas_mirror_root=os.getenv("FILE_ASSET_NAS_MIRROR_ROOT") or None,
         parse_manifest_path=os.getenv("FILE_ASSET_PARSE_MANIFEST_PATH") or None,
         # 2026-08-07 新增:迁移时改 INFO_PRICE_MINERU_API_URL,默认指向内网 MinerU
-        mineru_api_url=os.getenv("INFO_PRICE_MINERU_API_URL", "http://172.16.20.23:8000"),
+        mineru_api_url=os.getenv("INFO_PRICE_MINERU_API_URL", "http://171.212.159.15:8000"),
     )

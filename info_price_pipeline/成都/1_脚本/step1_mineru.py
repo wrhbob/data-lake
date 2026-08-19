@@ -29,9 +29,6 @@ from utils import ROOT, city_to_code, save_cache, log_error
 SKILL_DIR = ROOT / "1_脚本" / "mineru-pdf-parse"
 HEALTH_CHECK = SKILL_DIR / "scripts" / "health_check.py"
 PARSE_PDF = SKILL_DIR / "scripts" / "parse_pdf.py"
-PARSE_CHUNKED = SKILL_DIR / "scripts" / "parse_chunked.py"
-# 2026-08-13: >100 页自动分段（避免大 PDF 让 MinerU OOM），对齐 quota pipeline.py 的 CHUNK_THRESHOLD_PAGES
-CHUNK_THRESHOLD_PAGES = 100
 
 # 子进程 env：强制 UTF-8，绕过 Windows GBK 编码（skill 里用了 ✅ 等 emoji）
 _SUBPROCESS_ENV = {**os.environ, "PYTHONIOENCODING": "utf-8"}
@@ -58,27 +55,6 @@ def parse_pdf(python_exe, pdf_path, output_dir):
     )
     if r.returncode != 0:
         raise RuntimeError(f"parse_pdf 失败:\n{r.stdout}\n{r.stderr}")
-    print((r.stdout or "").strip())
-
-
-def _read_page_count(pdf_path):
-    """读 PDF 页数（fitz/PyMuPDF），用于 >100 页分段判断。"""
-    import fitz
-    doc = fitz.open(pdf_path)
-    n = doc.page_count
-    doc.close()
-    return n
-
-
-def parse_chunked(python_exe, pdf_path, output_dir):
-    """调 parse_chunked.py 分段解析（>100 页避免 MinerU OOM）。"""
-    r = subprocess.run(
-        [python_exe, str(PARSE_CHUNKED), str(pdf_path), "--output-dir", str(output_dir)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=1800, env=_SUBPROCESS_ENV,
-    )
-    if r.returncode != 0:
-        raise RuntimeError(f"parse_chunked 失败:\n{r.stdout}\n{r.stderr}")
     print((r.stdout or "").strip())
 
 
@@ -112,12 +88,7 @@ def run_step1(pdf_path, city, period, year=None, python_exe=None):
 
     # 2. parse_pdf
     print(f"[step1] 解析 PDF → {out_dir}/")
-    page_count = _read_page_count(pdf_path)
-    if page_count > CHUNK_THRESHOLD_PAGES:
-        print(f"[step1] {page_count} 页 > {CHUNK_THRESHOLD_PAGES}，走分段解析 parse_chunked")
-        parse_chunked(python_exe, pdf_path, out_dir)
-    else:
-        parse_pdf(python_exe, pdf_path, out_dir)
+    parse_pdf(python_exe, pdf_path, out_dir)
 
     # 3. 验证 result.json 存在
     result_json = next(out_dir.glob("result.json"), None)

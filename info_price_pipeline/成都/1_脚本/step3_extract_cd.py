@@ -413,9 +413,16 @@ def extract_market_table(table):
                     unit = clean_cell(cells[4])
                     price = clean_cell(cells[5])
                 else:
-                    origin = ""
-                    unit = clean_cell(cells[3])
-                    price = clean_cell(cells[4])
+                    # 2026-08-19 增：6 列含"产地"列（蒲江3月勘误表 67）→ 不提取产地
+                    # 蒲江格式：序号/名称/规格/产地/单位/价格 → cells[4]=单位, cells[5]=价格
+                    if len(header) >= 6 and clean_cell(header[3]).strip() == '产地':
+                        origin = ""
+                        unit = clean_cell(cells[4])
+                        price = clean_cell(cells[5])
+                    else:
+                        origin = ""
+                        unit = clean_cell(cells[3])
+                        price = clean_cell(cells[4])
             else:
                 # 第一列不是序号 → 退化为 5 列模式
                 seq = ""
@@ -703,9 +710,26 @@ def find_real_header(rows, max_scan=5):
       - 至少 1 个价格关键词（价格/单价/含税/不含税/除税）
 
     2026-07-28 修复: 跳过开头的单 cell 行（公司名/标题），避免单 cell col 0 挤掉表头列
+
+    2026-08-19 修复：检测首列 1-N 序号列（如蒲江3月勘误表 6 列含"序号 1-10"），drop 后按正常 dispatch
     """
     if not rows:
         return None, -1
+
+    # 2026-08-19 增：drop 序号列
+    nums = []
+    for r in rows[:5]:
+        if not r:
+            break
+        v = r[0]
+        if v is None:
+            break
+        try:
+            nums.append(int(str(v).strip()))
+        except (ValueError, TypeError):
+            break
+    if len(nums) >= 3 and nums == list(range(1, len(nums) + 1)):
+        rows = [r[1:] for r in rows]
 
     # 跳过开头的单 cell 行（公司名/材料标题/章节小标题）和全空行
     data_start = 0
