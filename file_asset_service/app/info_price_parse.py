@@ -620,7 +620,13 @@ def _run_parse_job(
             cwd = str(handler.pipeline_root / "1_脚本")
         else:
             # 5 城原逻辑
-            data_month = 1  # TODO: 从文件名/请求体提取月份；当前先传 1 占位
+            # 2026-08-14 修：月刊 data_month 自动推断（出版期-1，1月刊=12）。原硬编码 1 在
+            # period > 2 时全错（如北京 06 期/1、成都 05 期/4）。月报都按"出版前一月数据"约定。
+            if str(period_str).isdigit():
+                p_int = int(period_str)
+                data_month = p_int - 1 if p_int > 1 else 12
+            else:
+                data_month = 1  # 非数字 period 兜底（季刊/半年刊暂按 1 占位）
             extra_args = handler.arg_builder(year, period_str, data_month)
             if handler.pdf_as_flag:
                 pdf_args: tuple[str, ...] = ("--pdf", str(pdf_path))

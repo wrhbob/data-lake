@@ -51,6 +51,13 @@ info_price_pipeline/**/3_中间产物/
 info_price_pipeline/**/4_输出/
 info_price_pipeline/**/5_日志/
 
+# ── 信息价分析工具（独立项目，2026-08-19 合并入仓）────────────
+# 脚本 + 词典 + 坐标 + 文档入库；输入/中间产物/报告/日志不入库
+info_price_analysis/1_输入/
+info_price_analysis/3_中间产物/
+info_price_analysis/4_输出/
+info_price_analysis/5_日志/
+
 # ── 本地调试 / 比对临时产物（一次性 diff dump / 进程快照 / 备份）──
 *_diff.txt
 *.bak.*

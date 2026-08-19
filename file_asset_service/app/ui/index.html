@@ -7,7 +7,7 @@
     <link rel="icon" href="data:," />
     <script>
       window.__uiAssetBase = window.location.protocol === "file:" ? "./" : "/ui-assets/";
-      window.__uiAssetVersion = "20260819-v27-coverage-matrix-per-book-category";
+      window.__uiAssetVersion = "20260819-v27.7-fix-close-viewer-modal-no-rerender";
       document.write(`<link rel="stylesheet" href="${window.__uiAssetBase}styles.css?v=${window.__uiAssetVersion}" />`);
     </script>
     <script defer src="https://unpkg.com/lucide@latest"></script>
@@ -77,6 +77,11 @@
           <i data-lucide="table-2"></i>
           <span>覆盖矩阵</span>
         </button>
+        <!-- 2026-08-18: 信息价分析 tab（接入 D 盘 信息价分析/ v3.3.2 → F 盘 info_price_analysis/） -->
+        <button class="workspace-tab" type="button" data-view-mode="info-analysis">
+          <i data-lucide="bar-chart-3"></i>
+          <span>信息价分析</span>
+        </button>
       </section>
 
       <section id="costInfoOverview" class="cost-info-overview" aria-label="信息价数据概览"></section>
@@ -124,6 +129,31 @@
           <strong>没有匹配的覆盖单元</strong>
           <span>调整地区、期次或状态筛选。</span>
         </div>
+      </section>
+
+      <!-- 2026-08-18: 信息价分析视图（与覆盖矩阵平级） -->
+      <section id="infoAnalysisCard" class="info-analysis-card" aria-label="信息价分析" hidden>
+        <div class="quota-compare-toolbar">
+          <i data-lucide="bar-chart-3"></i>
+          <div class="quota-compare-toolbar__text">
+            <strong>信息价分析</strong>
+            <span>从信息价期刊 xlsx 抽取同物组 + 价格分布 + 区县空间插值（IDW），输出 md 总报告。当前 V1：成都单城多期。</span>
+          </div>
+          <button class="primary-button" type="button" data-action="open-info-analysis-modal">
+            <i data-lucide="play"></i>
+            <span>打开分析工具</span>
+          </button>
+        </div>
+        <div class="quota-compare-tips">
+          <p><strong>使用提示</strong>：</p>
+          <ul>
+            <li>选择分析模式：<code>同城</code>（多期对比） 或 <code>跨城</code>（多城对比，V2）</li>
+            <li>选择城市：V1 仅成都；其他城市 V2 接入</li>
+            <li>选择期数：可多选，跨期对比</li>
+            <li>结果：md 总报告（含 6 节结构：摘要/盘点/同物/价格/趋势/IDW）</li>
+          </ul>
+        </div>
+        <div id="infoAnalysisStatus" class="info-analysis-status"></div>
       </section>
     </main>
 
@@ -207,6 +237,9 @@
     </section>
 
     <section id="coverageBackfillModal" class="modal-backdrop" aria-label="官方源回填" aria-hidden="true" hidden></section>
+
+    <!-- 2026-08-18: 信息价分析 modal（与 coverageBackfillModal 同级） -->
+    <section id="infoPriceAnalysisModal" class="modal-backdrop" aria-label="信息价分析" aria-hidden="true" hidden></section>
 
     <!-- 2026-08-12 apply 自 info index.html：信息价解析状态 modal -->
     <section id="parseStatusModal" class="modal-backdrop" aria-label="解析进度" aria-hidden="true" hidden></section>

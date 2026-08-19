@@ -245,6 +245,25 @@ const state = {
     submitting: false,
     error: "",
   },
+  // 2026-08-18: 信息价分析（接入 D 盘 信息价分析/ v3.3.2 → F 盘 info_price_analysis/）
+  infoAnalysis: {
+    open: false,
+    mode: "sameCity",
+    city: "成都",
+    periods: [],
+    note: "",
+    submitting: false,
+    error: "",
+    result: null,
+    reportsView: false,       // 2026-08-18: 当前是否在"报告浏览视图"
+    reports: [],              // 报告文件列表 [{filename, size_bytes, mtime, ext}]
+    currentReport: null,      // 当前预览的报告 filename
+    previewHtml: "",          // 当前预览的 HTML 内容
+    previewLoading: false,    // 预览加载中
+    keyword: "",              // 2026-08-18: 分析关键词（必填，对应 phase4 --filter）
+    viewerModal: { open: false, filename: null, sheetNames: [], previewHtml: "", activeSheet: "", loading: false },  // 2026-08-18: viewer-style modal（含 sheet tabs）
+  },
+  infoAnalysisReady: false,  // GET /api/data-lake/info-price/capabilities 探测结果
   selectedArchive: null,
   selectedFileId: null,
   mirrorExporting: false,
@@ -2782,6 +2801,14 @@ async function loadCurrentView() {
     if (state.viewMode === "coverage") renderAll();
     return coverage;
   }
+  // 2026-08-18: info-analysis 视图按域隔离探测 capabilities（不调 quota-api.js）
+  if (state.viewMode === "info-analysis") {
+    const probe = probeInfoPriceCapabilities();
+    await sourceDimensions;
+    await probe;
+    if (state.viewMode === "info-analysis") renderAll();
+    return;
+  }
   const archives = loadArchives();
   await sourceDimensions;
   return archives;
@@ -3556,13 +3583,14 @@ function renderDomain() {
   }
   if (state.domain !== "cost_info" && state.viewMode === "coverage") state.viewMode = "archives";
   const config = activeConfig();
-  $("#pageTitle").textContent = state.viewMode === "coverage" ? "信息价覆盖矩阵" : config.title;
+  $("#pageTitle").textContent = state.viewMode === "coverage" ? "信息价覆盖矩阵" : state.viewMode === "info-analysis" ? "信息价分析" : config.title;
   $("#globalSearch").placeholder = config.searchPlaceholder;
   $("#domainPill").textContent = `domain_type: ${state.domain}`;
   $$(".rail-button[data-domain]").forEach((button) => button.classList.toggle("active", button.dataset.domain === state.domain));
   $$(".workspace-tab").forEach((button) => {
     button.classList.toggle("active", button.dataset.viewMode === state.viewMode);
-    button.disabled = button.dataset.viewMode === "coverage" && state.domain !== "cost_info";
+    // info-analysis tab 仅在 cost_info 域可用；coverage 同理
+    button.disabled = (button.dataset.viewMode === "coverage" || button.dataset.viewMode === "info-analysis") && state.domain !== "cost_info";
   });
   renderCostInfoOverview();
   renderFilters();
@@ -3684,8 +3712,20 @@ function renderTotalBadge() {
 }
 
 function renderViewShell() {
-  $("#archiveTableCard").hidden = state.viewMode === "coverage";
-  $("#coverageMatrixCard").hidden = state.viewMode !== "coverage";
+  // 2026-08-19 fix: archives / coverage / info-analysis 三视图互斥显示；
+  //   archives 才显示档案列表相关的 overview/filter/audit/result-bar/storage-audit。
+  const isArchives = state.viewMode === "archives";
+  const isCoverage = state.viewMode === "coverage";
+  const isInfoAnalysis = state.viewMode === "info-analysis";
+  $("#archiveTableCard").hidden = !isArchives;
+  $("#coverageMatrixCard").hidden = !isCoverage;
+  const infoCard = $("#infoAnalysisCard");
+  if (infoCard) infoCard.hidden = !isInfoAnalysis;
+  $("#costInfoOverview").hidden = !isArchives;
+  $("#filterPanel").hidden = !isArchives;
+  $("#storageAuditBar").hidden = !isArchives;
+  const resultBar = document.querySelector(".result-bar");
+  if (resultBar) resultBar.hidden = !isArchives;
 }
 
 function formatAuditPercent(value) {
@@ -4332,8 +4372,997 @@ function renderAll() {
   renderViewShell();
   renderStorageAudit();
   if (state.viewMode === "coverage") renderCoverageMatrix();
+  else if (state.viewMode === "info-analysis") renderInfoAnalysisView();
   else renderRows();
   renderCoverageBackfillModal();
+}
+
+// ── 2026-08-18: 信息价分析视图（最小接入）────────────────────────────────
+// 视图层：渲染 #infoAnalysisCard 内 status 区域
+function renderInfoAnalysisView() {
+  const status = $("#infoAnalysisStatus");
+  if (!status) return;
+  // 2026-08-18: 报告浏览视图模式（reportsView=true 时切换显示）
+  if (state.infoAnalysis.reportsView) {
+    renderInfoAnalysisReportsView(status);
+  } else {
+    renderInfoAnalysisMainView(status);
+  }
+  if (typeof window.lucide !== "undefined" && window.lucide.createIcons) {
+    window.lucide.createIcons();
+  }
+  renderInfoAnalysisModal();
+  renderInfoAnalysisViewerModal();
+}
+
+// 2026-08-18: 信息价 viewer 模态（黑色顶栏 + sheet tabs + xlsx 内容 + 退出预览，模仿档案 viewer 风格）
+function renderInfoAnalysisViewerModal() {
+  let modal = $("#infoAnalysisViewerModal");
+  const d = state.infoAnalysis.viewerModal;
+  if (!d.open) {
+    if (modal) { modal.hidden = true; modal.setAttribute("aria-hidden", "true"); modal.innerHTML = ""; }
+    return;
+  }
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "infoAnalysisViewerModal";
+    modal.className = "info-analysis-viewer-modal";
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("aria-label", "信息价分析报告预览");
+    document.body.appendChild(modal);
+  }
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+  const filename = d.filename || "";
+  const sheetTabs = d.sheetNames.map((name) => `
+    <button type="button" class="info-analysis-sheet-tab ${name === d.activeSheet ? "active" : ""}" data-sheet="${escapeHtml(name)}">${escapeHtml(name)}</button>
+  `).join("");
+  let body = "";
+  if (d.loading) {
+    body = '<div class="info-analysis-viewer-loading"><i data-lucide="loader"></i> 加载中…</div>';
+  } else if (d.previewHtml) {
+    body = `<div class="info-analysis-viewer-iframe-host" data-preview="${(d.previewHtml || "").replace(/"/g, "&quot;")}"></div>`;
+  } else {
+    body = '<div class="info-analysis-viewer-placeholder">无内容</div>';
+  }
+  modal.innerHTML = `
+    <header class="info-analysis-viewer-header">
+      <div class="info-analysis-viewer-title-block">
+        <span class="info-analysis-viewer-eyebrow">档案台 · 信息价分析</span>
+        <span class="info-analysis-viewer-filename">${escapeHtml(filename)}</span>
+      </div>
+      <nav class="info-analysis-viewer-sheet-tabs">
+        ${sheetTabs}
+      </nav>
+      <div class="info-analysis-viewer-actions">
+        <button type="button" class="info-analysis-viewer-action" title="导出 xlsx" data-action="export-info-analysis-report" data-filename="${escapeHtml(filename)}"><i data-lucide="download"></i> 导出</button>
+        <button type="button" class="info-analysis-viewer-close" title="退出预览" data-action="close-info-analysis-viewer-modal"><i data-lucide="x"></i> 退出预览</button>
+      </div>
+    </header>
+    <div class="info-analysis-viewer-body">
+      ${body}
+    </div>
+  `;
+  // sheet 切换逻辑：把 previewHtml 注入 iframe（每个 sheet 渲染为独立 section，data-sheet 匹配时显示）
+  if (!d.loading && d.previewHtml) {
+    const host = modal.querySelector(".info-analysis-viewer-iframe-host");
+    const iframe = document.createElement("iframe");
+    iframe.className = "info-analysis-viewer-iframe";
+    iframe.srcdoc = d.previewHtml;
+    iframe.onload = () => {
+      try {
+        const doc = iframe.contentDocument;
+        if (!doc) return;
+        const activeSheet = d.activeSheet;
+        const sections = doc.querySelectorAll("section[data-sheet]");
+        sections.forEach((sec) => {
+          sec.style.display = (sec.dataset.sheet === activeSheet) ? "" : "none";
+        });
+        // 切 tab 后高度自适应
+        iframe.style.height = (doc.documentElement.scrollHeight + 24) + "px";
+      } catch (_e) { /* cross-origin guard */ }
+    };
+    host.appendChild(iframe);
+  }
+  // 绑定 sheet tab 点击
+  modal.querySelectorAll(".info-analysis-sheet-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      state.infoAnalysis.viewerModal.activeSheet = tab.dataset.sheet;
+      renderInfoAnalysisViewerModal();
+    });
+  });
+  if (typeof window.lucide !== "undefined" && window.lucide.createIcons) {
+    window.lucide.createIcons();
+  }
+}
+
+function renderInfoAnalysisMainView(status) {
+  if (state.infoAnalysisReady) {
+    // 2026-08-18: 直接渲染报告文件名列表（替代「查看报告」入口按钮）
+    const d = state.infoAnalysis;
+    const reportItems = d.reports.map((r) => `
+      <li class="info-analysis-report-item">
+        <button type="button" class="info-analysis-report-link" data-action="open-info-analysis-report" data-filename="${escapeHtml(r.filename)}">
+          ${escapeHtml(r.filename)}
+        </button>
+        <button type="button" class="info-analysis-report-delete" title="删除报告" aria-label="删除报告" data-action="delete-info-analysis-report" data-filename="${escapeHtml(r.filename)}">
+          <i data-lucide="trash-2"></i>
+        </button>
+      </li>
+    `).join("") || `<li class="info-analysis-empty">暂无报告</li>`;
+    status.innerHTML = `
+      <div class="info-analysis-ready">
+        <i data-lucide="check-circle"></i>
+        <span>后端能力就绪，可打开分析工具。</span>
+      </div>
+      <div class="info-analysis-reports-section">
+        <h4>历史报告（${d.reports.length} 个）</h4>
+        <ul class="info-analysis-reports-list">${reportItems}</ul>
+      </div>
+    `;
+  } else {
+    status.innerHTML = `
+      <div class="info-analysis-pending">
+        <i data-lucide="loader"></i>
+        <span>正在探测后端能力…</span>
+      </div>
+    `;
+  }
+}
+
+function renderInfoAnalysisReportsView(status) {
+  const d = state.infoAnalysis;
+  const reportItems = d.reports.map((r) => {
+    const dt = new Date(r.mtime * 1000);
+    const ts = `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")} ${String(dt.getHours()).padStart(2,"0")}:${String(dt.getMinutes()).padStart(2,"0")}`;
+    const isXlsx = r.ext === "xlsx";
+    const active = d.currentReport === r.filename ? "active" : "";
+    return `
+      <li class="info-analysis-report-item">
+        <button type="button" class="info-analysis-report-link" data-action="open-info-analysis-report" data-filename="${escapeHtml(r.filename)}">
+          ${escapeHtml(r.filename)}
+        </button>
+        <button type="button" class="info-analysis-report-delete" title="删除报告" aria-label="删除报告" data-action="delete-info-analysis-report" data-filename="${escapeHtml(r.filename)}">
+          <i data-lucide="trash-2"></i>
+        </button>
+      </li>
+    `;
+  }).join("") || `<li class="info-analysis-empty">暂无报告</li>`;
+  status.innerHTML = `
+    <div class="info-analysis-reports-header">
+      <button class="secondary-button" type="button" data-action="back-to-info-analysis">
+        <i data-lucide="arrow-left"></i> 返回信息价分析
+      </button>
+      <h3>信息价分析报告（${d.reports.length} 个）</h3>
+    </div>
+    <ul class="info-analysis-reports-list">${reportItems}</ul>
+  `;
+}
+
+function renderInfoAnalysisModal() {
+  const modal = $("#infoPriceAnalysisModal");
+  if (!modal) return;
+  const dialog = state.infoAnalysis;
+  if (!dialog.open) {
+    modal.hidden = true;
+    modal.setAttribute("aria-hidden", "true");
+    modal.innerHTML = "";
+    return;
+  }
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+  const cityOptions = ["成都", "重庆", "北京", "广州", "武汉", "湖北"]
+    .map((c) => `<option value="${escapeHtml(c)}" ${dialog.city === c ? "selected" : ""}>${escapeHtml(c)}</option>`)
+    .join("");
+  modal.innerHTML = `
+    <div class="manual-upload-dialog info-analysis-dialog" role="dialog" aria-modal="true" aria-label="信息价分析">
+      <header class="manual-upload-header">
+        <div>
+          <p class="eyebrow">Info-Price Analysis</p>
+          <h2>信息价分析</h2>
+        </div>
+        <button class="icon-button" type="button" title="关闭" data-action="close-info-analysis-modal" ${dialog.submitting ? "disabled" : ""}>
+          <i data-lucide="x"></i>
+        </button>
+      </header>
+      <div class="manual-upload-body">
+        <div class="manual-upload-grid">
+          <label>
+            分析模式
+            <select id="infoAnalysisMode" ${dialog.submitting ? "disabled" : ""}>
+              <option value="sameCity" ${dialog.mode === "sameCity" ? "selected" : ""}>同城（多期对比）</option>
+              <option value="crossCity" ${dialog.mode === "crossCity" ? "selected" : ""} disabled>跨城（V2 暂未开放）</option>
+            </select>
+          </label>
+          <label>
+            城市
+            <select id="infoAnalysisCity" ${dialog.submitting ? "disabled" : ""}>
+              ${cityOptions}
+            </select>
+          </label>
+          <label>
+            期数（逗号分隔，支持 2026-1 / 2026.3 / 26-2 / 2026年3月 / 2026年第3期 / 202603）
+            <input id="infoAnalysisPeriods" type="text" value="${escapeHtml((dialog.periods || []).join(","))}" placeholder="2026-2,2026年3月,202604" ${dialog.submitting ? "disabled" : ""} />
+          </label>
+          <label>
+            分析关键词（必填，逗号分隔，如 砖,混凝土,苗木）
+            <input id="infoAnalysisKeyword" type="text" value="${escapeHtml(dialog.keyword || "")}" placeholder="砖,混凝土,苗木" ${dialog.submitting ? "disabled" : ""} />
+          </label>
+          <label>
+            备注
+            <textarea id="infoAnalysisNote" rows="3" ${dialog.submitting ? "disabled" : ""}>${escapeHtml(dialog.note || "")}</textarea>
+          </label>
+        </div>
+        <div id="infoAnalysisError" class="form-error" aria-live="polite">${escapeHtml(dialog.error || "")}</div>
+        ${dialog.result ? `
+          <div class="info-analysis-result">
+            <div class="info-analysis-result-header">
+              <i data-lucide="check-circle"></i>
+              <span>分析完成 · ${dialog.result.files_analyzed} 文件 · ${dialog.result.duration_seconds}s</span>
+            </div>
+          </div>
+        ` : ""}
+      </div>
+      <footer class="manual-upload-actions">
+        <button class="secondary-button" type="button" data-action="close-info-analysis-modal" ${dialog.submitting ? "disabled" : ""}>取消</button>
+        <button class="primary-button" type="button" data-action="submit-info-analysis" ${dialog.submitting || !(dialog.periods && dialog.periods.length) || !(dialog.keyword || "").trim() ? "disabled" : ""}>
+          ${dialog.submitting ? '<i data-lucide="loader"></i> 运行中…' : '<i data-lucide="play"></i> 运行分析'}
+        </button>
+      </footer>
+    </div>
+  `;
+  if (typeof window.lucide !== "undefined" && window.lucide.createIcons) {
+    window.lucide.createIcons();
+  }
+  // 2026-08-18: input/change 实时同步 state（解决"运行分析无反应"）
+  // modal 重新 innerHTML 后旧 listener 没了，所以 render 时统一绑一次
+  const modeEl2 = $("#infoAnalysisMode");
+  const cityEl2 = $("#infoAnalysisCity");
+  const periodsEl2 = $("#infoAnalysisPeriods");
+  const keywordEl2 = $("#infoAnalysisKeyword");
+  const noteEl2 = $("#infoAnalysisNote");
+  if (modeEl2) modeEl2.addEventListener("change", () => {
+    state.infoAnalysis.mode = modeEl2.value;
+    renderInfoAnalysisModal();  // 重新渲染（更新 button.disabled）
+  });
+  if (cityEl2) cityEl2.addEventListener("change", () => {
+    state.infoAnalysis.city = cityEl2.value;
+  });
+  // 2026-08-18: periods / keyword input 不重渲染 modal（避免丢焦点）；单独更新 submit button.disabled
+  const updateSubmitDisabled = () => {
+    const submitBtn = document.querySelector('[data-action="submit-info-analysis"]');
+    const ok = !state.infoAnalysis.submitting
+      && state.infoAnalysis.periods && state.infoAnalysis.periods.length
+      && (state.infoAnalysis.keyword || "").trim();
+    if (submitBtn) submitBtn.disabled = !ok;
+  };
+  if (periodsEl2) periodsEl2.addEventListener("input", () => {
+    state.infoAnalysis.periods = (periodsEl2.value || "").split(/[\s,，]+/).map((s) => s.trim()).filter(Boolean);
+    updateSubmitDisabled();
+  });
+  if (keywordEl2) keywordEl2.addEventListener("input", () => {
+    state.infoAnalysis.keyword = keywordEl2.value || "";
+    updateSubmitDisabled();
+  });
+  if (noteEl2) noteEl2.addEventListener("input", () => {
+    state.infoAnalysis.note = noteEl2.value;
+  });
+}
+
+function openInfoAnalysisModal() {
+  if (!state.infoAnalysisReady) {
+    showToast("信息价分析后端能力尚未就绪，请稍候", "error");
+    return;
+  }
+  state.infoAnalysis.open = true;
+  state.infoAnalysis.error = "";
+  // 2026-08-18: modal 打开时不重置 periods（保留上次结果供编辑）
+  renderInfoAnalysisModal();
+}
+
+function closeInfoAnalysisModal() {
+  if (state.infoAnalysis.submitting) return;
+  state.infoAnalysis.open = false;
+  renderInfoAnalysisModal();
+}
+
+async function submitInfoAnalysis(event) {
+  if (event) event.preventDefault();
+  if (state.infoAnalysis.submitting) return;
+  state.infoAnalysis.error = "";
+  // 2026-08-18: 前端校验 periods + keyword 非空
+  if (!state.infoAnalysis.periods || state.infoAnalysis.periods.length === 0) {
+    state.infoAnalysis.error = "请填期数（如 2026-2，多个用逗号分隔）";
+    renderInfoAnalysisModal();
+    showToast("请填期数", "error");
+    return;
+  }
+  if (!(state.infoAnalysis.keyword || "").trim()) {
+    state.infoAnalysis.error = "请填分析关键词（如 砖,混凝土）";
+    renderInfoAnalysisModal();
+    showToast("请填分析关键词", "error");
+    return;
+  }
+  state.infoAnalysis.submitting = true;
+  const modeEl = $("#infoAnalysisMode");
+  const cityEl = $("#infoAnalysisCity");
+  const periodsEl = $("#infoAnalysisPeriods");
+  const keywordEl = $("#infoAnalysisKeyword");
+  const noteEl = $("#infoAnalysisNote");
+  if (modeEl) state.infoAnalysis.mode = modeEl.value || "sameCity";
+  if (cityEl) state.infoAnalysis.city = cityEl.value || "成都";
+  if (periodsEl) {
+    state.infoAnalysis.periods = (periodsEl.value || "").split(/[\s,，]+/).map((s) => s.trim()).filter(Boolean);
+  }
+  if (keywordEl) state.infoAnalysis.keyword = (keywordEl.value || "").trim();
+  if (noteEl) state.infoAnalysis.note = noteEl.value || "";
+  renderInfoAnalysisModal();
+  try {
+    // 2026-08-18: 调真实 /analyze 端点（DB 查 xlsx + 串行 5 phase + 返回 md 报告）
+    const response = await fetch("/api/data-lake/info-price/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        mode: state.infoAnalysis.mode || "sameCity",
+        city: Array.isArray(state.infoAnalysis.city)
+          ? state.infoAnalysis.city
+          : [state.infoAnalysis.city],
+        periods: state.infoAnalysis.periods,
+        keyword: state.infoAnalysis.keyword,
+        note: state.infoAnalysis.note || "",
+      }),
+    });
+    if (!response.ok) {
+      // 后端失败返回 4xx/5xx + detail（500 时 detail 是 dict）
+      let detail = `HTTP ${response.status}`;
+      try {
+        const errBody = await response.json();
+        if (errBody && errBody.detail) {
+          if (typeof errBody.detail === "string") detail = errBody.detail;
+          else if (errBody.detail.message) detail = errBody.detail.message;
+        }
+      } catch (_e) { /* ignore */ }
+      throw new Error(detail);
+    }
+    const body = await response.json();
+    state.infoAnalysis.result = body;
+    // 2026-08-19: 分析成功后刷新历史报告列表，让新生成的报告出现在 workspace tab
+    await probeInfoPriceReports();
+    renderInfoAnalysisView();
+  } catch (err) {
+    state.infoAnalysis.error = err && err.message ? err.message : "请求失败";
+  } finally {
+    state.infoAnalysis.submitting = false;
+    renderInfoAnalysisModal();
+    if (state.infoAnalysis.result && !state.infoAnalysis.error) {
+      showToast(`信息价分析完成（${state.infoAnalysis.result.files_analyzed} 文件，${state.infoAnalysis.result.duration_seconds}s）`, "success");
+    }
+  }
+}
+
+async function probeInfoPriceCapabilities() {
+  try {
+    const response = await fetch("/api/data-lake/info-price/capabilities", {
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      state.infoAnalysisReady = false;
+      return;
+    }
+    const body = await response.json();
+    state.infoAnalysisReady = !!(body && body.features && body.features.infoPriceAnalysis === "ready");
+    // 2026-08-18: capabilities ready 时一并拉报告列表，让主视图直接展示文件名（替代「查看报告」入口按钮）
+    if (state.infoAnalysisReady) await probeInfoPriceReports();
+  } catch (_e) {
+    state.infoAnalysisReady = false;
+  }
+}
+
+async function probeInfoPriceReports() {
+  try {
+    const response = await fetch("/api/data-lake/info-price/reports-list", {
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      state.infoAnalysis.reports = [];
+      return;
+    }
+    const body = await response.json();
+    state.infoAnalysis.reports = body.reports || [];
+  } catch (_e) {
+    state.infoAnalysis.reports = [];
+  }
+}
+
+async function openInfoAnalysisReportsView() {
+  state.infoAnalysis.reportsView = true;
+  state.infoAnalysis.previewHtml = "";
+  state.infoAnalysis.currentReport = null;
+  await probeInfoPriceReports();
+  renderInfoAnalysisView();
+}
+
+function backToInfoAnalysis() {
+  state.infoAnalysis.reportsView = false;
+  state.infoAnalysis.currentReport = null;
+  state.infoAnalysis.previewHtml = "";
+  renderInfoAnalysisView();
+}
+
+async function openInfoAnalysisReport(filename) {
+  // 2026-08-18: viewer 风格模态（黑色顶栏 + sheet tabs + xlsx + 退出预览，模仿档案 viewer）
+  state.infoAnalysis.viewerModal = { open: true, filename, sheetNames: [], previewHtml: "", activeSheet: "", loading: true };
+  renderInfoAnalysisView();
+  try {
+    const response = await fetch(`/api/data-lake/info-price/reports/${encodeURIComponent(filename)}/preview`, {
+      headers: { Accept: "text/html" },
+    });
+    if (!response.ok) {
+      state.infoAnalysis.viewerModal.previewHtml = `<div style="color:#dc2626;padding:24px;">加载失败：HTTP ${response.status}</div>`;
+      return;
+    }
+    const html = await response.text();
+    // 解析 sheet names：从 HTML 里提取 <section data-sheet="xxx"> 或 <h2>📋 xxx</h2>
+    const sheetNames = [];
+    const sectionRe = /<section\s+data-sheet="([^"]+)"/g;
+    let m;
+    while ((m = sectionRe.exec(html)) !== null) sheetNames.push(m[1]);
+    if (sheetNames.length === 0) {
+      const h2Re = /<h2>\s*📋\s*([^<]+)<\/h2>/g;
+      while ((m = h2Re.exec(html)) !== null) sheetNames.push(m[1].trim());
+    }
+    state.infoAnalysis.viewerModal.sheetNames = sheetNames;
+    state.infoAnalysis.viewerModal.activeSheet = sheetNames[0] || "";
+    state.infoAnalysis.viewerModal.previewHtml = html;
+  } catch (err) {
+    state.infoAnalysis.viewerModal.previewHtml = `<div style="color:#dc2626;padding:24px;">加载失败：${err.message}</div>`;
+  } finally {
+    state.infoAnalysis.viewerModal.loading = false;
+    renderInfoAnalysisView();
+  }
+}
+
+// 2026-08-18: 信息价分析报告删除（文件名旁的删除按钮）—— 二次确认 + DELETE 接口 + 刷新列表
+async function deleteInfoAnalysisReport(filename) {
+  if (!filename) return;
+  // 二次确认（防误删）
+  if (!window.confirm(`确定删除报告「${filename}」？\n\n此操作不可撤销（删除本地 xlsx 文件）。`)) return;
+  try {
+    const response = await fetch(`/api/data-lake/info-price/reports/${encodeURIComponent(filename)}`, {
+      method: "DELETE",
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+      showToast(`删除失败：${err.detail || response.status}`, "error");
+      return;
+    }
+    // 关闭可能打开的 viewer modal
+    if (state.infoAnalysis.viewerModal.open && state.infoAnalysis.viewerModal.filename === filename) {
+      state.infoAnalysis.viewerModal = { open: false, filename: null, sheetNames: [], previewHtml: "", activeSheet: "", loading: false };
+    }
+    showToast(`已删除 ${filename}`, "success");
+    await probeInfoPriceReports();
+    renderInfoAnalysisView();
+  } catch (err) {
+    showToast(`删除失败：${err.message}`, "error");
+  }
+}
+
+function closeInfoAnalysisViewerModal() {
+  state.infoAnalysis.viewerModal = { open: false, filename: null, sheetNames: [], previewHtml: "", activeSheet: "", loading: false };
+  // 2026-08-19 fix: 必须重新渲染才能让 modal 从 DOM 移除（之前只重 state，DOM 没刷）
+  renderInfoAnalysisViewerModal();
+}
+
+// 2026-08-19 fix: 触发浏览器下载（FileResponse 已设 attachment 头）；之前 main handleClick 调用但函数未定义
+function exportInfoAnalysisReport(filename) {
+  try {
+    const a = document.createElement("a");
+    a.href = "/api/data-lake/info-price/reports/" + encodeURIComponent(filename);
+    a.download = filename;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    showToast("已开始下载：" + filename, "success");
+  } catch (err) {
+    showToast("下载失败：" + err.message, "error");
+  }
+}
+
+// ── 2026-08-18: 信息价分析视图（最小接入）────────────────────────────────
+// 视图层：渲染 #infoAnalysisCard 内 status 区域
+function renderInfoAnalysisView() {
+  const status = $("#infoAnalysisStatus");
+  if (!status) return;
+  // 2026-08-18: 报告浏览视图模式（reportsView=true 时切换显示）
+  if (state.infoAnalysis.reportsView) {
+    renderInfoAnalysisReportsView(status);
+  } else {
+    renderInfoAnalysisMainView(status);
+  }
+  if (typeof window.lucide !== "undefined" && window.lucide.createIcons) {
+    window.lucide.createIcons();
+  }
+  renderInfoAnalysisModal();
+  renderInfoAnalysisViewerModal();
+}
+
+// 2026-08-18: 信息价 viewer 模态（黑色顶栏 + sheet tabs + xlsx 内容 + 退出预览，模仿档案 viewer 风格）
+function renderInfoAnalysisViewerModal() {
+  let modal = $("#infoAnalysisViewerModal");
+  const d = state.infoAnalysis.viewerModal;
+  if (!d.open) {
+    if (modal) { modal.hidden = true; modal.setAttribute("aria-hidden", "true"); modal.innerHTML = ""; }
+    return;
+  }
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "infoAnalysisViewerModal";
+    modal.className = "info-analysis-viewer-modal";
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("aria-label", "信息价分析报告预览");
+    document.body.appendChild(modal);
+  }
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+  const filename = d.filename || "";
+  const sheetTabs = d.sheetNames.map((name) => `
+    <button type="button" class="info-analysis-sheet-tab ${name === d.activeSheet ? "active" : ""}" data-sheet="${escapeHtml(name)}">${escapeHtml(name)}</button>
+  `).join("");
+  let body = "";
+  if (d.loading) {
+    body = '<div class="info-analysis-viewer-loading"><i data-lucide="loader"></i> 加载中…</div>';
+  } else if (d.previewHtml) {
+    body = `<div class="info-analysis-viewer-iframe-host" data-preview="${(d.previewHtml || "").replace(/"/g, "&quot;")}"></div>`;
+  } else {
+    body = '<div class="info-analysis-viewer-placeholder">无内容</div>';
+  }
+  modal.innerHTML = `
+    <header class="info-analysis-viewer-header">
+      <div class="info-analysis-viewer-title-block">
+        <span class="info-analysis-viewer-eyebrow">档案台 · 信息价分析</span>
+        <span class="info-analysis-viewer-filename">${escapeHtml(filename)}</span>
+      </div>
+      <nav class="info-analysis-viewer-sheet-tabs">
+        ${sheetTabs}
+      </nav>
+      <div class="info-analysis-viewer-actions">
+        <button type="button" class="info-analysis-viewer-action" title="导出 xlsx" data-action="export-info-analysis-report" data-filename="${escapeHtml(filename)}"><i data-lucide="download"></i> 导出</button>
+        <button type="button" class="info-analysis-viewer-close" title="退出预览" data-action="close-info-analysis-viewer-modal"><i data-lucide="x"></i> 退出预览</button>
+      </div>
+    </header>
+    <div class="info-analysis-viewer-body">
+      ${body}
+    </div>
+  `;
+  // sheet 切换逻辑：把 previewHtml 注入 iframe（每个 sheet 渲染为独立 section，data-sheet 匹配时显示）
+  if (!d.loading && d.previewHtml) {
+    const host = modal.querySelector(".info-analysis-viewer-iframe-host");
+    const iframe = document.createElement("iframe");
+    iframe.className = "info-analysis-viewer-iframe";
+    iframe.srcdoc = d.previewHtml;
+    iframe.onload = () => {
+      try {
+        const doc = iframe.contentDocument;
+        if (!doc) return;
+        const activeSheet = d.activeSheet;
+        const sections = doc.querySelectorAll("section[data-sheet]");
+        sections.forEach((sec) => {
+          sec.style.display = (sec.dataset.sheet === activeSheet) ? "" : "none";
+        });
+        // 切 tab 后高度自适应
+        iframe.style.height = (doc.documentElement.scrollHeight + 24) + "px";
+      } catch (_e) { /* cross-origin guard */ }
+    };
+    host.appendChild(iframe);
+  }
+  // 绑定 sheet tab 点击
+  modal.querySelectorAll(".info-analysis-sheet-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      state.infoAnalysis.viewerModal.activeSheet = tab.dataset.sheet;
+      renderInfoAnalysisViewerModal();
+    });
+  });
+  if (typeof window.lucide !== "undefined" && window.lucide.createIcons) {
+    window.lucide.createIcons();
+  }
+}
+
+function renderInfoAnalysisMainView(status) {
+  if (state.infoAnalysisReady) {
+    // 2026-08-18: 直接渲染报告文件名列表（替代「查看报告」入口按钮）
+    const d = state.infoAnalysis;
+    const reportItems = d.reports.map((r) => `
+      <li class="info-analysis-report-item">
+        <button type="button" class="info-analysis-report-link" data-action="open-info-analysis-report" data-filename="${escapeHtml(r.filename)}">
+          ${escapeHtml(r.filename)}
+        </button>
+        <button type="button" class="info-analysis-report-delete" title="删除报告" aria-label="删除报告" data-action="delete-info-analysis-report" data-filename="${escapeHtml(r.filename)}">
+          <i data-lucide="trash-2"></i>
+        </button>
+      </li>
+    `).join("") || `<li class="info-analysis-empty">暂无报告</li>`;
+    status.innerHTML = `
+      <div class="info-analysis-ready">
+        <i data-lucide="check-circle"></i>
+        <span>后端能力就绪，可打开分析工具。</span>
+      </div>
+      <div class="info-analysis-reports-section">
+        <h4>历史报告（${d.reports.length} 个）</h4>
+        <ul class="info-analysis-reports-list">${reportItems}</ul>
+      </div>
+    `;
+  } else {
+    status.innerHTML = `
+      <div class="info-analysis-pending">
+        <i data-lucide="loader"></i>
+        <span>正在探测后端能力…</span>
+      </div>
+    `;
+  }
+}
+
+function renderInfoAnalysisReportsView(status) {
+  const d = state.infoAnalysis;
+  const reportItems = d.reports.map((r) => {
+    const dt = new Date(r.mtime * 1000);
+    const ts = `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")} ${String(dt.getHours()).padStart(2,"0")}:${String(dt.getMinutes()).padStart(2,"0")}`;
+    const isXlsx = r.ext === "xlsx";
+    const active = d.currentReport === r.filename ? "active" : "";
+    return `
+      <li class="info-analysis-report-item">
+        <button type="button" class="info-analysis-report-link" data-action="open-info-analysis-report" data-filename="${escapeHtml(r.filename)}">
+          ${escapeHtml(r.filename)}
+        </button>
+        <button type="button" class="info-analysis-report-delete" title="删除报告" aria-label="删除报告" data-action="delete-info-analysis-report" data-filename="${escapeHtml(r.filename)}">
+          <i data-lucide="trash-2"></i>
+        </button>
+      </li>
+    `;
+  }).join("") || `<li class="info-analysis-empty">暂无报告</li>`;
+  status.innerHTML = `
+    <div class="info-analysis-reports-header">
+      <button class="secondary-button" type="button" data-action="back-to-info-analysis">
+        <i data-lucide="arrow-left"></i> 返回信息价分析
+      </button>
+      <h3>信息价分析报告（${d.reports.length} 个）</h3>
+    </div>
+    <ul class="info-analysis-reports-list">${reportItems}</ul>
+  `;
+}
+
+function renderInfoAnalysisModal() {
+  const modal = $("#infoPriceAnalysisModal");
+  if (!modal) return;
+  const dialog = state.infoAnalysis;
+  if (!dialog.open) {
+    modal.hidden = true;
+    modal.setAttribute("aria-hidden", "true");
+    modal.innerHTML = "";
+    return;
+  }
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+  const cityOptions = ["成都", "重庆", "北京", "广州", "武汉", "湖北"]
+    .map((c) => `<option value="${escapeHtml(c)}" ${dialog.city === c ? "selected" : ""}>${escapeHtml(c)}</option>`)
+    .join("");
+  modal.innerHTML = `
+    <div class="manual-upload-dialog info-analysis-dialog" role="dialog" aria-modal="true" aria-label="信息价分析">
+      <header class="manual-upload-header">
+        <div>
+          <p class="eyebrow">Info-Price Analysis</p>
+          <h2>信息价分析</h2>
+        </div>
+        <button class="icon-button" type="button" title="关闭" data-action="close-info-analysis-modal" ${dialog.submitting ? "disabled" : ""}>
+          <i data-lucide="x"></i>
+        </button>
+      </header>
+      <div class="manual-upload-body">
+        <div class="manual-upload-grid">
+          <label>
+            分析模式
+            <select id="infoAnalysisMode" ${dialog.submitting ? "disabled" : ""}>
+              <option value="sameCity" ${dialog.mode === "sameCity" ? "selected" : ""}>同城（多期对比）</option>
+              <option value="crossCity" ${dialog.mode === "crossCity" ? "selected" : ""} disabled>跨城（V2 暂未开放）</option>
+            </select>
+          </label>
+          <label>
+            城市
+            <select id="infoAnalysisCity" ${dialog.submitting ? "disabled" : ""}>
+              ${cityOptions}
+            </select>
+          </label>
+          <label>
+            期数（逗号分隔，支持 2026-1 / 2026.3 / 26-2 / 2026年3月 / 2026年第3期 / 202603）
+            <input id="infoAnalysisPeriods" type="text" value="${escapeHtml((dialog.periods || []).join(","))}" placeholder="2026-2,2026年3月,202604" ${dialog.submitting ? "disabled" : ""} />
+          </label>
+          <label>
+            分析关键词（必填，逗号分隔，如 砖,混凝土,苗木）
+            <input id="infoAnalysisKeyword" type="text" value="${escapeHtml(dialog.keyword || "")}" placeholder="砖,混凝土,苗木" ${dialog.submitting ? "disabled" : ""} />
+          </label>
+          <label>
+            备注
+            <textarea id="infoAnalysisNote" rows="3" ${dialog.submitting ? "disabled" : ""}>${escapeHtml(dialog.note || "")}</textarea>
+          </label>
+        </div>
+        <div id="infoAnalysisError" class="form-error" aria-live="polite">${escapeHtml(dialog.error || "")}</div>
+        ${dialog.result ? `
+          <div class="info-analysis-result">
+            <div class="info-analysis-result-header">
+              <i data-lucide="check-circle"></i>
+              <span>分析完成 · ${dialog.result.files_analyzed} 文件 · ${dialog.result.duration_seconds}s</span>
+            </div>
+          </div>
+        ` : ""}
+      </div>
+      <footer class="manual-upload-actions">
+        <button class="secondary-button" type="button" data-action="close-info-analysis-modal" ${dialog.submitting ? "disabled" : ""}>取消</button>
+        <button class="primary-button" type="button" data-action="submit-info-analysis" ${dialog.submitting || !(dialog.periods && dialog.periods.length) || !(dialog.keyword || "").trim() ? "disabled" : ""}>
+          ${dialog.submitting ? '<i data-lucide="loader"></i> 运行中…' : '<i data-lucide="play"></i> 运行分析'}
+        </button>
+      </footer>
+    </div>
+  `;
+  if (typeof window.lucide !== "undefined" && window.lucide.createIcons) {
+    window.lucide.createIcons();
+  }
+  // 2026-08-18: input/change 实时同步 state（解决"运行分析无反应"）
+  // modal 重新 innerHTML 后旧 listener 没了，所以 render 时统一绑一次
+  const modeEl2 = $("#infoAnalysisMode");
+  const cityEl2 = $("#infoAnalysisCity");
+  const periodsEl2 = $("#infoAnalysisPeriods");
+  const keywordEl2 = $("#infoAnalysisKeyword");
+  const noteEl2 = $("#infoAnalysisNote");
+  if (modeEl2) modeEl2.addEventListener("change", () => {
+    state.infoAnalysis.mode = modeEl2.value;
+    renderInfoAnalysisModal();  // 重新渲染（更新 button.disabled）
+  });
+  if (cityEl2) cityEl2.addEventListener("change", () => {
+    state.infoAnalysis.city = cityEl2.value;
+  });
+  // 2026-08-18: periods / keyword input 不重渲染 modal（避免丢焦点）；单独更新 submit button.disabled
+  const updateSubmitDisabled = () => {
+    const submitBtn = document.querySelector('[data-action="submit-info-analysis"]');
+    const ok = !state.infoAnalysis.submitting
+      && state.infoAnalysis.periods && state.infoAnalysis.periods.length
+      && (state.infoAnalysis.keyword || "").trim();
+    if (submitBtn) submitBtn.disabled = !ok;
+  };
+  if (periodsEl2) periodsEl2.addEventListener("input", () => {
+    state.infoAnalysis.periods = (periodsEl2.value || "").split(/[\s,，]+/).map((s) => s.trim()).filter(Boolean);
+    updateSubmitDisabled();
+  });
+  if (keywordEl2) keywordEl2.addEventListener("input", () => {
+    state.infoAnalysis.keyword = keywordEl2.value || "";
+    updateSubmitDisabled();
+  });
+  if (noteEl2) noteEl2.addEventListener("input", () => {
+    state.infoAnalysis.note = noteEl2.value;
+  });
+}
+
+function openInfoAnalysisModal() {
+  if (!state.infoAnalysisReady) {
+    showToast("信息价分析后端能力尚未就绪，请稍候", "error");
+    return;
+  }
+  state.infoAnalysis.open = true;
+  state.infoAnalysis.error = "";
+  // 2026-08-18: modal 打开时不重置 periods（保留上次结果供编辑）
+  renderInfoAnalysisModal();
+}
+
+function closeInfoAnalysisModal() {
+  if (state.infoAnalysis.submitting) return;
+  state.infoAnalysis.open = false;
+  renderInfoAnalysisModal();
+}
+
+async function submitInfoAnalysis(event) {
+  if (event) event.preventDefault();
+  if (state.infoAnalysis.submitting) return;
+  state.infoAnalysis.error = "";
+  // 2026-08-18: 前端校验 periods + keyword 非空
+  if (!state.infoAnalysis.periods || state.infoAnalysis.periods.length === 0) {
+    state.infoAnalysis.error = "请填期数（如 2026-2，多个用逗号分隔）";
+    renderInfoAnalysisModal();
+    showToast("请填期数", "error");
+    return;
+  }
+  if (!(state.infoAnalysis.keyword || "").trim()) {
+    state.infoAnalysis.error = "请填分析关键词（如 砖,混凝土）";
+    renderInfoAnalysisModal();
+    showToast("请填分析关键词", "error");
+    return;
+  }
+  state.infoAnalysis.submitting = true;
+  const modeEl = $("#infoAnalysisMode");
+  const cityEl = $("#infoAnalysisCity");
+  const periodsEl = $("#infoAnalysisPeriods");
+  const keywordEl = $("#infoAnalysisKeyword");
+  const noteEl = $("#infoAnalysisNote");
+  if (modeEl) state.infoAnalysis.mode = modeEl.value || "sameCity";
+  if (cityEl) state.infoAnalysis.city = cityEl.value || "成都";
+  if (periodsEl) {
+    state.infoAnalysis.periods = (periodsEl.value || "").split(/[\s,，]+/).map((s) => s.trim()).filter(Boolean);
+  }
+  if (keywordEl) state.infoAnalysis.keyword = (keywordEl.value || "").trim();
+  if (noteEl) state.infoAnalysis.note = noteEl.value || "";
+  renderInfoAnalysisModal();
+  try {
+    // 2026-08-18: 调真实 /analyze 端点（DB 查 xlsx + 串行 5 phase + 返回 md 报告）
+    const response = await fetch("/api/data-lake/info-price/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        mode: state.infoAnalysis.mode || "sameCity",
+        city: Array.isArray(state.infoAnalysis.city)
+          ? state.infoAnalysis.city
+          : [state.infoAnalysis.city],
+        periods: state.infoAnalysis.periods,
+        keyword: state.infoAnalysis.keyword,
+        note: state.infoAnalysis.note || "",
+      }),
+    });
+    if (!response.ok) {
+      // 后端失败返回 4xx/5xx + detail（500 时 detail 是 dict）
+      let detail = `HTTP ${response.status}`;
+      try {
+        const errBody = await response.json();
+        if (errBody && errBody.detail) {
+          if (typeof errBody.detail === "string") detail = errBody.detail;
+          else if (errBody.detail.message) detail = errBody.detail.message;
+        }
+      } catch (_e) { /* ignore */ }
+      throw new Error(detail);
+    }
+    const body = await response.json();
+    state.infoAnalysis.result = body;
+    // 2026-08-19: 分析成功后刷新历史报告列表，让新生成的报告出现在 workspace tab
+    await probeInfoPriceReports();
+    renderInfoAnalysisView();
+  } catch (err) {
+    state.infoAnalysis.error = err && err.message ? err.message : "请求失败";
+  } finally {
+    state.infoAnalysis.submitting = false;
+    renderInfoAnalysisModal();
+    if (state.infoAnalysis.result && !state.infoAnalysis.error) {
+      showToast(`信息价分析完成（${state.infoAnalysis.result.files_analyzed} 文件，${state.infoAnalysis.result.duration_seconds}s）`, "success");
+    }
+  }
+}
+
+async function probeInfoPriceCapabilities() {
+  try {
+    const response = await fetch("/api/data-lake/info-price/capabilities", {
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      state.infoAnalysisReady = false;
+      return;
+    }
+    const body = await response.json();
+    state.infoAnalysisReady = !!(body && body.features && body.features.infoPriceAnalysis === "ready");
+    // 2026-08-18: capabilities ready 时一并拉报告列表，让主视图直接展示文件名（替代「查看报告」入口按钮）
+    if (state.infoAnalysisReady) await probeInfoPriceReports();
+  } catch (_e) {
+    state.infoAnalysisReady = false;
+  }
+}
+
+async function probeInfoPriceReports() {
+  try {
+    const response = await fetch("/api/data-lake/info-price/reports-list", {
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      state.infoAnalysis.reports = [];
+      return;
+    }
+    const body = await response.json();
+    state.infoAnalysis.reports = body.reports || [];
+  } catch (_e) {
+    state.infoAnalysis.reports = [];
+  }
+}
+
+async function openInfoAnalysisReportsView() {
+  state.infoAnalysis.reportsView = true;
+  state.infoAnalysis.previewHtml = "";
+  state.infoAnalysis.currentReport = null;
+  await probeInfoPriceReports();
+  renderInfoAnalysisView();
+}
+
+function backToInfoAnalysis() {
+  state.infoAnalysis.reportsView = false;
+  state.infoAnalysis.currentReport = null;
+  state.infoAnalysis.previewHtml = "";
+  renderInfoAnalysisView();
+}
+
+async function openInfoAnalysisReport(filename) {
+  // 2026-08-18: viewer 风格模态（黑色顶栏 + sheet tabs + xlsx + 退出预览，模仿档案 viewer）
+  state.infoAnalysis.viewerModal = { open: true, filename, sheetNames: [], previewHtml: "", activeSheet: "", loading: true };
+  renderInfoAnalysisView();
+  try {
+    const response = await fetch(`/api/data-lake/info-price/reports/${encodeURIComponent(filename)}/preview`, {
+      headers: { Accept: "text/html" },
+    });
+    if (!response.ok) {
+      state.infoAnalysis.viewerModal.previewHtml = `<div style="color:#dc2626;padding:24px;">加载失败：HTTP ${response.status}</div>`;
+      return;
+    }
+    const html = await response.text();
+    // 解析 sheet names：从 HTML 里提取 <section data-sheet="xxx"> 或 <h2>📋 xxx</h2>
+    const sheetNames = [];
+    const sectionRe = /<section\s+data-sheet="([^"]+)"/g;
+    let m;
+    while ((m = sectionRe.exec(html)) !== null) sheetNames.push(m[1]);
+    if (sheetNames.length === 0) {
+      const h2Re = /<h2>\s*📋\s*([^<]+)<\/h2>/g;
+      while ((m = h2Re.exec(html)) !== null) sheetNames.push(m[1].trim());
+    }
+    state.infoAnalysis.viewerModal.sheetNames = sheetNames;
+    state.infoAnalysis.viewerModal.activeSheet = sheetNames[0] || "";
+    state.infoAnalysis.viewerModal.previewHtml = html;
+  } catch (err) {
+    state.infoAnalysis.viewerModal.previewHtml = `<div style="color:#dc2626;padding:24px;">加载失败：${err.message}</div>`;
+  } finally {
+    state.infoAnalysis.viewerModal.loading = false;
+    renderInfoAnalysisView();
+  }
+}
+
+// 2026-08-18: 信息价分析报告删除（文件名旁的删除按钮）—— 二次确认 + DELETE 接口 + 刷新列表
+async function deleteInfoAnalysisReport(filename) {
+  if (!filename) return;
+  // 二次确认（防误删）
+  if (!window.confirm(`确定删除报告「${filename}」？\n\n此操作不可撤销（删除本地 xlsx 文件）。`)) return;
+  try {
+    const response = await fetch(`/api/data-lake/info-price/reports/${encodeURIComponent(filename)}`, {
+      method: "DELETE",
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+      showToast(`删除失败：${err.detail || response.status}`, "error");
+      return;
+    }
+    // 关闭可能打开的 viewer modal
+    if (state.infoAnalysis.viewerModal.open && state.infoAnalysis.viewerModal.filename === filename) {
+      state.infoAnalysis.viewerModal = { open: false, filename: null, sheetNames: [], previewHtml: "", activeSheet: "", loading: false };
+    }
+    showToast(`已删除 ${filename}`, "success");
+    await probeInfoPriceReports();
+    renderInfoAnalysisView();
+  } catch (err) {
+    showToast(`删除失败：${err.message}`, "error");
+  }
+}
+
+function closeInfoAnalysisViewerModal() {
+  state.infoAnalysis.viewerModal = { open: false, filename: null, sheetNames: [], previewHtml: "", activeSheet: "", loading: false };
+  // 2026-08-19 fix: 必须重新渲染才能让 modal 从 DOM 移除（之前只重 state，DOM 没刷）
+  renderInfoAnalysisViewerModal();
+}
+
+// 2026-08-19 fix: 触发浏览器下载（FileResponse 已设 attachment 头）；之前 main handleClick 调用但函数未定义
+function exportInfoAnalysisReport(filename) {
+  try {
+    const a = document.createElement("a");
+    a.href = "/api/data-lake/info-price/reports/" + encodeURIComponent(filename);
+    a.download = filename;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    showToast("已开始下载：" + filename, "success");
+  } catch (err) {
+    showToast("下载失败：" + err.message, "error");
+  }
 }
 
 function openViewer() {
@@ -4775,8 +5804,8 @@ function setDomain(domain) {
 }
 
 function setViewMode(mode) {
-  if (!["archives", "coverage"].includes(mode)) return;
-  if (mode === "coverage" && state.domain !== "cost_info") return;
+  if (!["archives", "coverage", "info-analysis"].includes(mode)) return;
+  if ((mode === "coverage" || mode === "info-analysis") && state.domain !== "cost_info") return;
   if (state.viewMode === mode) return;
   if (mode === "coverage") {
     state.archiveLoadToken += 1;
@@ -4956,6 +5985,18 @@ function handleClick(event) {
   }
   if (action.dataset.action === "close-upload") closeManualUploadDialog();
   if (action.dataset.action === "submit-upload") handleManualUploadSubmit(event);
+  // 2026-08-19 fix: info-analysis 视图 action 路由（main 仓 main handleClick 原缺）
+  if (action.dataset.action === "open-info-analysis-modal") openInfoAnalysisModal();
+  if (action.dataset.action === "close-info-analysis-modal") closeInfoAnalysisModal();
+  if (action.dataset.action === "submit-info-analysis") submitInfoAnalysis(event);
+  if (action.dataset.action === "back-to-info-analysis") {
+    state.infoAnalysis.reportsView = false;
+    renderInfoAnalysisView();
+  }
+  if (action.dataset.action === "open-info-analysis-report") openInfoAnalysisReport(action.dataset.filename);
+  if (action.dataset.action === "delete-info-analysis-report") deleteInfoAnalysisReport(action.dataset.filename);
+  if (action.dataset.action === "export-info-analysis-report") exportInfoAnalysisReport(action.dataset.filename);
+  if (action.dataset.action === "close-info-analysis-viewer-modal") closeInfoAnalysisViewerModal();
 }
 
 function refreshIcons() {
@@ -5316,6 +6357,25 @@ const state = {
     submitting: false,
     error: "",
   },
+  // 2026-08-18: 信息价分析（接入 D 盘 信息价分析/ v3.3.2 → F 盘 info_price_analysis/）
+  infoAnalysis: {
+    open: false,
+    mode: "sameCity",
+    city: "成都",
+    periods: [],
+    note: "",
+    submitting: false,
+    error: "",
+    result: null,
+    reportsView: false,       // 2026-08-18: 当前是否在"报告浏览视图"
+    reports: [],              // 报告文件列表 [{filename, size_bytes, mtime, ext}]
+    currentReport: null,      // 当前预览的报告 filename
+    previewHtml: "",          // 当前预览的 HTML 内容
+    previewLoading: false,    // 预览加载中
+    keyword: "",              // 2026-08-18: 分析关键词（必填，对应 phase4 --filter）
+    viewerModal: { open: false, filename: null, sheetNames: [], previewHtml: "", activeSheet: "", loading: false },  // 2026-08-18: viewer-style modal（含 sheet tabs）
+  },
+  infoAnalysisReady: false,  // GET /api/data-lake/info-price/capabilities 探测结果
   parseDialog: {
     open: false,
     archive_id: "",
@@ -8167,6 +9227,14 @@ async function loadCurrentView() {
     if (state.viewMode === "coverage") renderAll();
     return coverage;
   }
+  // 2026-08-18: info-analysis 视图按域隔离探测 capabilities（不调 quota-api.js）
+  if (state.viewMode === "info-analysis") {
+    const probe = probeInfoPriceCapabilities();
+    await sourceDimensions;
+    await probe;
+    if (state.viewMode === "info-analysis") renderAll();
+    return;
+  }
   const archives = loadArchives();
   await sourceDimensions;
   return archives;
@@ -9062,13 +10130,14 @@ function renderDomain() {
   }
   if (state.domain !== "cost_info" && state.viewMode === "coverage") state.viewMode = "archives";
   const config = activeConfig();
-  $("#pageTitle").textContent = state.viewMode === "coverage" ? "信息价覆盖矩阵" : config.title;
+  $("#pageTitle").textContent = state.viewMode === "coverage" ? "信息价覆盖矩阵" : state.viewMode === "info-analysis" ? "信息价分析" : config.title;
   $("#globalSearch").placeholder = config.searchPlaceholder;
   $("#domainPill").textContent = `domain_type: ${state.domain}`;
   $$(".rail-button[data-domain]").forEach((button) => button.classList.toggle("active", button.dataset.domain === state.domain));
   $$(".workspace-tab").forEach((button) => {
     button.classList.toggle("active", button.dataset.viewMode === state.viewMode);
-    button.disabled = button.dataset.viewMode === "coverage" && state.domain !== "cost_info";
+    // info-analysis tab 仅在 cost_info 域可用；coverage 同理
+    button.disabled = (button.dataset.viewMode === "coverage" || button.dataset.viewMode === "info-analysis") && state.domain !== "cost_info";
   });
   renderCostInfoOverview();
   renderFilters();
@@ -9190,8 +10259,20 @@ function renderTotalBadge() {
 }
 
 function renderViewShell() {
-  $("#archiveTableCard").hidden = state.viewMode === "coverage";
-  $("#coverageMatrixCard").hidden = state.viewMode !== "coverage";
+  // 2026-08-19 fix: archives / coverage / info-analysis 三视图互斥显示；
+  //   archives 才显示档案列表相关的 overview/filter/audit/result-bar/storage-audit。
+  const isArchives = state.viewMode === "archives";
+  const isCoverage = state.viewMode === "coverage";
+  const isInfoAnalysis = state.viewMode === "info-analysis";
+  $("#archiveTableCard").hidden = !isArchives;
+  $("#coverageMatrixCard").hidden = !isCoverage;
+  const infoCard = $("#infoAnalysisCard");
+  if (infoCard) infoCard.hidden = !isInfoAnalysis;
+  $("#costInfoOverview").hidden = !isArchives;
+  $("#filterPanel").hidden = !isArchives;
+  $("#storageAuditBar").hidden = !isArchives;
+  const resultBar = document.querySelector(".result-bar");
+  if (resultBar) resultBar.hidden = !isArchives;
 }
 
 function formatAuditPercent(value) {
@@ -10043,6 +11124,7 @@ function renderAll() {
   renderViewShell();
   renderStorageAudit();
   if (state.viewMode === "coverage") renderCoverageMatrix();
+  else if (state.viewMode === "info-analysis") renderInfoAnalysisView();
   else renderRows();
   renderCoverageBackfillModal();
 }
@@ -10630,8 +11712,8 @@ function setDomain(domain) {
 }
 
 function setViewMode(mode) {
-  if (!["archives", "coverage"].includes(mode)) return;
-  if (mode === "coverage" && state.domain !== "cost_info") return;
+  if (!["archives", "coverage", "info-analysis"].includes(mode)) return;
+  if ((mode === "coverage" || mode === "info-analysis") && state.domain !== "cost_info") return;
   if (state.viewMode === mode) return;
   if (mode === "coverage") {
     state.archiveLoadToken += 1;
@@ -10824,6 +11906,18 @@ function handleClick(event) {
   }
   if (action.dataset.action === "close-upload") closeManualUploadDialog();
   if (action.dataset.action === "submit-upload") handleManualUploadSubmit(event);
+  // 2026-08-19 fix: info-analysis 视图 action 路由（main 仓 main handleClick 原缺）
+  if (action.dataset.action === "open-info-analysis-modal") openInfoAnalysisModal();
+  if (action.dataset.action === "close-info-analysis-modal") closeInfoAnalysisModal();
+  if (action.dataset.action === "submit-info-analysis") submitInfoAnalysis(event);
+  if (action.dataset.action === "back-to-info-analysis") {
+    state.infoAnalysis.reportsView = false;
+    renderInfoAnalysisView();
+  }
+  if (action.dataset.action === "open-info-analysis-report") openInfoAnalysisReport(action.dataset.filename);
+  if (action.dataset.action === "delete-info-analysis-report") deleteInfoAnalysisReport(action.dataset.filename);
+  if (action.dataset.action === "export-info-analysis-report") exportInfoAnalysisReport(action.dataset.filename);
+  if (action.dataset.action === "close-info-analysis-viewer-modal") closeInfoAnalysisViewerModal();
 }
 
 function refreshIcons() {
