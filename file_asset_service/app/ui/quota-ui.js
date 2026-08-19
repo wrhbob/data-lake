@@ -1263,7 +1263,7 @@
               <small>定额「名称」必须包含该词才会被命中。</small>
             </label>
             <label class="quota-compare-field">
-              <span>补充词（选填，空格分隔，与主词取交集）</span>
+              <span>补充词（选填）</span>
               <input id="compareAnyTerms" type="text" placeholder="例如：踢脚线 踢脚板" autocomplete="off" />
               <small>定额名同时含主词与任一补充词才命中；补充词起到「细化主类」的作用（例：挖 + 土/淤泥/沟槽 = 人工挖土方类）。</small>
             </label>
