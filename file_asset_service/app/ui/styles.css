@@ -5847,7 +5847,9 @@ a.rail-button {
    再之前 #b45309 (amber-700) 在白底小圆点读起来偏橙红 —— 都不够黄。
    失败用 #b91c1c 红，区分清楚。 */
 .quota-tooltip-archive-dot[data-variant="review"]   { background: #facc15; }
-.quota-tooltip-archive-dot[data-variant="done"]     { background: #15803d; }
+/* done 用 #4ade80 (green-400) 淡绿色，原 #15803d (green-700) 太深；
+   用户要求淡绿，但保留可识别的「成功绿」信号。 */
+.quota-tooltip-archive-dot[data-variant="done"]     { background: #4ade80; }
 .quota-tooltip-archive-dot[data-variant="failed"]   { background: #b91c1c; }
 .quota-tooltip-archive-name {
   flex: 1 1 auto;
