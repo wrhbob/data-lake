@@ -556,6 +556,7 @@
           </span>
         </div>
         <div class="quota-header-actions">
+          ${debug}
           <label class="search-box">
             <i data-lucide="search"></i>
             <input id="quotaSearch" type="search" placeholder="搜索资料体系、分册、标准/定额编号" autocomplete="off" />
@@ -569,7 +570,6 @@
             </button>
             ${state.addMenuOpen ? renderAddMenu() : ""}
           </div>
-          ${debug}
         </div>
       </header>
       ${renderStatsBar()}
