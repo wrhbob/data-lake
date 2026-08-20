@@ -2457,22 +2457,15 @@
   }
 
   function renderCoverageTooltipInner(cellData) {
-    // cellData: { year, row_name, archive_count, archive_titles, parse_statuses }
+    // cellData: { year, row_name, archive_count, archive_titles, archive_statuses, parse_statuses }
     //   v0.9.4: row_name 替代 province_name (axis-agnostic; "湖北" / "煤炭工程" / "未知")
+    //   v0.9.5: archive_statuses = [{title, parse_status}, ...]，与 archive_titles 一一对应，按 title 排序
     const titles = (cellData && cellData.archive_titles) || [];
+    const archiveEntries = (cellData && cellData.archive_statuses) || [];
     const statuses = (cellData && cellData.parse_statuses) || {};
     const rowName = (cellData && (cellData.row_name != null ? cellData.row_name : cellData.province_name)) || "未知";
-    const titleHtml = titles.length
-      ? titles.map((t) => `<li>${escapeHtml(t)}</li>`).join("")
-      : `<li class="quota-coverage-tooltip-empty">无档案标题</li>`;
 
-    // 2026-08-18: parse_status 分布按 5 态变体聚合，与档案列表徽章对齐。
-    //   后端 parse_status 原始 key 多达 11 种 (pending/parsing/parsed/candidate_ready/
-    //   qa_passed/usable/failed_user/failed_permanent/skipped_no_parser/cancelled/unknown)，
-    //   档案列表徽章只用 5 态（pending/parsing/review/done/failed）。
-    //   覆盖矩阵之前直接渲染原始 key，用户看到「未知 / 已取消」这些档案列表根本不暴露的
-    //   状态名 → 困惑。修复：每条原始 key 先走 PARSE_STATUS_VARIANT 落到 5 态之一，再按
-    //   5 态聚合计数 + 显示档案列表同款中文文案。
+    // 2026-08-18: parse_status 分布按 5 态变体聚合，与档案列表徽章对齐（同时供小圆点 + 底部汇总共用）。
     const variantLabelMap = Object.freeze({
       pending: "未解析",
       parsing: "解析中",
@@ -2480,6 +2473,25 @@
       done:    "已完成",
       failed:  "解析失败",
     });
+
+    // 2026-08-18 (v0.9.5): 每条档案前的状态小圆点 — 把 archive_statuses 按 title 建索引，
+    //   每条 title 旁边渲染一个 data-variant 颜色点（不带文字，色图例看底部汇总）。
+    //   没有 archive_statuses 的旧 cell（防御性兜底）就只渲染 title 不带点。
+    const statusByTitle = new Map();
+    archiveEntries.forEach((entry) => {
+      if (entry && entry.title) statusByTitle.set(entry.title, entry.parse_status || "unknown");
+    });
+    const titleHtml = titles.length
+      ? titles.map((t) => {
+          const rawStatus = statusByTitle.has(t) ? statusByTitle.get(t) : null;
+          const variant = rawStatus ? (PARSE_STATUS_VARIANT[rawStatus] || "pending") : null;
+          const dot = variant
+            ? `<span class="quota-tooltip-archive-dot" data-variant="${escapeHtml(variant)}" title="${escapeHtml(variantLabelMap[variant] || variant)}" aria-label="${escapeHtml(variantLabelMap[variant] || variant)}"></span>`
+            : "";
+          return `<li>${dot}<span class="quota-tooltip-archive-name">${escapeHtml(t)}</span></li>`;
+        }).join("")
+      : `<li class="quota-coverage-tooltip-empty">无档案标题</li>`;
+
     const variantCounts = { pending: 0, parsing: 0, review: 0, done: 0, failed: 0 };
     Object.keys(statuses).forEach((rawKey) => {
       const variant = PARSE_STATUS_VARIANT[rawKey] || "pending";

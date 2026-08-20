@@ -87,6 +87,9 @@ class QuotaCoverageCell:
     archive_count: int
     archive_ids: list[str]
     archive_titles: list[str]
+    # 2026-08-18 新增：每条档案的 (title, parse_status) 平行数组，与 archive_titles 一一对应（按 title 排序），
+    # 给覆盖矩阵 tooltip 每条 list item 前的彩色小圆点用。结构: [{"title": ..., "parse_status": "qa_passed"}, ...]
+    archive_statuses: list[dict[str, str]] = field(default_factory=list)
     parse_statuses: dict[str, int] = field(default_factory=dict)  # {status: count}
 
     def to_dict(self) -> dict[str, object]:
@@ -97,6 +100,7 @@ class QuotaCoverageCell:
             "archive_count": self.archive_count,
             "archive_ids": self.archive_ids,
             "archive_titles": self.archive_titles,
+            "archive_statuses": self.archive_statuses,
             "parse_statuses": self.parse_statuses,
         }
 
@@ -289,7 +293,16 @@ def build_quota_coverage_matrix(
         if not items:
             continue
         archive_ids = sorted(a.archive_id for a, _ in items)
-        titles = sorted(a.title for a, _ in items if a.title)
+        # 2026-08-18：按 (title, parse_status) 一起排序，构造 archive_statuses 平行数组
+        #   —— 与 archive_titles 共享同一 title 排序键，前端可 zip 出每条档案的状态小圆点。
+        title_status_pairs = sorted(
+            [(a.title or "", a.parse_status or "unknown") for a, _ in items],
+            key=lambda pair: pair[0],
+        )
+        titles = [t for t, _ in title_status_pairs if t]
+        archive_statuses = [
+            {"title": t, "parse_status": s} for t, s in title_status_pairs if t
+        ]
         statuses: dict[str, int] = {}
         for a, _ in items:
             key = a.parse_status or "unknown"
@@ -308,6 +321,7 @@ def build_quota_coverage_matrix(
             archive_count=len(items),
             archive_ids=archive_ids,
             archive_titles=titles,
+            archive_statuses=archive_statuses,
             parse_statuses=statuses,
         )
         cells[f"{year_label}|{row_code}"] = cell.to_dict()

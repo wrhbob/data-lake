@@ -5825,6 +5825,34 @@ a.rail-button {
   font-weight: 600;
 }
 
+/* 2026-08-18 (v0.9.5): tooltip 每条档案前的 5 态状态小圆点。
+   - 不带文字（用户选 minimal：只用颜色区分；颜色含义看底部汇总 pill 即可）
+   - 8px 直径 + 圆角 50% + 5 态颜色（与 .status-badge--{variant} 同色板） */
+.quota-coverage-tooltip-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.quota-tooltip-archive-dot {
+  flex: 0 0 auto;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.quota-tooltip-archive-dot[data-variant="pending"]  { background: #475569; }
+.quota-tooltip-archive-dot[data-variant="parsing"]  { background: #1d4ed8; }
+.quota-tooltip-archive-dot[data-variant="review"]   { background: #b45309; }
+.quota-tooltip-archive-dot[data-variant="done"]     { background: #15803d; }
+.quota-tooltip-archive-dot[data-variant="failed"]   { background: #b91c1c; }
+.quota-tooltip-archive-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ── 2026-08-18: 信息价分析结果区（提示 + 跳转按钮） ──────────── */
 .info-analysis-result {
   margin-top: 12px;
