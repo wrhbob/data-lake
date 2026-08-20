@@ -2133,7 +2133,8 @@
   // 这层防御独立于 currentArchiveFilters()，无论上游怎么传都安全。
   const _ARCHIVE_FILTER_SCHEMA = Object.freeze({
     search: { kind: "string" },
-    q: { kind: "string" },                 // 顶部搜索框：与 quota_api.py:300 FastAPI Query 参数名对齐
+    q: { kind: "string" },                 // 顶部搜索框：内部 state 用，URL 出口走 search_all
+    search_all: { kind: "string-list" },   // 2026-08-20: AND-tokenized（四川 园林 → [四川, 园林]）
     primary: { kind: "string" },
     jurisdiction_code: { kind: "string" },
     industry_sector_code: { kind: "string" },
@@ -2150,6 +2151,21 @@
       let v = filters[k];
       // 哨兵 + 空值一律丢弃（"all" / undefined / null / 空串）
       if (v === undefined || v === null) return;
+
+      // 2026-08-20: string-list 类型（search_all）—— 逐元素 trim + 哨兵丢弃
+      if (spec.kind === "string-list") {
+        if (!Array.isArray(v)) return;
+        const arr = [];
+        v.forEach((item) => {
+          if (typeof item !== "string") return;
+          const trimmed = item.trim();
+          if (trimmed === "" || trimmed === "all") return;
+          arr.push(trimmed);
+        });
+        if (arr.length > 0) out[k] = arr;
+        return;
+      }
+
       if (typeof v === "string") {
         const trimmed = v.trim();
         if (trimmed === "" || trimmed === "all") return;
@@ -2175,7 +2191,15 @@
     const params = new URLSearchParams();
     params.set("domain_type", "quota");
     Object.keys(safe).forEach((k) => {
-      params.set(k, String(safe[k]));
+      const value = safe[k];
+      // 2026-08-20: search_all 是 string-list，URL 上要重复发 ?search_all=t1&search_all=t2
+      // —— set() 会拼成 "t1,t2" 单参，后端 FastAPI 把它当成一个 token 字符串，
+      // 不是预期的 list[str]。append() 才会发出多个同名参数。
+      if (Array.isArray(value)) {
+        value.forEach((item) => params.append(k, String(item)));
+      } else {
+        params.set(k, String(value));
+      }
     });
     params.set("limit", "500");
     try {
@@ -2609,17 +2633,25 @@
     const f = state.filters || {};
     // 注意：loadQuotaArchivesGeneric 实际请求的是 /api/archives?domain_type=quota&...
     // （line 2156 直接 global.fetch，绕过 quota-api.js 的 QUOTA_API_BASE 前缀），
-    // 该端点（main.py:1217）签名是 search=，不接受 q=。quota_api.py:297
-    // 那个 /api/data-lake/quota/archives 才是 q=，但前端不走它。
-    // → 顶部搜索框发 search=，后端 archive_service._apply_archive_list_filters
-    // 对 search 做 title LIKE '%x%' / business_key LIKE '%x%' 过滤，按标题搜索 OK。
+    // 该端点（main.py:1217）签名是 search= + search_all=（2026-08-20 新增）。
+    //
+    // 顶部搜索框发 search_all=（AND-tokenized）：「四川 园林」→ [四川, 园林] →
+    // ?search_all=四川&search_all=园林 → 后端对每个 token 做
+    // (title LIKE OR business_key LIKE)，token 之间 AND，等价于「同时包含」。
+    // 单 token 行为不退化（只发一个同名参数也合法）。其他域继续走 search 单 substring，
+    // 不影响 app.js:8217 的 globalSearch。
     const params = {
-      search: f.q || undefined,
       primary: f.primary && f.primary !== "all" ? f.primary : undefined,
       edition_year: f.editionYear && f.editionYear !== "all" ? f.editionYear : undefined,
       edition_label: f.edition && f.edition !== "all" ? f.edition : undefined,
       discipline_code: f.discipline && f.discipline !== "all" ? f.discipline : undefined,
     };
+    // AND-tokenized search：按任意空白拆（split(/\s+/) 自动去前后空 + 合并连续空）
+    const q = (f.q || "").trim();
+    if (q) {
+      const tokens = q.split(/\s+/).filter(Boolean);
+      if (tokens.length > 0) params.search_all = tokens;
+    }
     if (f.secondary && f.secondary !== "all") {
       // v0.9.3: 清单规范 secondary 也用 "jurisdiction", 与建筑工程定额同走 jurisdiction_code
       if (f.primary === "construction_quota" || f.primary === "boq_standard") params.jurisdiction_code = f.secondary;

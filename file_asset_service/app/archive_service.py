@@ -854,6 +854,11 @@ def _apply_archive_list_filters(
     tenant_code: str | None = None,
     source_id: str | None = None,
     search: str | None = None,
+    # 2026-08-20: AND-tokenized search. quota 工作台专用（其他域继续走 search 单
+    # substring）。优先级高于 search：调用方只发一个，二者皆发时仅生效 search_all，
+    # 避免「单 substring AND 多 token」叠加成 0 命中。
+    # 每个 token 必须出现在 title 或 business_key 中，token 之间 AND。
+    search_all: list[str] | None = None,
 ):
     statement = statement.where(Archive.is_withdrawn.is_(False))
     if domain_type:
@@ -868,7 +873,15 @@ def _apply_archive_list_filters(
         statement = statement.where(Archive.tenant_code == tenant_code)
     if source_id:
         statement = statement.where(Archive.source_id == source_id)
-    if search:
+    if search_all:
+        for token in search_all:
+            if not token:
+                continue
+            pattern = f"%{token}%"
+            statement = statement.where(
+                or_(Archive.title.like(pattern), Archive.business_key.like(pattern))
+            )
+    elif search:
         pattern = f"%{search}%"
         statement = statement.where(or_(Archive.title.like(pattern), Archive.business_key.like(pattern)))
     return statement
@@ -884,6 +897,7 @@ def count_archives(
     tenant_code: str | None = None,
     source_id: str | None = None,
     search: str | None = None,
+    search_all: list[str] | None = None,
 ) -> int:
     _validate_archive_fields(domain_type=domain_type, channel_type=channel_type, status=status)
     statement = _apply_archive_list_filters(
@@ -895,6 +909,7 @@ def count_archives(
         tenant_code=tenant_code,
         source_id=source_id,
         search=search,
+        search_all=search_all,
     )
     return int(session.scalar(statement) or 0)
 
@@ -909,6 +924,7 @@ def list_archives(
     tenant_code: str | None = None,
     source_id: str | None = None,
     search: str | None = None,
+    search_all: list[str] | None = None,
     limit: int = 100,
     offset: int = 0,
     mirror: FileMirror | None = None,
@@ -925,6 +941,7 @@ def list_archives(
         tenant_code=tenant_code,
         source_id=source_id,
         search=search,
+        search_all=search_all,
     )
     # The archive list is a publication feed. Newest source publication must
     # lead, rather than the moment our crawler happened to ingest a record.

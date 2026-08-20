@@ -43,6 +43,7 @@ def _run_quota_filtered_listing(
     tenant_code: str | None,
     source_id: str | None,
     search: str | None,
+    search_all: list[str] | None,
     primary: str | None,
     jurisdiction_code: str | None,
     industry_sector_code: str | None,
@@ -94,7 +95,15 @@ def _run_quota_filtered_listing(
         base = base.where(Archive.tenant_code == tenant_code)
     if source_id:
         base = base.where(Archive.source_id == source_id)
-    if search:
+    if search_all:
+        for token in search_all:
+            if not token:
+                continue
+            pattern = f"%{token}%"
+            base = base.where(
+                or_(Archive.title.ilike(pattern), Archive.business_key.ilike(pattern))
+            )
+    elif search:
         pattern = f"%{search}%"
         base = base.where(
             or_(Archive.title.ilike(pattern), Archive.business_key.ilike(pattern))
@@ -135,7 +144,15 @@ def _run_quota_filtered_listing(
         count_stmt = count_stmt.where(Archive.tenant_code == tenant_code)
     if source_id:
         count_stmt = count_stmt.where(Archive.source_id == source_id)
-    if search:
+    if search_all:
+        for token in search_all:
+            if not token:
+                continue
+            pattern = f"%{token}%"
+            count_stmt = count_stmt.where(
+                or_(Archive.title.ilike(pattern), Archive.business_key.ilike(pattern))
+            )
+    elif search:
         pattern = f"%{search}%"
         count_stmt = count_stmt.where(
             or_(Archive.title.ilike(pattern), Archive.business_key.ilike(pattern))
@@ -1229,6 +1246,13 @@ def create_app(*, init_schema: bool = True) -> FastAPI:
             None,
             description="定额体系大类；与 quota_api /facets 同义：all|construction_quota|industry_quota|boq_standard (v0.9.2 起改用 book_category 单字段)",
         ),
+        # 2026-08-20: quota 工作台专用 AND-tokenized search (multi-value)。
+        # 前端把「四川 园林」按空白拆成 [四川, 园林] 发 ?search_all=四川&search_all=园林，
+        # 后端对每个 token 做 (title LIKE OR business_key LIKE)，token 间 AND。
+        # 仅 quota UI 使用，其他域继续走 search 单 substring 保留旧行为。
+        search_all: list[str] | None = Query(
+            None, description="AND-tokenized search; each token must match in (title OR business_key). quota 工作台专用。"
+        ),
         jurisdiction_code: str | None = Query(
             None,
             description="省级行政区划码（510000 / 440000 …）",
@@ -1274,6 +1298,7 @@ def create_app(*, init_schema: bool = True) -> FastAPI:
                     tenant_code=tenant_code,
                     source_id=source_id,
                     search=search,
+                    search_all=search_all,
                     primary=primary,
                     jurisdiction_code=jurisdiction_code,
                     industry_sector_code=industry_sector_code,
@@ -1299,6 +1324,7 @@ def create_app(*, init_schema: bool = True) -> FastAPI:
                 tenant_code=tenant_code,
                 source_id=source_id,
                 search=search,
+                search_all=search_all,
             )
             response.headers["X-Total-Count"] = str(total_count)
             response.headers["X-Limit"] = str(max(1, min(limit, 500)))
@@ -1312,6 +1338,7 @@ def create_app(*, init_schema: bool = True) -> FastAPI:
                 tenant_code=tenant_code,
                 source_id=source_id,
                 search=search,
+                search_all=search_all,
                 limit=limit,
                 offset=offset,
                 mirror=mirror,
