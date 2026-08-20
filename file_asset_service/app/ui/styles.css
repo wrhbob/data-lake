@@ -5843,9 +5843,10 @@ a.rail-button {
 }
 .quota-tooltip-archive-dot[data-variant="pending"]  { background: #475569; }
 .quota-tooltip-archive-dot[data-variant="parsing"]  { background: #1d4ed8; }
-/* review 用 --amber (fa8c16, 纯琥珀/黄色)，原 #b45309 在白底小圆点读起来偏橙红；
+/* review 用纯黄 #facc15 (yellow-400)，原 --amber (#fa8c16) 偏橙；
+   再之前 #b45309 (amber-700) 在白底小圆点读起来偏橙红 —— 都不够黄。
    失败用 #b91c1c 红，区分清楚。 */
-.quota-tooltip-archive-dot[data-variant="review"]   { background: var(--amber, #fa8c16); }
+.quota-tooltip-archive-dot[data-variant="review"]   { background: #facc15; }
 .quota-tooltip-archive-dot[data-variant="done"]     { background: #15803d; }
 .quota-tooltip-archive-dot[data-variant="failed"]   { background: #b91c1c; }
 .quota-tooltip-archive-name {
