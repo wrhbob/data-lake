@@ -1704,6 +1704,18 @@
   function render() {
     const shell = $("#quotaShell");
     if (!shell) return;
+    // 2026-08-20: focus 保留 — render() 用 shell.innerHTML 重建整 shell，原本 focused
+    // 的输入框（典型：顶部 #quotaSearch）会被新元素替换 → 丢光标，用户必须重新点击
+    // 搜索栏才能继续输入「2024」之类的连续字符。render 前捕获 activeElement.id +
+    // selectionStart/End，render 后按同 id 找回来 refocus。不在 shell 内的 modal 输入
+    // 不被这次 innerHTML 销毁，focus 自然保留。
+    const prevActive = document.activeElement;
+    const prevId = prevActive && prevActive.id ? prevActive.id : null;
+    const prevSelStart =
+      prevActive && typeof prevActive.selectionStart === "number" ? prevActive.selectionStart : null;
+    const prevSelEnd =
+      prevActive && typeof prevActive.selectionEnd === "number" ? prevActive.selectionEnd : null;
+
     // 预计算校验（用于 compose modal 内 field 级 inline 错误）
     try {
       if (state.compose && state.compose.open) {
@@ -1730,6 +1742,20 @@
     // 2026-08-17: 覆盖矩阵每次重渲染后都要重新绑 tooltip（事件委托已经挂在外层，但
     // matrix DOM 整体替换了。Tooltip 容器的创建只需一次，由 ensureCoverageTooltipNode 完成。
     bindCoverageTooltipEvents();
+
+    // 恢复 focus（仅在 focused 元素是带 id 的输入框时生效；普通 button / body 跳过）
+    if (prevId) {
+      const newActive = document.getElementById(prevId);
+      if (newActive && typeof newActive.focus === "function") {
+        try {
+          newActive.focus({ preventScroll: true });
+          if (prevSelStart !== null) newActive.selectionStart = prevSelStart;
+          if (prevSelEnd !== null) newActive.selectionEnd = prevSelEnd;
+        } catch (_e) {
+          // readonly / 不支持 selection 的元素（如 contenteditable 边界），吞掉异常
+        }
+      }
+    }
   }
 
   // ── 补录弹窗 ─────────────────────────────────────────────────────────
