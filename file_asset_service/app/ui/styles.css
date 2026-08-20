@@ -5841,7 +5841,8 @@ a.rail-button {
   border-radius: 50%;
   background: var(--muted);
 }
-.quota-tooltip-archive-dot[data-variant="pending"]  { background: #475569; }
+/* pending 用 #64748b (slate-500) 浅灰，原 #475569 (slate-600) 偏深。 */
+.quota-tooltip-archive-dot[data-variant="pending"]  { background: #64748b; }
 .quota-tooltip-archive-dot[data-variant="parsing"]  { background: #1d4ed8; }
 /* review 用纯黄 #facc15 (yellow-400)，原 --amber (#fa8c16) 偏橙；
    再之前 #b45309 (amber-700) 在白底小圆点读起来偏橙红 —— 都不够黄。
