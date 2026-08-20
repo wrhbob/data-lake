@@ -549,7 +549,7 @@
     return `
       <header class="quota-header">
         <div class="quota-header-titles">
-          <p class="eyebrow">Layer 0 · 清单定额档案台</p>
+          <p class="eyebrow">Layer 0 · Projection Archive</p>
           <h1>清单定额档案台</h1>
           <span class="quota-summary">
             ${statVal("systems")} 套资料体系 · ${statVal("archived")} 份已归档 · ${statVal("pendingRaw")} 份原件待归档
