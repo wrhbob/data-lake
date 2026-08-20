@@ -559,7 +559,7 @@
           ${debug}
           <label class="search-box">
             <i data-lucide="search"></i>
-            <input id="quotaSearch" type="search" placeholder="搜索资料体系、分册、标准/定额编号" autocomplete="off" />
+            <input id="quotaSearch" type="search" placeholder="搜索资料体系、分册、标准/定额编号" autocomplete="off" value="${escapeHtml(state.filters.q || "")}" />
           </label>
           <button class="icon-button" type="button" title="刷新" data-quota-action="refresh">
             <i data-lucide="rotate-ccw"></i>
@@ -2107,6 +2107,7 @@
   // 这层防御独立于 currentArchiveFilters()，无论上游怎么传都安全。
   const _ARCHIVE_FILTER_SCHEMA = Object.freeze({
     search: { kind: "string" },
+    q: { kind: "string" },                 // 顶部搜索框：与 quota_api.py:300 FastAPI Query 参数名对齐
     primary: { kind: "string" },
     jurisdiction_code: { kind: "string" },
     industry_sector_code: { kind: "string" },
@@ -2580,8 +2581,12 @@
   // ── 列表筛选参数构造 + 仅列表的轻量重载 ───────────────────────────────
   function currentArchiveFilters() {
     const f = state.filters || {};
-    // 2026-07-29 修复：键名对齐后端 /api/archives 接受的参数。
-    // 之前 q 是孤儿字段（后端用 search），chip 切换从不生效。现在传 search。
+    // 注意：loadQuotaArchivesGeneric 实际请求的是 /api/archives?domain_type=quota&...
+    // （line 2156 直接 global.fetch，绕过 quota-api.js 的 QUOTA_API_BASE 前缀），
+    // 该端点（main.py:1217）签名是 search=，不接受 q=。quota_api.py:297
+    // 那个 /api/data-lake/quota/archives 才是 q=，但前端不走它。
+    // → 顶部搜索框发 search=，后端 archive_service._apply_archive_list_filters
+    // 对 search 做 title LIKE '%x%' / business_key LIKE '%x%' 过滤，按标题搜索 OK。
     const params = {
       search: f.q || undefined,
       primary: f.primary && f.primary !== "all" ? f.primary : undefined,
@@ -3377,10 +3382,64 @@
   }
 
   // 表单字段变更
+  // ── 顶部 search 框：IME composition 感知 + 后台 fetch ───────────────────
+  // IME 合成期间如果 250ms 内停手（看候选词），debounce 触发 fetch，fetch 完成后的
+  // render() 会销毁 <input> 元素 → IME composition 直接断（候选词消失、合成的
+  // 拼音丢失）。所以加 composition 监听：合成期间只更新 state.filters.q、不触发
+  // fetch；fetch 完成后若用户正在合成也不 render()。这样 IME 全程不被打断。
+  let quotaSearchDebounceTimer = null;
+  let quotaSearchIsComposing = false;
+
+  function commitQuotaSearch() {
+    if (quotaSearchDebounceTimer) {
+      clearTimeout(quotaSearchDebounceTimer);
+      quotaSearchDebounceTimer = null;
+    }
+    quotaSearchDebounceTimer = setTimeout(() => {
+      quotaSearchDebounceTimer = null;
+      if (quotaSearchIsComposing) return; // 又开新一轮合成，跳过本次 fetch
+      if (!state.api || !state.flags.archives) return;
+      const params = currentArchiveFilters();
+      loadQuotaArchivesGeneric(params).then((result) => {
+        state.archives = result;
+        if (quotaSearchIsComposing) return; // fetch 期间用户又开始合成，跳过 render
+        render();
+      });
+    }, 250);
+  }
+
+  // composition 事件冒泡，挂到 document 上即可。
+  document.addEventListener("compositionstart", (e) => {
+    if (e.target && e.target.id === "quotaSearch") {
+      quotaSearchIsComposing = true;
+      // 进入合成：取消尚未触发的 debounce（合成期间由 compositionend 触发）
+      if (quotaSearchDebounceTimer) {
+        clearTimeout(quotaSearchDebounceTimer);
+        quotaSearchDebounceTimer = null;
+      }
+    }
+  });
+
+  document.addEventListener("compositionend", (e) => {
+    if (e.target && e.target.id === "quotaSearch") {
+      quotaSearchIsComposing = false;
+      state.filters.q = e.target.value;
+      commitQuotaSearch();
+    }
+  });
+
   function handleInput(event) {
     if (!state.active) return;
     const t = event.target;
     if (!t) return;
+
+    // ── 顶部 search 框（IME 感知 + debounce，不走 reloadArchives）──────────
+    if (t.id === "quotaSearch") {
+      state.filters.q = t.value;
+      if (quotaSearchIsComposing) return; // 等 compositionend 再触发
+      commitQuotaSearch();
+      return;
+    }
 
     // 删除 modal 内已无输入项；input/change 事件只在上传弹窗与 compose 弹窗触发
 
