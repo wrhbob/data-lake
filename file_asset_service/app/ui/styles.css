@@ -3840,7 +3840,8 @@ a.rail-button {
   flex: 1 1 auto;
   height: 100vh;
   overflow-y: auto;
-  padding: 20px 24px;
+  /* 2026-08-20 对齐 .app-shell padding(24/28/32)，消除左上角 4px 偏差 */
+  padding: 24px 28px 32px;
 }
 .quota-shell > * + * {
   margin-top: 14px;
